@@ -14,6 +14,8 @@
 #include "engine/TakePlan.h"
 #include "engine/CrashJournal.h"
 #include "engine/DeviceWatch.h"
+#include "engine/InsertMenu.h"
+#include "engine/StallWatch.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
@@ -444,6 +446,14 @@ void testGroupsFoldAndPalette()
     CHECK(items[1].channel == 0);
     CHECK(items[4].channel == 3);
     CHECK(items[5].channel == 4);
+
+    collapsed[0] = true;
+    const int hidden = youhost::layoutChannelStrips(8, membership, collapsed, items, 16);
+    CHECK(youhost::adjacentVisibleChannel(items, hidden, 4, 1) == 5);
+    CHECK(youhost::adjacentVisibleChannel(items, hidden, 5, 1) == 6);
+    CHECK(youhost::adjacentVisibleChannel(items, hidden, 4, -1) == -1);
+    CHECK(youhost::adjacentVisibleChannel(items, hidden, 7, 1) == -1);
+    CHECK(youhost::adjacentVisibleChannel(items, hidden, 0, 1) == -1);
 }
 
 void testPlaybackCopiesDryChannels()
@@ -607,6 +617,60 @@ void testTimelineZoom()
     CHECK(followed > 0);
     CHECK(5000 >= followed);
     CHECK(5000 < followed + 1000);
+
+    CHECK(youhost::fitSpanSamples(0, 48000.0) == 48000 * 60);
+    CHECK(youhost::fitSpanSamples(-5, 48000.0) == 48000 * 60);
+    const auto oneSecond = youhost::fitSpanSamples(48000, 48000.0);
+    CHECK(oneSecond - 48000 == 24000);
+    CHECK(oneSecond < 48000 * 30);
+    const auto longTake = static_cast<std::int64_t>(48000) * 100;
+    CHECK(youhost::fitSpanSamples(longTake, 48000.0) - longTake >= longTake / 50);
+
+    float x1 = 0.0f;
+    float x2 = 0.0f;
+    youhost::timelineRegionPixels(0.0f, 1000.0f, 0, 48000 * 60, 0, 48000 * 2, x1, x2);
+    CHECK(x2 - x1 > 30.0f);
+    CHECK(x2 - x1 < 40.0f);
+    CHECK(x2 < 1000.0f);
+}
+
+void testInsertMenuAndStall()
+{
+    CHECK(! youhost::beatIsStale(100, 0, youhost::kStallLimitNs));
+    CHECK(! youhost::beatIsStale(100, 100, youhost::kStallLimitNs));
+    CHECK(! youhost::beatIsStale(youhost::kStallLimitNs, 1, youhost::kStallLimitNs));
+    CHECK(youhost::beatIsStale(youhost::kStallLimitNs + 2, 1, youhost::kStallLimitNs));
+    CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
+
+    std::vector<youhost::CatalogPlugin> plugins {
+        { "Pro-Q 3", "FabFilter", "AudioUnit" },
+        { "Pro-Q 3", "FabFilter", "VST3" },
+        { "De-Feedback", "Alpha Labs", "AudioUnit" },
+        { "Saturn 2", "FabFilter", "VST3" }
+    };
+    const auto all = youhost::groupInsertPlugins(plugins, "");
+    CHECK(all.size() == 2);
+    CHECK(all[0].manufacturer == "Alpha Labs");
+    CHECK(all[0].plugins.size() == 1);
+    CHECK(all[0].plugins[0].label.find("AU") == std::string::npos);
+    CHECK(all[1].manufacturer == "FabFilter");
+    CHECK(all[1].plugins.size() == 3);
+    CHECK(all[1].plugins[0].label.find("Pro-Q 3") != std::string::npos);
+    CHECK(all[1].plugins[0].label.find("AU") != std::string::npos);
+    CHECK(all[1].plugins[1].label.find("VST3") != std::string::npos);
+    CHECK(all[1].plugins[2].label.find("Saturn") != std::string::npos);
+
+    const auto fab = youhost::groupInsertPlugins(plugins, "FAB");
+    CHECK(fab.size() == 1);
+    CHECK(fab[0].plugins.size() == 3);
+    const auto proq = youhost::groupInsertPlugins(plugins, "pro q");
+    CHECK(proq.size() == 1);
+    CHECK(proq[0].plugins.size() == 2);
+
+    std::vector<youhost::CatalogPlugin> unknown { { "Thing", "  ", "VST3" } };
+    const auto grouped = youhost::groupInsertPlugins(unknown, "");
+    CHECK(grouped.size() == 1);
+    CHECK(grouped[0].manufacturer == "Unknown");
 }
 
 void testCrashJournal()
@@ -683,6 +747,7 @@ int main()
     testDropoutWindow();
     testSessionLayout();
     testTimelineZoom();
+    testInsertMenuAndStall();
     testCrashJournal();
     testDeviceWatch();
     testMergePeaks();

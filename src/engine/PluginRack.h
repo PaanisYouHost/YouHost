@@ -38,6 +38,33 @@ struct ChannelSnapshot
     std::array<SlotSnapshot, kSlotsPerChannel> slots {};
 };
 
+// Message thread sets pause before it calls into a plugin. The audio thread
+// sees pause and skips that plugin instead of waiting. depth counts threads
+// currently inside processBlock so the message thread can wait until they leave.
+struct PluginGate
+{
+    std::atomic<int> depth { 0 };
+    std::atomic<int> pause { 0 };
+    std::atomic<std::uint64_t> cpuNs { 0 };
+    std::atomic<std::uint32_t> blocks { 0 };
+};
+
+struct DspLoadLine
+{
+    int channel = 0;
+    int slot = 0;
+    float percent = 0.0f;
+    char name[40] {};
+};
+
+struct DspLoad
+{
+    float callbackPercent = 0.0f;
+    float pluginPercent = 0.0f;
+    int count = 0;
+    std::array<DspLoadLine, 8> lines {};
+};
+
 // Four in-process slots per channel. The audio thread only reads a published
 // graph of raw processors and never takes a lock. A later sandbox can publish
 // the same graph shape.
@@ -57,7 +84,8 @@ public:
                  const Routing& routing,
                  std::uint64_t enabledLow,
                  std::uint64_t enabledHigh);
-    void prepare(double sampleRate, int blockSize, const Routing& routing);
+    void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
+    DspLoad dspLoad() const;
     void deviceStopped();
     void updateRouting(const Routing& routing);
 
@@ -93,10 +121,12 @@ public:
 private:
     struct EditorWindow;
     struct LiveGraph;
+    struct RealtimePool;
 
     struct HostedPlugin
     {
         std::shared_ptr<juce::AudioPluginInstance> instance;
+        std::shared_ptr<PluginGate> gate = std::make_shared<PluginGate>();
         juce::PluginDescription description;
         juce::MemoryBlock state;
         bool bypassed = false;
@@ -130,11 +160,17 @@ private:
     void publishUnlocked();
     void reapUnlocked();
     std::unique_ptr<LiveGraph> buildGraph();
+    void refreshLatency();
+    bool pauseGate(PluginGate& gate);
+    void resumeGate(PluginGate& gate) noexcept;
+    void processJob(int index);
+    void processOneChannel(LiveGraph& graph, int channel, float* output, int numSamples);
+    void rememberActiveNames();
+    bool waitUntilOutsideCallback();
     std::vector<std::shared_ptr<juce::AudioPluginInstance>> collectInstances() const;
     void closeEditor(int channel, int slot);
     void closeAllEditors();
     void notifyDirty();
-    void waitUntilOutsideCallback();
     bool isBlocked(const juce::PluginDescription& description) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
     bool validSlot(int channel, int slot) const noexcept;
@@ -169,6 +205,17 @@ private:
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
     std::atomic<bool> capturing_ { false };
+    std::atomic<std::uint64_t> lastCallbackNs_ { 0 };
+
+    std::unique_ptr<RealtimePool> pool_;
+    juce::AudioWorkgroup workgroup_;
+    juce::WorkgroupToken audioToken_;
+    bool audioJoined_ = false;
+    int jobChannels_[kMaxChannels] {};
+    float* jobOutputs_[kMaxChannels] {};
+    LiveGraph* jobGraph_ = nullptr;
+    int jobSamples_ = 0;
+    int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};
 
     std::array<std::array<std::unique_ptr<EditorWindow>, kSlotsPerChannel>, kMaxChannels> editors_ {};
     juce::StringArray blocked_;

@@ -111,4 +111,32 @@ inline int layoutChannelStrips(int channelCount,
     return written;
 }
 
+// Next or previous channel strip in display order. Group headers are skipped,
+// and channels hidden by a folded group are not in the list. -1 at either end.
+inline int adjacentVisibleChannel(const StripItem* strips, int count, int current, int direction) noexcept
+{
+    if (strips == nullptr || count <= 0 || direction == 0 || current < 0)
+        return -1;
+
+    int found = -1;
+    for (int index = 0; index < count; ++index)
+    {
+        if (strips[index].kind == StripKind::channel && strips[index].channel == current)
+        {
+            found = index;
+            break;
+        }
+    }
+    if (found < 0)
+        return -1;
+
+    const int step = direction > 0 ? 1 : -1;
+    for (int index = found + step; index >= 0 && index < count; index += step)
+    {
+        if (strips[index].kind == StripKind::channel && strips[index].channel >= 0)
+            return strips[index].channel;
+    }
+    return -1;
+}
+
 } // namespace youhost

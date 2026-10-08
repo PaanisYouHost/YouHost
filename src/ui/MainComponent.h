@@ -43,6 +43,7 @@ private:
     void showPage(int page);
     void toggleScanner();
     void toggleDropouts();
+    void toggleLatency();
     void openSession();
     void saveSession();
     void saveSessionAs();

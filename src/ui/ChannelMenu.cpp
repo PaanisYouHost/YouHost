@@ -62,7 +62,10 @@ int sharedGroup(const AudioEngine& engine, const std::vector<int>& channels)
 
 } // namespace
 
-void showChannelMenu(AudioEngine& engine, juce::Component& target, int channel)
+void showChannelMenu(AudioEngine& engine,
+                     juce::Component& target,
+                     int channel,
+                     std::function<void(int)> beginRename)
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
@@ -89,15 +92,18 @@ void showChannelMenu(AudioEngine& engine, juce::Component& target, int channel)
     menu.addSubMenu("Group", groups);
 
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&target),
-                       [&engine, channels](int result)
+                       [&engine, channels, beginRename = std::move(beginRename)](int result)
                        {
                            if (result == 300 && channels.size() == 1)
                            {
                                const int chosen = channels.front();
-                               renameWithPrompt("Rename channel " + juce::String(chosen + 1),
-                                                "The name is shown on the channel and used in the WAV file name.",
-                                                engine.channelName(chosen),
-                                                [&engine, chosen](juce::String name) { engine.setChannelName(chosen, name); });
+                               if (beginRename != nullptr)
+                                   beginRename(chosen);
+                               else
+                                   renameWithPrompt("Rename channel " + juce::String(chosen + 1),
+                                                    "The name is shown on the channel and used in the WAV file name.",
+                                                    engine.channelName(chosen),
+                                                    [&engine, chosen](juce::String name) { engine.setChannelName(chosen, name); });
                            }
                            else if (result == 1)
                            {

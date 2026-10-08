@@ -55,6 +55,7 @@ public:
     {
         engine_.drainDropoutLog();
         snapshot_ = engine_.dropoutSnapshot();
+        loadText_ = engine_.dspLoadText();
         repaint();
     }
 
@@ -96,7 +97,16 @@ public:
                           juce::Justification::centredLeft, false);
         graphics.drawText(juce::String(inWindow) + " in this view", facts, juce::Justification::centredLeft, false);
 
-        area.removeFromTop(8.0f);
+        area.removeFromTop(6.0f);
+        if (loadText_.isNotEmpty())
+        {
+            auto dsp = area.removeFromTop(58.0f);
+            graphics.setColour(theme::text);
+            graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
+            graphics.drawFittedText(loadText_, dsp.toNearestInt(), juce::Justification::topLeft, 4);
+            area.removeFromTop(4.0f);
+        }
+        area.removeFromTop(4.0f);
         auto plot = area;
         graphics.setColour(theme::panel);
         graphics.fillRoundedRectangle(plot, 8.0f);
@@ -170,6 +180,7 @@ private:
     juce::ComboBox rangeBox_;
     juce::TextButton resetButton_;
     DropoutSnapshot snapshot_;
+    juce::String loadText_;
 };
 
 DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)

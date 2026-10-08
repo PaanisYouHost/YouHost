@@ -8,6 +8,7 @@
 
 #include <array>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace youhost
@@ -54,6 +55,7 @@ struct MeterHit
     bool header = false;
     bool clip = false;
     bool record = false;
+    bool name = false;
 };
 
 class MeterScaleRail : public juce::Component
@@ -72,6 +74,7 @@ class MeterGrid : public juce::Component
 {
 public:
     MeterGrid();
+    ~MeterGrid() override;
 
     void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb);
     void setFitWidth(int viewportWidth);
@@ -85,13 +88,23 @@ public:
     void setGroupMenuHandler(std::function<void(int group)> handler);
     void setGroupRenameHandler(std::function<void(int group)> handler);
     void setSelectHandler(std::function<void(int channel, bool extend)> handler);
+    void setNameCommitHandler(std::function<void(int channel, juce::String name)> handler);
+    void setNameStepHandler(std::function<int(int channel, int direction)> handler);
+    void beginNameEdit(int channel);
 
     void paint(juce::Graphics& graphics) override;
     void mouseDown(const juce::MouseEvent& event) override;
 
 private:
+    struct NameKeys;
+    std::unique_ptr<NameKeys> nameKeys_;
     BridgeMetrics metricsFor(int viewportWidth) const;
     MeterHit hitAt(juce::Point<float> position) const;
+    void refreshMetrics();
+    void ensureEditor();
+    void placeNameEditor(bool reveal);
+    void finishNameEdit(bool commit);
+    bool handleNameKey(const juce::KeyPress& key);
 
     std::vector<BridgeCell> cells_;
     bool showPeak_ = false;
@@ -104,6 +117,10 @@ private:
     std::function<void(int)> onGroupMenu_;
     std::function<void(int)> onGroupRename_;
     std::function<void(int, bool)> onSelect_;
+    std::function<void(int, juce::String)> onNameCommit_;
+    std::function<int(int, int)> onNameStep_;
+    std::unique_ptr<juce::TextEditor> editor_;
+    int editingChannel_ = -1;
     BridgeMetrics metrics_ {};
 };
 

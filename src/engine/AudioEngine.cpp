@@ -5,11 +5,18 @@
 #include "MeterScale.h"
 #include "SessionDocument.h"
 #include "SessionFiles.h"
+#include "StallWatch.h"
 #include "TakeImport.h"
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <cstring>
 #include <vector>
+
+#include <execinfo.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if JUCE_MAC
  #include <CoreAudio/AudioHardware.h>
@@ -26,6 +33,119 @@ int64_t steadyNowNs()
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
+
+std::atomic<int> stallDumpFd { -1 };
+std::atomic<std::int64_t> stallLoggedNs { 0 };
+
+void stallStackHandler(int)
+{
+    void* frames[32];
+    const int count = ::backtrace(frames, 32);
+    const int fd = stallDumpFd.load(std::memory_order_relaxed);
+    if (fd >= 0 && count > 0)
+        ::backtrace_symbols_fd(frames, count, fd);
+}
+
+void installStallHandler()
+{
+    static std::atomic<int> once { 0 };
+    if (once.exchange(1, std::memory_order_relaxed) != 0)
+        return;
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = stallStackHandler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    sigaction(SIGUSR2, &action, nullptr);
+}
+
+void noteMessageBeat()
+{
+    auto& clock = StallClock::get();
+    clock.noteThread(clock.messageThread);
+    clock.messageNs.store(steadyNowNs(), std::memory_order_relaxed);
+    if (clock.messagePhase.load(std::memory_order_relaxed) == kPhaseIdle)
+        clock.messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
+}
+
+class StallThread : public juce::Thread
+{
+public:
+    explicit StallThread(AppSettings& settings)
+        : juce::Thread("youhost-watch"),
+          settings_(settings)
+    {
+    }
+
+    void run() override
+    {
+        installStallHandler();
+        while (! threadShouldExit())
+        {
+            wait(500);
+            if (threadShouldExit())
+                return;
+            logIfStalled();
+        }
+    }
+
+private:
+    void logIfStalled()
+    {
+        auto& clock = StallClock::get();
+        const auto now = steadyNowNs();
+        const auto messageBeat = clock.messageNs.load(std::memory_order_relaxed);
+        const auto audioBeat = clock.audioNs.load(std::memory_order_relaxed);
+        const bool message = beatIsStale(now, messageBeat, kStallLimitNs);
+        const bool audio = clock.audioLive.load(std::memory_order_relaxed) != 0
+                           && beatIsStale(now, audioBeat, kStallLimitNs);
+        if (! message && ! audio)
+            return;
+        const auto previous = stallLoggedNs.load(std::memory_order_relaxed);
+        if (previous > 0 && now - previous < 10000000000LL)
+            return;
+        stallLoggedNs.store(now, std::memory_order_relaxed);
+
+        char names[160] {};
+        clock.copyNames(names, sizeof(names));
+        juce::String line = "stall";
+        if (message)
+            line += " message " + juce::String(static_cast<std::int64_t>((now - messageBeat) / 1000000))
+                    + " ms phase=" + stallPhaseName(clock.messagePhase.load(std::memory_order_relaxed));
+        if (audio)
+            line += " audio " + juce::String(static_cast<std::int64_t>((now - audioBeat) / 1000000))
+                    + " ms phase=" + stallPhaseName(clock.audioPhase.load(std::memory_order_relaxed));
+        line += " plugins=" + juce::String(clock.activePlugins.load(std::memory_order_relaxed));
+        if (names[0] != '\0')
+            line += " " + juce::String(names);
+        appendHostLog(settings_, line);
+
+        const auto file = hostLogFile(settings_);
+        const int fd = ::open(file.getFullPathName().toRawUTF8(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd < 0)
+            return;
+        stallDumpFd.store(fd, std::memory_order_relaxed);
+        auto dump = [&](std::uintptr_t bits, const char* header)
+        {
+            if (bits == 0)
+                return;
+            pthread_t thread {};
+            std::memcpy(&thread, &bits, sizeof(thread));
+            if (::write(fd, header, std::strlen(header)) < 0)
+                return;
+            pthread_kill(thread, SIGUSR2);
+            juce::Thread::sleep(40);
+        };
+        if (message)
+            dump(clock.messageThread.load(std::memory_order_acquire), "\nmessage stack\n");
+        if (audio)
+            dump(clock.audioThread.load(std::memory_order_acquire), "\naudio stack\n");
+        stallDumpFd.store(-1, std::memory_order_relaxed);
+        ::close(fd);
+    }
+
+    AppSettings& settings_;
+};
 
 #if JUCE_MAC
 OSStatus overloadListener(AudioObjectID,
@@ -109,10 +229,18 @@ AudioEngine::AudioEngine(AppSettings& settings)
     for (int channel = 0; channel < kMaxChannels; ++channel)
         playbackPtrs_[static_cast<std::size_t>(channel)] = playbackScratch_.data()
                                                            + static_cast<std::size_t>(channel * playbackMax_);
+    noteMessageBeat();
+    stallThread_ = std::make_unique<StallThread>(settings_);
+    stallThread_->startThread();
 }
 
 AudioEngine::~AudioEngine()
 {
+    if (stallThread_ != nullptr)
+    {
+        stallThread_->stopThread(1000);
+        stallThread_.reset();
+    }
     prepareForQuit();
     recorder_.reset();
     rack_.reset();
@@ -163,6 +291,8 @@ void AudioEngine::pollDeviceStats()
     if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
         if (! messages->isThisTheMessageThread())
             return;
+
+    noteMessageBeat();
 
     if (deviceError_.exchange(false, std::memory_order_relaxed))
         openError_ = "The audio device reported an error.";
@@ -421,6 +551,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     juce::ignoreUnused(context);
 
     const int64_t startedNs = steadyNowNs();
+    {
+        auto& clock = StallClock::get();
+        clock.noteThread(clock.audioThread);
+        clock.audioLive.store(1, std::memory_order_relaxed);
+        clock.audioNs.store(startedNs, std::memory_order_relaxed);
+        clock.audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
+    }
     const int slot = configIndex_.load(std::memory_order_acquire);
     const AudioThreadConfig& config = configs_[static_cast<std::size_t>(slot)];
 
@@ -483,7 +620,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     if (recorder_ != nullptr)
         recorder_->noteCallback();
 
-    noteDropout(dropoutOverrunCount(steadyNowNs() - startedNs, config.expectedPeriodNs));
+    const auto finishedNs = steadyNowNs();
+    StallClock::get().audioNs.store(finishedNs, std::memory_order_relaxed);
+    noteDropout(dropoutOverrunCount(finishedNs - startedNs, config.expectedPeriodNs));
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
@@ -509,6 +648,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
 void AudioEngine::audioDeviceStopped()
 {
     deviceOpen_.store(false, std::memory_order_relaxed);
+    StallClock::get().audioLive.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
     if (recorder_ != nullptr)
         recorder_->setCallbacksLive(false);
@@ -630,7 +770,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         if (recorder_ != nullptr)
             recorder_->setDevice(rate, true);
         if (rack_ != nullptr)
-            rack_->prepare(rate, buffer > 0 ? buffer : 512, currentConfig().routing);
+            rack_->prepare(rate, buffer > 0 ? buffer : 512, currentConfig().routing, device.getWorkgroup());
         preparedRate_ = rate;
         preparedBuffer_ = buffer;
         installOverloadListener(device.getName());
@@ -873,6 +1013,33 @@ void AudioEngine::notePluginTrace(int channel,
                   phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name);
 }
 
+juce::String AudioEngine::dspLoadText() const
+{
+    if (rack_ == nullptr)
+        return "DSP callback 0%   plugin CPU 0%";
+
+    const auto load = rack_->dspLoad();
+    auto lines = load.lines;
+    const int count = std::clamp(load.count, 0, static_cast<int>(lines.size()));
+    std::sort(lines.begin(), lines.begin() + count, [](const DspLoadLine& left, const DspLoadLine& right)
+    {
+        return left.percent > right.percent;
+    });
+
+    const auto percent = [](float value)
+    {
+        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 9999.0f)));
+    };
+
+    juce::String text = "DSP callback " + percent(load.callbackPercent) + "%   plugin CPU " + percent(load.pluginPercent) + "%";
+    for (int index = 0; index < count; ++index)
+    {
+        const auto& line = lines[static_cast<std::size_t>(index)];
+        text << "\nch " << line.channel << "  " << juce::String(line.name) << "  " << percent(line.percent) << "%";
+    }
+    return text;
+}
+
 void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const
 {
     if (fn == nullptr || recorder_ == nullptr)
@@ -957,6 +1124,7 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
                 return;
 
             TimelineRegionView region;
+            region.number = take.number;
             region.start = take.start;
             region.length = take.length;
             if (description.members.size() == 1)

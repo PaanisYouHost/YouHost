@@ -96,9 +96,11 @@ void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeVie
     const std::lock_guard<std::mutex> lock(stateLock_);
     std::vector<RecordedTakeView> views;
     views.reserve(takes_.size());
+    int number = 1;
     for (const auto& take : takes_)
     {
         RecordedTakeView view;
+        view.number = number++;
         view.start = take.start;
         view.length = take.length;
         for (int channel = 0; channel < kMaxChannels; ++channel)
@@ -117,6 +119,7 @@ void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeVie
                                      audioSamples_.load(std::memory_order_relaxed));
     if (mode_.load(std::memory_order_relaxed) == static_cast<int>(TransportMode::recording) && liveLength > 0)
     {
+        live.number = number;
         live.start = takeStart_.load(std::memory_order_relaxed);
         live.length = liveLength;
         for (int channel = 0; channel < kMaxChannels; ++channel)

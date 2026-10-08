@@ -157,6 +157,7 @@ public:
     void acceptCrashChoice(bool leaveOff);
     void prepareForQuit();
     void visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const;
+    juce::String dspLoadText() const;
 
 private:
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -272,6 +273,7 @@ private:
     juce::BigInteger lastInputMask_;
     juce::BigInteger lastOutputMask_;
     CrashJournal journal_;
+    std::unique_ptr<juce::Thread> stallThread_;
 };
 
 } // namespace youhost

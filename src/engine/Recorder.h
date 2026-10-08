@@ -33,6 +33,7 @@ struct TakeDraw
 
 struct RecordedTakeView
 {
+    int number = 0;
     std::int64_t start = 0;
     std::int64_t length = 0;
     std::array<const std::vector<WavePeak>*, kMaxChannels> peaks {};

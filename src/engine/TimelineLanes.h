@@ -38,10 +38,55 @@ struct TimelinePicture
 // Pointers are valid only for the duration of the visit that produced them.
 struct TimelineRegionView
 {
+    int number = 0;
     std::int64_t start = 0;
     std::int64_t length = 0;
     const std::vector<WavePeak>* peaks = nullptr;
 };
+
+struct TakeMark
+{
+    int number = 0;
+    std::int64_t start = 0;
+};
+
+inline void rememberTakeMark(std::vector<TakeMark>& marks, int number, std::int64_t start)
+{
+    if (number < 1)
+        return;
+    for (const auto& mark : marks)
+        if (mark.number == number)
+            return;
+    marks.push_back(TakeMark { number, std::max<std::int64_t>(0, start) });
+}
+
+inline float timelineSampleToX(float origin, float width, std::int64_t viewStart, std::int64_t visible, std::int64_t sample) noexcept
+{
+    if (visible < 1)
+        visible = 1;
+    if (width < 1.0f)
+        width = 1.0f;
+    const double ratio = static_cast<double>(sample - viewStart) / static_cast<double>(visible);
+    return origin + static_cast<float>(ratio) * width;
+}
+
+// Pixel span of one take inside the visible view. A short take stays short.
+inline void timelineRegionPixels(float origin,
+                                 float width,
+                                 std::int64_t viewStart,
+                                 std::int64_t visible,
+                                 std::int64_t start,
+                                 std::int64_t length,
+                                 float& x1,
+                                 float& x2) noexcept
+{
+    if (length < 1)
+        length = 1;
+    x1 = timelineSampleToX(origin, width, viewStart, visible, start);
+    x2 = timelineSampleToX(origin, width, viewStart, visible, start + length);
+    if (x2 < x1 + 1.0f)
+        x2 = x1 + 1.0f;
+}
 
 struct TimelineLaneView
 {

@@ -2,10 +2,17 @@
 #include "AppSettings.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
+#include "StallWatch.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <tuple>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 
 namespace youhost
 {
@@ -82,22 +89,182 @@ struct PluginRack::LiveGraph
     struct Slot
     {
         juce::AudioPluginInstance* instance = nullptr;
+        PluginGate* gate = nullptr;
         int processChannels = 1;
         bool prepared = false;
     };
 
-    static constexpr int kScratchCap = 8;
+    static constexpr int kScratchCap = 2;
 
     Slot slots[kMaxChannels][kSlotsPerChannel] {};
     std::array<int, kMaxChannels> delayLength {};
     std::array<int, kMaxChannels> delayWrite {};
     std::array<std::vector<float>, kMaxChannels> delay {};
     std::vector<float> scratch;
-    std::array<float*, kScratchCap> scratchPtrs {};
-    int scratchChannels = 1;
-    juce::MidiBuffer midi;
+    std::array<std::array<float*, kScratchCap>, kMaxChannels> scratchPtrs {};
+    std::array<juce::MidiBuffer, kMaxChannels> midi {};
     int maxBlock = 0;
     std::vector<std::shared_ptr<HostedPlugin>> keepAlive;
+};
+
+namespace
+{
+
+std::uint64_t steadyNs() noexcept
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+int dspWorkerCount()
+{
+    int cores = juce::SystemStats::getNumPhysicalCpus();
+#if defined(__APPLE__)
+    int performance = 0;
+    auto length = sizeof(performance);
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &performance, &length, nullptr, 0) == 0 && performance > 0)
+        cores = performance;
+#endif
+    if (cores < 1)
+        cores = 1;
+    return std::clamp(cores - 1, 0, 7);
+}
+
+} // namespace
+
+struct PluginRack::RealtimePool
+{
+    class Worker : public juce::Thread
+    {
+    public:
+        Worker(RealtimePool& pool, int index)
+            : juce::Thread("youhost-dsp"),
+              pool_(pool),
+              index_(index)
+        {
+        }
+
+        void run() override
+        {
+            pool_.runWorker(index_);
+        }
+
+        RealtimePool& pool_;
+        int index_ = 0;
+    };
+
+    explicit RealtimePool(int workersIn)
+    {
+        const int workers = std::clamp(workersIn, 0, 7);
+        threads_.reserve(static_cast<std::size_t>(workers));
+        for (int index = 0; index < workers; ++index)
+        {
+            auto worker = std::make_unique<Worker>(*this, index);
+            const auto options = juce::Thread::RealtimeOptions {}.withApproximateAudioProcessingTime(128, 48000.0);
+            if (! worker->startRealtimeThread(options))
+                worker->startThread();
+            threads_.push_back(std::move(worker));
+        }
+    }
+
+    ~RealtimePool()
+    {
+        stop();
+    }
+
+    void stop()
+    {
+        if (stopped_)
+            return;
+        stopped_ = true;
+        stop_.store(true, std::memory_order_release);
+        for (auto& wake : wakes_)
+            wake.signal();
+        for (auto& thread : threads_)
+        {
+            if (thread != nullptr)
+                thread->stopThread(200);
+        }
+    }
+
+    bool running() const noexcept
+    {
+        for (const auto& thread : threads_)
+            if (thread != nullptr && thread->isThreadRunning())
+                return true;
+        return false;
+    }
+
+    void parallel(int count, PluginRack* rack)
+    {
+        if (count <= 0 || rack == nullptr)
+            return;
+        if (count == 1 || threads_.empty() || stop_.load(std::memory_order_acquire))
+        {
+            for (int index = 0; index < count; ++index)
+                rack->processJob(index);
+            return;
+        }
+
+        const int helpers = std::min(static_cast<int>(threads_.size()), count - 1);
+        rack_ = rack;
+        count_ = count;
+        cursor_.store(0, std::memory_order_relaxed);
+        done_.reset();
+        left_.store(helpers + 1, std::memory_order_release);
+        for (int index = 0; index < helpers; ++index)
+            wakes_[static_cast<std::size_t>(index)].signal();
+
+        for (;;)
+        {
+            const int index = cursor_.fetch_add(1, std::memory_order_acq_rel);
+            if (index >= count)
+                break;
+            rack->processJob(index);
+        }
+
+        if (left_.fetch_sub(1, std::memory_order_acq_rel) != 1)
+            done_.wait();
+    }
+
+    void runWorker(int index)
+    {
+        juce::WorkgroupToken token;
+        while (! stop_.load(std::memory_order_acquire))
+        {
+            wakes_[static_cast<std::size_t>(index)].wait();
+            if (stop_.load(std::memory_order_acquire))
+                break;
+            auto* rack = rack_;
+            if (rack == nullptr)
+            {
+                if (left_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    done_.signal();
+                continue;
+            }
+            rack->workgroup_.join(token);
+            juce::ScopedNoDenormals noDenormals;
+            for (;;)
+            {
+                const int job = cursor_.fetch_add(1, std::memory_order_acq_rel);
+                if (job >= count_)
+                    break;
+                rack->processJob(job);
+            }
+            if (left_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                done_.signal();
+        }
+    }
+
+    std::vector<std::unique_ptr<Worker>> threads_;
+    std::array<juce::WaitableEvent, 7> wakes_;
+    juce::WaitableEvent done_;
+    std::atomic<int> cursor_ { 0 };
+    std::atomic<int> left_ { 0 };
+    std::atomic<bool> stop_ { false };
+    int count_ = 0;
+    PluginRack* rack_ = nullptr;
+    bool stopped_ = false;
 };
 
 static juce::String editorWindowKey(const juce::PluginDescription& description)
@@ -146,6 +313,7 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
       settings_(settings)
 {
     audible_.fill(true);
+    pool_ = std::make_unique<RealtimePool>(dspWorkerCount());
     startTimerHz(5);
 }
 
@@ -157,11 +325,11 @@ PluginRack::~PluginRack()
 void PluginRack::timerCallback()
 {
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
+    if (latencyDirty_.exchange(false, std::memory_order_relaxed))
+        refreshLatency();
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         reapUnlocked();
-        if (latencyDirty_.exchange(false, std::memory_order_relaxed))
-            publishUnlocked();
     }
     if (stateChanged)
         notifyDirty();
@@ -188,6 +356,8 @@ void PluginRack::process(float* const* outputs,
                          std::uint64_t enabledLow,
                          std::uint64_t enabledHigh)
 {
+    StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
+    const auto started = steadyNs();
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
     auto* graph = published_.load(std::memory_order_acquire);
     inUse_.store(graph, std::memory_order_release);
@@ -195,6 +365,15 @@ void PluginRack::process(float* const* outputs,
     const bool blocked = blockProcessing_.load(std::memory_order_acquire);
     if (graph != nullptr && ! blocked && outputs != nullptr && numSamples > 0)
     {
+        if (! audioJoined_)
+        {
+            workgroup_.join(audioToken_);
+            audioJoined_ = static_cast<bool>(workgroup_);
+        }
+
+        jobGraph_ = graph;
+        jobSamples_ = numSamples;
+        int count = 0;
         for (int channel = 0; channel < kMaxChannels; ++channel)
         {
             const int packed = routing.outputPacked[static_cast<std::size_t>(channel)];
@@ -203,70 +382,242 @@ void PluginRack::process(float* const* outputs,
             float* output = outputs[packed];
             if (output == nullptr)
                 continue;
-
-            // Off: the passthrough already wrote silence. Skip the plugins and the
-            // delay line so a parked channel does not cost CPU or play stale audio.
             if (! channelIsOn(enabledLow, enabledHigh, channel))
                 continue;
 
             bool anyPlugin = false;
             for (int slot = 0; slot < kSlotsPerChannel; ++slot)
                 anyPlugin = anyPlugin || graph->slots[channel][slot].instance != nullptr;
+            const bool delayed = graph->delayLength[static_cast<std::size_t>(channel)] > 0;
+            if (! anyPlugin && ! delayed)
+                continue;
 
-            // No plugin: the passthrough copy stays. That is the dry virtual-soundcheck
-            // path, and the delay below still lines it up with the processed channels.
-            if (anyPlugin && numSamples <= graph->maxBlock && graph->scratchChannels > 0)
-            {
-                for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-                {
-                    const auto& live = graph->slots[channel][slot];
-                    auto* instance = live.instance;
-                    const int width = live.processChannels;
-                    if (instance == nullptr || ! live.prepared || width < 1 || width > graph->scratchChannels)
-                        continue;
-
-                    float* pointers[LiveGraph::kScratchCap];
-                    for (int index = 0; index < width; ++index)
-                    {
-                        pointers[index] = graph->scratchPtrs[static_cast<std::size_t>(index)];
-                        if (pointers[index] == nullptr)
-                            continue;
-                        juce::FloatVectorOperations::copy(pointers[index], output, numSamples);
-                    }
-                    bool pointersReady = true;
-                    for (int index = 0; index < width; ++index)
-                        pointersReady = pointersReady && pointers[index] != nullptr;
-                    if (! pointersReady)
-                        continue;
-
-                    juce::AudioBuffer<float> view(pointers, width, numSamples);
-                    graph->midi.clear();
-                    instance->processBlock(view, graph->midi);
-                    juce::FloatVectorOperations::copy(output, pointers[0], numSamples);
-                }
-            }
-
-            auto& line = graph->delay[static_cast<std::size_t>(channel)];
-            const int length = graph->delayLength[static_cast<std::size_t>(channel)];
-            if (length > 0 && static_cast<int>(line.size()) >= length)
-                delayInPlace(line.data(),
-                             length,
-                             graph->delayWrite[static_cast<std::size_t>(channel)],
-                             output,
-                             numSamples);
+            jobChannels_[count] = channel;
+            jobOutputs_[count] = output;
+            ++count;
         }
+
+        if (count > 0 && pool_ != nullptr)
+            pool_->parallel(count, this);
+        else
+            for (int index = 0; index < count; ++index)
+                processJob(index);
     }
 
     inUse_.store(nullptr, std::memory_order_release);
     callbackEpoch_.fetch_add(1, std::memory_order_release);
+    lastCallbackNs_.store(steadyNs() - started, std::memory_order_relaxed);
+    StallClock::get().audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
 }
 
-void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routing)
+void PluginRack::processJob(int index)
 {
+    if (jobGraph_ == nullptr || index < 0 || index >= kMaxChannels)
+        return;
+    processOneChannel(*jobGraph_, jobChannels_[index], jobOutputs_[index], jobSamples_);
+}
+
+void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output, int numSamples)
+{
+    if (output == nullptr || channel < 0 || channel >= kMaxChannels)
+        return;
+
+    const bool canProcess = numSamples > 0 && numSamples <= graph.maxBlock;
+    if (canProcess)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& live = graph.slots[channel][slot];
+            auto* instance = live.instance;
+            const int width = live.processChannels;
+            if (instance == nullptr || ! live.prepared || width < 1 || width > LiveGraph::kScratchCap)
+                continue;
+
+            auto* gate = live.gate;
+            if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
+                continue;
+            if (gate != nullptr)
+                gate->depth.fetch_add(1, std::memory_order_acq_rel);
+            if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
+            {
+                gate->depth.fetch_sub(1, std::memory_order_release);
+                continue;
+            }
+
+            float* pointers[LiveGraph::kScratchCap] {};
+            if (width == 1)
+            {
+                pointers[0] = output;
+            }
+            else
+            {
+                bool ready = true;
+                for (int index = 0; index < width; ++index)
+                {
+                    pointers[index] = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(index)];
+                    if (pointers[index] == nullptr)
+                        ready = false;
+                    else
+                        juce::FloatVectorOperations::copy(pointers[index], output, numSamples);
+                }
+                if (! ready)
+                {
+                    if (gate != nullptr)
+                        gate->depth.fetch_sub(1, std::memory_order_release);
+                    continue;
+                }
+            }
+
+            const auto began = steadyNs();
+            juce::AudioBuffer<float> view(pointers, width, numSamples);
+            auto& midi = graph.midi[static_cast<std::size_t>(channel)];
+            midi.clear();
+            instance->processBlock(view, midi);
+            if (width != 1 && pointers[0] != nullptr)
+                juce::FloatVectorOperations::copy(output, pointers[0], numSamples);
+            if (gate != nullptr)
+            {
+                gate->cpuNs.fetch_add(steadyNs() - began, std::memory_order_relaxed);
+                gate->blocks.fetch_add(1, std::memory_order_relaxed);
+                gate->depth.fetch_sub(1, std::memory_order_release);
+            }
+        }
+    }
+
+    auto& line = graph.delay[static_cast<std::size_t>(channel)];
+    const int length = graph.delayLength[static_cast<std::size_t>(channel)];
+    if (length > 0 && static_cast<int>(line.size()) >= length)
+        delayInPlace(line.data(),
+                     length,
+                     graph.delayWrite[static_cast<std::size_t>(channel)],
+                     output,
+                     numSamples);
+}
+
+bool PluginRack::pauseGate(PluginGate& gate)
+{
+    gate.pause.store(1, std::memory_order_release);
+    const auto start = steadyNs();
+    while (gate.depth.load(std::memory_order_acquire) > 0)
+    {
+        if (steadyNs() - start > 50000000ULL)
+        {
+            gate.pause.store(0, std::memory_order_release);
+            return false;
+        }
+        juce::Thread::yield();
+    }
+    return true;
+}
+
+void PluginRack::resumeGate(PluginGate& gate) noexcept
+{
+    gate.pause.store(0, std::memory_order_release);
+}
+
+void PluginRack::refreshLatency()
+{
+    PhaseScope phase(kPhasePrepare);
+    std::vector<std::shared_ptr<HostedPlugin>> plugins;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (auto& row : model_)
+            for (auto& slot : row)
+                if (slot.plugin != nullptr && slot.plugin->instance != nullptr)
+                    plugins.push_back(slot.plugin);
+    }
+
+    for (auto& plugin : plugins)
+    {
+        if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr)
+            continue;
+        if (! pauseGate(*plugin->gate))
+            continue;
+        plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
+        resumeGate(*plugin->gate);
+    }
+
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    publishUnlocked();
+}
+
+DspLoad PluginRack::dspLoad() const
+{
+    DspLoad load;
+    const double rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
+    const int block = blockSize_ > 0 ? blockSize_ : 512;
+    const double period = static_cast<double>(block) / rate;
+    if (period <= 0.0)
+        return load;
+
+    const auto callbackNs = lastCallbackNs_.load(std::memory_order_relaxed);
+    load.callbackPercent = static_cast<float>((static_cast<double>(callbackNs) / 1.0e9) / period * 100.0);
+
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    float pluginSum = 0.0f;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+            if (model.plugin == nullptr || model.plugin->gate == nullptr || model.plugin->instance == nullptr)
+                continue;
+            auto& gate = *model.plugin->gate;
+            const auto ns = gate.cpuNs.exchange(0, std::memory_order_relaxed);
+            const auto blocks = gate.blocks.exchange(0, std::memory_order_relaxed);
+            if (blocks == 0 || ns == 0)
+                continue;
+            const float percent = static_cast<float>((static_cast<double>(ns) / 1.0e9)
+                                                     / (period * static_cast<double>(blocks)) * 100.0);
+            pluginSum += percent;
+            int place = load.count;
+            if (place >= static_cast<int>(load.lines.size()))
+            {
+                place = 0;
+                for (int index = 1; index < load.count; ++index)
+                    if (load.lines[static_cast<std::size_t>(index)].percent < load.lines[static_cast<std::size_t>(place)].percent)
+                        place = index;
+                if (load.lines[static_cast<std::size_t>(place)].percent >= percent)
+                    continue;
+            }
+            else
+            {
+                ++load.count;
+            }
+            auto& line = load.lines[static_cast<std::size_t>(place)];
+            line.channel = channel + 1;
+            line.slot = slot + 1;
+            line.percent = percent;
+            line.name[0] = '\0';
+            const auto& label = model.plugin->description.name;
+            const auto raw = label.toRawUTF8();
+            if (raw != nullptr)
+            {
+                std::size_t length = 0;
+                while (raw[length] != '\0' && length + 1 < sizeof(line.name))
+                    ++length;
+                std::memcpy(line.name, raw, length);
+                line.name[length] = '\0';
+            }
+        }
+    }
+    load.pluginPercent = pluginSum;
+    return load;
+}
+
+void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup)
+{
+    PhaseScope phase(kPhasePrepare);
     const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
     const int block = blockSize > 0 ? blockSize : 512;
     blockProcessing_.store(true, std::memory_order_release);
-    waitUntilOutsideCallback();
+    if (! waitUntilOutsideCallback())
+    {
+        blockProcessing_.store(false, std::memory_order_release);
+        return;
+    }
+    workgroup_ = workgroup;
+    audioJoined_ = false;
 
     std::vector<std::shared_ptr<HostedPlugin>> hosted;
     {
@@ -348,6 +699,7 @@ void PluginRack::loadPlugin(int channel,
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
 
+    StallClock::get().messagePhase.store(kPhaseLoad, std::memory_order_relaxed);
     tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
 
     auto alive = alive_;
@@ -408,7 +760,10 @@ void PluginRack::finishLoad(int channel,
             rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
             block = blockSize_ > 0 ? blockSize_ : 512;
         }
-        instance->prepareToPlay(rate, block);
+        {
+            PhaseScope preparing(kPhasePrepare);
+            instance->prepareToPlay(rate, block);
+        }
 
         hosted = std::make_shared<HostedPlugin>();
         hosted->instance.reset(instance.release(), InstanceDeleter { this });
@@ -624,7 +979,15 @@ void PluginRack::openEditor(int channel, int slot)
         return;
     }
 
+    PhaseScope phase(kPhaseEditor);
+    if (plugin->gate == nullptr || ! pauseGate(*plugin->gate))
+    {
+        tracePlugin(channel, slot, "active", plugin->description.name, pluginIdentifier(plugin->description));
+        return;
+    }
+
     auto* editor = plugin->instance->createEditorAndMakeActive();
+    resumeGate(*plugin->gate);
     if (editor == nullptr)
         editor = new juce::GenericAudioProcessorEditor(*plugin->instance);
 
@@ -678,8 +1041,38 @@ void PluginRack::closeEditor(int channel, int slot)
     auto& window = editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
     if (window == nullptr)
         return;
+
+    std::shared_ptr<PluginGate> gate;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin != nullptr)
+            gate = model.plugin->gate;
+    }
+
+    PhaseScope phase(kPhaseCloseEditor);
+    if (gate != nullptr && ! pauseGate(*gate))
+    {
+        auto& tries = editorCloseTries_[channel][slot];
+        if (tries < 5)
+        {
+            ++tries;
+            auto alive = alive_;
+            juce::MessageManager::callAsync([this, alive, channel, slot]
+            {
+                if (! alive->load(std::memory_order_acquire))
+                    return;
+                closeEditor(channel, slot);
+            });
+        }
+        return;
+    }
+
+    editorCloseTries_[channel][slot] = 0;
     window->clearContentComponent();
     window.reset();
+    if (gate != nullptr)
+        resumeGate(*gate);
 }
 
 void PluginRack::closeAllEditors()
@@ -723,7 +1116,25 @@ int PluginRack::alignmentSamples() const
 
 void PluginRack::captureSession(SessionData& data)
 {
+    PhaseScope phase(kPhaseCapture);
     capturing_.store(true, std::memory_order_release);
+    std::vector<std::shared_ptr<HostedPlugin>> plugins;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (auto& row : model_)
+            for (auto& slot : row)
+                if (slot.plugin != nullptr && slot.plugin->instance != nullptr)
+                    plugins.push_back(slot.plugin);
+    }
+    for (auto& plugin : plugins)
+    {
+        if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr)
+            continue;
+        if (! pauseGate(*plugin->gate))
+            continue;
+        plugin->instance->getStateInformation(plugin->state);
+        resumeGate(*plugin->gate);
+    }
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         for (int channel = 0; channel < kMaxChannels; ++channel)
@@ -737,7 +1148,6 @@ void PluginRack::captureSession(SessionData& data)
                 slotOut = {};
                 if (source.plugin == nullptr || source.plugin->instance == nullptr)
                     continue;
-                source.plugin->instance->getStateInformation(source.plugin->state);
                 slotOut.occupied = true;
                 slotOut.bypassed = source.plugin->bypassed;
                 slotOut.description = source.plugin->description;
@@ -786,7 +1196,43 @@ void PluginRack::publishUnlocked()
         retired_.push_back(std::move(current_));
     current_ = std::move(graph);
     published_.store(current_.get(), std::memory_order_release);
+    rememberActiveNames();
     reapUnlocked();
+}
+
+void PluginRack::rememberActiveNames()
+{
+    char text[160] {};
+    std::size_t used = 0;
+    int count = 0;
+    auto append = [&](const char* chunk)
+    {
+        if (chunk == nullptr)
+            return;
+        while (*chunk != '\0' && used + 1 < sizeof(text))
+            text[used++] = *chunk++;
+    };
+
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+            if (model.plugin == nullptr || model.plugin->instance == nullptr)
+                continue;
+            if (count > 0)
+                append(", ");
+            append(model.plugin->description.name.toRawUTF8());
+            ++count;
+            if (count >= 8)
+                break;
+        }
+        if (count >= 8)
+            break;
+    }
+    text[used] = '\0';
+    StallClock::get().activePlugins.store(count, std::memory_order_relaxed);
+    StallClock::get().setNames(text);
 }
 
 void PluginRack::reapUnlocked()
@@ -816,7 +1262,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
     auto graph = std::make_unique<LiveGraph>();
     const int block = blockSize_ > 0 ? blockSize_ : 512;
     graph->maxBlock = block;
-    graph->midi.ensureSize(1024);
+    for (auto& buffer : graph->midi)
+        buffer.ensureSize(256);
 
     std::array<ChannelLatencyInput, kMaxChannels> inputs {};
     for (int channel = 0; channel < kMaxChannels; ++channel)
@@ -828,14 +1275,14 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             if (model.plugin == nullptr || model.plugin->instance == nullptr)
                 continue;
 
-            model.plugin->latencySamples = clampLatencySamples(model.plugin->instance->getLatencySamples());
             if (model.plugin->bypassed)
                 continue;
 
             chain += model.plugin->latencySamples;
             auto& live = graph->slots[channel][slot];
             live.instance = model.plugin->instance.get();
-            live.processChannels = std::max(1, model.plugin->processChannels);
+            live.gate = model.plugin->gate.get();
+            live.processChannels = std::max(1, std::min(LiveGraph::kScratchCap, model.plugin->processChannels));
             live.prepared = model.plugin->prepared;
             graph->keepAlive.push_back(model.plugin);
         }
@@ -859,16 +1306,14 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             graph->delay[static_cast<std::size_t>(channel)].assign(static_cast<std::size_t>(delay), 0.0f);
     }
 
-    int width = 1;
+    graph->scratch.assign(static_cast<std::size_t>(kMaxChannels * LiveGraph::kScratchCap * block), 0.0f);
     for (int channel = 0; channel < kMaxChannels; ++channel)
-        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-            if (graph->slots[channel][slot].instance != nullptr)
-                width = std::max(width, graph->slots[channel][slot].processChannels);
-    graph->scratchChannels = std::clamp(width, 1, LiveGraph::kScratchCap);
-    graph->scratch.assign(static_cast<std::size_t>(graph->scratchChannels * block), 0.0f);
-    for (int index = 0; index < graph->scratchChannels; ++index)
-        graph->scratchPtrs[static_cast<std::size_t>(index)] = graph->scratch.data()
-                                                              + static_cast<std::size_t>(index * block);
+    {
+        graph->midi[static_cast<std::size_t>(channel)].ensureSize(256);
+        for (int index = 0; index < LiveGraph::kScratchCap; ++index)
+            graph->scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(index)]
+                = graph->scratch.data() + static_cast<std::size_t>((channel * LiveGraph::kScratchCap + index) * block);
+    }
 
     return graph;
 }
@@ -909,7 +1354,17 @@ void PluginRack::releaseForQuit()
     alive_->store(false, std::memory_order_release);
     stopTimer();
     blockProcessing_.store(true, std::memory_order_release);
-    closeAllEditors();
+    const bool idle = waitUntilOutsideCallback();
+    if (idle)
+        closeAllEditors();
+    if (pool_ != nullptr)
+    {
+        pool_->stop();
+        if (pool_->running())
+            pool_.release();
+        else
+            pool_.reset();
+    }
 
     std::lock_guard<std::mutex> lock(lifeLock_);
     for (auto& row : model_)
@@ -918,23 +1373,35 @@ void PluginRack::releaseForQuit()
         {
             slot.ticket = ++ticketSource_;
             slot.loading = false;
-            slot.plugin.reset();
+            if (idle)
+                slot.plugin.reset();
         }
     }
     published_.store(nullptr, std::memory_order_release);
-    current_.reset();
-    retired_.clear();
+    if (idle)
+    {
+        current_.reset();
+        retired_.clear();
+    }
+    else
+    {
+        current_.release();
+        for (auto& graph : retired_)
+            graph.release();
+        retired_.clear();
+    }
 }
 
-void PluginRack::waitUntilOutsideCallback()
+bool PluginRack::waitUntilOutsideCallback()
 {
     for (int attempt = 0; attempt < 200; ++attempt)
     {
         const auto epoch = callbackEpoch_.load(std::memory_order_acquire);
         if ((epoch & 1u) == 0u)
-            return;
+            return true;
         juce::Thread::sleep(1);
     }
+    return false;
 }
 
 bool PluginRack::isBlocked(const juce::PluginDescription& description) const

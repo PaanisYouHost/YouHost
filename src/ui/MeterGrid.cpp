@@ -144,16 +144,34 @@ void MeterScaleRail::paint(juce::Graphics& graphics)
     }
 }
 
+struct MeterGrid::NameKeys : juce::KeyListener
+{
+    explicit NameKeys(MeterGrid& owner)
+        : grid(owner)
+    {
+    }
+
+    bool keyPressed(const juce::KeyPress& key, juce::Component*) override
+    {
+        return grid.handleNameKey(key);
+    }
+
+    MeterGrid& grid;
+};
+
 MeterGrid::MeterGrid()
 {
     setOpaque(false);
 }
+
+MeterGrid::~MeterGrid() = default;
 
 void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb)
 {
     cells_ = std::move(cells);
     showPeak_ = showPeak;
     rmsReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
+    placeNameEditor(false);
     repaint();
 }
 
@@ -209,6 +227,167 @@ void MeterGrid::setSelectHandler(std::function<void(int channel, bool extend)> h
     onSelect_ = std::move(handler);
 }
 
+void MeterGrid::setNameCommitHandler(std::function<void(int channel, juce::String name)> handler)
+{
+    onNameCommit_ = std::move(handler);
+}
+
+void MeterGrid::setNameStepHandler(std::function<int(int channel, int direction)> handler)
+{
+    onNameStep_ = std::move(handler);
+}
+
+void MeterGrid::refreshMetrics()
+{
+    const int fit = fitWidth_ > 0 ? fitWidth_ : getWidth();
+    metrics_ = metricsFor(fit);
+    if (metrics_.contentWidth > static_cast<float>(fit))
+        metrics_.originX = 0.0f;
+}
+
+void MeterGrid::ensureEditor()
+{
+    if (editor_ != nullptr)
+        return;
+    editor_ = std::make_unique<juce::TextEditor>();
+    editor_->setSelectAllWhenFocused(true);
+    editor_->setFont(juce::Font(juce::FontOptions(11.0f)));
+    editor_->setJustification(juce::Justification::centred);
+    editor_->setColour(juce::TextEditor::backgroundColourId, theme::panel);
+    editor_->setColour(juce::TextEditor::textColourId, theme::text);
+    editor_->setColour(juce::TextEditor::outlineColourId, theme::text);
+    editor_->setColour(juce::TextEditor::focusedOutlineColourId, theme::text);
+    if (nameKeys_ == nullptr)
+        nameKeys_ = std::make_unique<NameKeys>(*this);
+    editor_->addKeyListener(nameKeys_.get());
+    editor_->onFocusLost = [this] { finishNameEdit(true); };
+    editor_->setVisible(false);
+    addAndMakeVisible(*editor_);
+}
+
+void MeterGrid::placeNameEditor(bool reveal)
+{
+    if (editor_ == nullptr || editingChannel_ < 0)
+        return;
+    refreshMetrics();
+    float x = metrics_.originX;
+    for (const auto& cell : cells_)
+    {
+        const float width = cell.header ? metrics_.headerWidth : metrics_.channelWidth;
+        const auto bounds = juce::Rectangle<float>(x, 0.0f, width, static_cast<float>(getHeight()));
+        x += width;
+        if (cell.header || cell.channel != editingChannel_)
+            continue;
+        const auto name = splitCell(bounds).name.toNearestInt();
+        editor_->setBounds(name);
+        editor_->setVisible(true);
+        editor_->toFront(false);
+        if (reveal)
+        {
+            if (auto* viewport = findParentComponentOfClass<juce::Viewport>())
+            {
+                const int viewWidth = std::max(1, viewport->getViewWidth());
+                const int maxX = std::max(0, getWidth() - viewWidth);
+                const int target = std::clamp(name.getX() - 8, 0, maxX);
+                viewport->setViewPosition(target, viewport->getViewPositionY());
+            }
+        }
+        return;
+    }
+    editor_->setVisible(false);
+}
+
+void MeterGrid::finishNameEdit(bool commit)
+{
+    if (editingChannel_ < 0 || editor_ == nullptr)
+        return;
+    const int channel = editingChannel_;
+    const auto text = editor_->getText();
+    editingChannel_ = -1;
+    editor_->setVisible(false);
+    if (commit && onNameCommit_ != nullptr)
+        onNameCommit_(channel, text);
+}
+
+void MeterGrid::beginNameEdit(int channel)
+{
+    if (channel < 0)
+        return;
+    if (editingChannel_ == channel && editor_ != nullptr && editor_->isVisible())
+    {
+        editor_->grabKeyboardFocus();
+        editor_->selectAll();
+        return;
+    }
+    if (editingChannel_ >= 0)
+        finishNameEdit(true);
+
+    juce::String title;
+    bool found = false;
+    for (const auto& cell : cells_)
+    {
+        if (! cell.header && cell.channel == channel)
+        {
+            title = cell.title;
+            found = true;
+            break;
+        }
+    }
+    if (! found)
+        return;
+
+    ensureEditor();
+    editingChannel_ = channel;
+    editor_->setText(title, false);
+    placeNameEditor(true);
+    editor_->grabKeyboardFocus();
+    editor_->selectAll();
+}
+
+bool MeterGrid::handleNameKey(const juce::KeyPress& key)
+{
+    const auto mods = key.getModifiers();
+    if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
+        return false;
+    if (editingChannel_ < 0 || editor_ == nullptr)
+        return false;
+
+    const auto code = key.getKeyCode();
+    if (code == juce::KeyPress::escapeKey)
+    {
+        finishNameEdit(false);
+        return true;
+    }
+    if (code == juce::KeyPress::returnKey)
+    {
+        finishNameEdit(true);
+        return true;
+    }
+    if (code != juce::KeyPress::tabKey)
+        return false;
+
+    const int channel = editingChannel_;
+    const int direction = mods.isShiftDown() ? -1 : 1;
+    const auto text = editor_->getText();
+    editingChannel_ = -1;
+    editor_->setVisible(false);
+    if (onNameCommit_ != nullptr)
+        onNameCommit_(channel, text);
+    if (onNameStep_ == nullptr)
+        return true;
+    const int next = onNameStep_(channel, direction);
+    if (next >= 0)
+    {
+        juce::Component::SafePointer<MeterGrid> safe(this);
+        juce::MessageManager::callAsync([safe, next]
+        {
+            if (safe != nullptr)
+                safe->beginNameEdit(next);
+        });
+    }
+    return true;
+}
+
 BridgeMetrics MeterGrid::metricsFor(int viewportWidth) const
 {
     int channels = 0;
@@ -248,6 +427,8 @@ MeterHit MeterGrid::hitAt(juce::Point<float> position) const
             hit.clip = true;
         else if (parts.button.contains(position))
             hit.record = true;
+        else if (parts.name.contains(position))
+            hit.name = true;
         return hit;
     }
     return hit;
@@ -417,10 +598,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
 
 void MeterGrid::mouseDown(const juce::MouseEvent& event)
 {
-    const int fit = fitWidth_ > 0 ? fitWidth_ : getWidth();
-    metrics_ = metricsFor(fit);
-    if (metrics_.contentWidth > static_cast<float>(fit))
-        metrics_.originX = 0.0f;
+    refreshMetrics();
 
     const auto hit = hitAt(event.position);
     if (event.mods.isPopupMenu())
@@ -452,6 +630,8 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
             onGroupToggle_(hit.group);
         }
     }
+    else if (hit.name && event.getNumberOfClicks() >= 2)
+        beginNameEdit(hit.channel);
     else if (hit.record && onRecord_ != nullptr)
         onRecord_(hit.channel);
     else if (hit.clip && onClearClip_ != nullptr)

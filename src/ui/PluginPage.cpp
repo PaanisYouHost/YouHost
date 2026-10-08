@@ -6,6 +6,7 @@
 #include "WindowMemory.h"
 #include "X32Look.h"
 #include "engine/DisplayLayout.h"
+#include "engine/InsertMenu.h"
 #include "engine/MeterScale.h"
 
 namespace youhost
@@ -25,25 +26,34 @@ juce::String slotLabel(int slot, const SlotSnapshot& snap)
     return juce::String(slot + 1) + " " + name;
 }
 
-class PluginPicker : public juce::Component,
-                     private juce::ListBoxModel
+class PluginPicker : public juce::Component
 {
 public:
     PluginPicker(AudioEngine& engine, std::function<void(const juce::PluginDescription&)> onChoose)
         : engine_(engine),
           onChoose_(std::move(onChoose))
     {
-        types_ = engine_.pluginCatalogue().insertTypes();
         addAndMakeVisible(search_);
-        addAndMakeVisible(list_);
-        search_.setTextToShowWhenEmpty("Search plugins", theme::fainter);
+        addAndMakeVisible(tree_);
+        addAndMakeVisible(empty_);
+        search_.setTextToShowWhenEmpty("Search name or maker", theme::fainter);
         search_.onTextChange = [this] { rebuild(); };
-        search_.onReturnKey = [this] { chooseRow(0); };
-        list_.setModel(this);
-        list_.setRowHeight(22);
-        list_.setColour(juce::ListBox::backgroundColourId, theme::background);
-        setSize(360, 320);
-        rebuild();
+        search_.onReturnKey = [this] { chooseSource(firstMatch_); };
+        tree_.setColour(juce::TreeView::backgroundColourId, theme::background);
+        tree_.setColour(juce::TreeView::linesColourId, theme::dim);
+        tree_.setDefaultOpenness(false);
+        tree_.setRootItemVisible(false);
+        tree_.setIndentSize(14);
+        empty_.setJustificationType(juce::Justification::centred);
+        empty_.setColour(juce::Label::textColourId, theme::dim);
+        empty_.setInterceptsMouseClicks(false, false);
+        setSize(360, 420);
+        reload();
+    }
+
+    ~PluginPicker() override
+    {
+        tree_.deleteRootItem();
     }
 
     void resized() override
@@ -51,7 +61,8 @@ public:
         auto area = getLocalBounds().reduced(8);
         search_.setBounds(area.removeFromTop(28));
         area.removeFromTop(6);
-        list_.setBounds(area);
+        tree_.setBounds(area);
+        empty_.setBounds(area.reduced(12));
     }
 
     void paint(juce::Graphics& graphics) override
@@ -59,61 +70,137 @@ public:
         graphics.fillAll(theme::panel);
     }
 
-    int getNumRows() override { return static_cast<int>(shown_.size()); }
-
-    void paintListBoxItem(int row, juce::Graphics& graphics, int width, int height, bool selected) override
-    {
-        if (row < 0 || row >= getNumRows())
-            return;
-        graphics.setColour(selected ? theme::buttonOn : juce::Colours::transparentBlack);
-        graphics.fillRect(0, 0, width, height);
-        const auto& type = types_.getReference(shown_[static_cast<std::size_t>(row)]);
-        juce::String line = type.name;
-        if (type.pluginFormatName.isNotEmpty())
-            line << "   " << type.pluginFormatName;
-        graphics.setColour(theme::text);
-        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
-        graphics.drawText(line, 8, 0, width - 12, height, juce::Justification::centredLeft, true);
-    }
-
-    void listBoxItemClicked(int row, const juce::MouseEvent&) override { chooseRow(row); }
-
-private:
-    void rebuild()
-    {
-        shown_.clear();
-        const auto query = search_.getText().trim();
-        for (int index = 0; index < types_.size(); ++index)
-        {
-            const auto& type = types_.getReference(index);
-            if (query.isEmpty() || type.name.containsIgnoreCase(query) || type.manufacturerName.containsIgnoreCase(query)
-                || type.pluginFormatName.containsIgnoreCase(query))
-                shown_.push_back(index);
-        }
-        list_.updateContent();
-        list_.repaint();
-    }
-
-    void chooseRow(int row)
-    {
-        if (row < 0 || row >= getNumRows() || onChoose_ == nullptr)
-            return;
-        const auto description = types_.getReference(shown_[static_cast<std::size_t>(row)]);
-        onChoose_(description);
-    }
-
-public:
     void setChoose(std::function<void(const juce::PluginDescription&)> onChoose)
     {
         onChoose_ = std::move(onChoose);
     }
 
+    void reload()
+    {
+        types_ = engine_.pluginCatalogue().insertTypes();
+        rebuild();
+        search_.grabKeyboardFocus();
+    }
+
+    void chooseSource(int source)
+    {
+        if (onChoose_ == nullptr || ! juce::isPositiveAndBelow(source, types_.size()))
+            return;
+        onChoose_(types_.getReference(source));
+    }
+
+private:
+    class MakerNode : public juce::TreeViewItem
+    {
+    public:
+        explicit MakerNode(juce::String name)
+            : name_(std::move(name))
+        {
+        }
+
+        bool mightContainSubItems() override { return true; }
+
+        int getItemHeight() const override { return 22; }
+
+        void paintItem(juce::Graphics& graphics, int width, int height) override
+        {
+            graphics.setColour(theme::text);
+            graphics.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
+            graphics.drawText(name_, 4, 0, width - 6, height, juce::Justification::centredLeft, true);
+        }
+
+        void itemClicked(const juce::MouseEvent&) override { setOpen(! isOpen()); }
+
+        void itemDoubleClicked(const juce::MouseEvent&) override {}
+
+    private:
+        juce::String name_;
+    };
+
+    class PluginNode : public juce::TreeViewItem
+    {
+    public:
+        PluginNode(PluginPicker& owner, int source, juce::String label)
+            : owner_(owner),
+              source_(source),
+              label_(std::move(label))
+        {
+        }
+
+        bool mightContainSubItems() override { return false; }
+
+        int getItemHeight() const override { return 22; }
+
+        void paintItem(juce::Graphics& graphics, int width, int height) override
+        {
+            graphics.setColour(theme::text);
+            graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+            graphics.drawText(label_, 4, 0, width - 6, height, juce::Justification::centredLeft, true);
+        }
+
+        void itemClicked(const juce::MouseEvent&) override { owner_.chooseSource(source_); }
+
+        void itemDoubleClicked(const juce::MouseEvent&) override {}
+
+    private:
+        PluginPicker& owner_;
+        int source_ = -1;
+        juce::String label_;
+    };
+
+    class RootNode : public juce::TreeViewItem
+    {
+    public:
+        bool mightContainSubItems() override { return true; }
+    };
+
+    void rebuild()
+    {
+        std::vector<CatalogPlugin> catalog;
+        catalog.reserve(static_cast<std::size_t>(types_.size()));
+        for (const auto& type : types_)
+        {
+            catalog.push_back(CatalogPlugin { type.name.toStdString(),
+                                              type.manufacturerName.toStdString(),
+                                              type.pluginFormatName.toStdString() });
+        }
+
+        const auto query = search_.getText().trim().toStdString();
+        const auto groups = groupInsertPlugins(catalog, query);
+        const bool searching = ! textIsBlank(query);
+        firstMatch_ = -1;
+
+        tree_.deleteRootItem();
+        auto* root = new RootNode();
+        tree_.setRootItem(root);
+        for (const auto& group : groups)
+        {
+            auto* maker = new MakerNode(juce::String::fromUTF8(group.manufacturer.c_str()));
+            root->addSubItem(maker);
+            for (const auto& plugin : group.plugins)
+            {
+                if (firstMatch_ < 0)
+                    firstMatch_ = plugin.source;
+                maker->addSubItem(new PluginNode(*this, plugin.source, juce::String::fromUTF8(plugin.label.c_str())));
+            }
+            if (searching)
+                maker->setOpenness(juce::TreeViewItem::Openness::opennessOpen);
+        }
+
+        empty_.setVisible(groups.empty());
+        empty_.setText(types_.isEmpty() ? "No plugins yet. Open the scanner and scan."
+                                        : "No plugins match.",
+                       juce::dontSendNotification);
+        tree_.repaint();
+    }
+
     AudioEngine& engine_;
     std::function<void(const juce::PluginDescription&)> onChoose_;
     juce::Array<juce::PluginDescription> types_;
-    std::vector<int> shown_;
+    int firstMatch_ = -1;
     juce::TextEditor search_;
-    juce::ListBox list_;
+    juce::TreeView tree_;
+    juce::Label empty_;
 };
 
 bool parseSlotDrag(const juce::var& description, int& channel, int& slot, bool& copy)
@@ -252,7 +339,10 @@ public:
     void showFor(std::function<void(const juce::PluginDescription&)> onChoose)
     {
         if (picker_ != nullptr)
+        {
             picker_->setChoose(std::move(onChoose));
+            picker_->reload();
+        }
         setVisible(true);
         toFront(true);
     }
@@ -391,7 +481,8 @@ class PluginPage::Row : public juce::Component
 public:
     Row(AudioEngine& engine, int channel)
         : engine_(engine),
-          channel_(channel)
+          channel_(channel),
+          tabKeys_(*this)
     {
         addAndMakeVisible(number_);
         addAndMakeVisible(name_);
@@ -406,11 +497,16 @@ public:
         name_.setFont(juce::Font(juce::FontOptions(13.0f)));
         name_.setMinimumHorizontalScale(0.6f);
         name_.setJustificationType(juce::Justification::centredLeft);
-        name_.setTooltip("Double-click to rename. Right-click for color and group. The name is used in the WAV file name.");
+        name_.setTooltip("Double-click to rename. Tab moves to the next visible channel. Right-click for color and group.");
         name_.onTextChange = [this]
         {
             if (! updating_)
                 engine_.setChannelName(channel_, name_.getText());
+        };
+        name_.onEditorShow = [this]
+        {
+            if (auto* editor = name_.getCurrentTextEditor())
+                editor->addKeyListener(&tabKeys_);
         };
         name_.addMouseListener(this, false);
 
@@ -460,6 +556,13 @@ public:
     {
         showPeak_ = peak;
         referenceDb_ = referenceDb;
+    }
+
+    bool isChannel(int channel) const noexcept { return channel_ == channel; }
+
+    void editName()
+    {
+        name_.showEditor();
     }
 
     void refresh()
@@ -575,7 +678,7 @@ public:
     {
         if (event.mods.isPopupMenu())
         {
-            showChannelMenu(engine_, *this, channel_);
+            showChannelMenu(engine_, *this, channel_, [this](int) { editName(); });
             return;
         }
         if (event.mods.isShiftDown())
@@ -590,6 +693,38 @@ public:
     }
 
 private:
+    struct TabKeys : juce::KeyListener
+    {
+        explicit TabKeys(Row& owner)
+            : row(owner)
+        {
+        }
+
+        bool keyPressed(const juce::KeyPress& key, juce::Component*) override
+        {
+            const auto mods = key.getModifiers();
+            if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
+                return false;
+            if (key.getKeyCode() != juce::KeyPress::tabKey)
+                return false;
+
+            const int direction = mods.isShiftDown() ? -1 : 1;
+            const int channel = row.channel_;
+            juce::Component::SafePointer<Row> safe(&row);
+            juce::MessageManager::callAsync([safe, channel, direction]
+            {
+                if (safe == nullptr)
+                    return;
+                safe->name_.hideEditor(false);
+                if (auto* page = safe->findParentComponentOfClass<PluginPage>())
+                    page->stepNameEdit(channel, direction);
+            });
+            return true;
+        }
+
+        Row& row;
+    };
+
     void slotClicked(int slot)
     {
         const auto snap = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
@@ -635,6 +770,7 @@ private:
     bool updating_ = false;
     juce::Label number_;
     juce::Label name_;
+    TabKeys tabKeys_;
     juce::TextButton arm_;
     juce::TextButton exclude_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
@@ -706,6 +842,38 @@ void PluginPage::rebuild()
         }
     }
     resized();
+}
+
+void PluginPage::beginNameEdit(int channel)
+{
+    for (const auto& row : rows_)
+    {
+        if (row == nullptr || ! row->isChannel(channel))
+            continue;
+        row->editName();
+        int y = 0;
+        for (std::size_t index = 0; index < order_.size(); ++index)
+        {
+            if (order_[index] == row.get())
+            {
+                const int maxY = std::max(0, content_.getHeight() - viewport_.getViewHeight());
+                viewport_.setViewPosition(0, std::clamp(y, 0, maxY));
+                break;
+            }
+            if (index < heights_.size())
+                y += heights_[index];
+        }
+        return;
+    }
+}
+
+void PluginPage::stepNameEdit(int channel, int direction)
+{
+    const int channels = std::max(0, engine_.visibleChannels());
+    const auto strips = engine_.displayStrips(channels);
+    const int next = adjacentVisibleChannel(strips.data(), static_cast<int>(strips.size()), channel, direction);
+    if (next >= 0)
+        beginNameEdit(next);
 }
 
 void PluginPage::showPluginList(int channel, int slot)

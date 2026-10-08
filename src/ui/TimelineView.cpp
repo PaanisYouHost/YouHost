@@ -2,6 +2,8 @@
 #include "Theme.h"
 #include "X32Look.h"
 
+#include <algorithm>
+
 namespace youhost
 {
 
@@ -51,7 +53,7 @@ TimelineView::TimelineView()
     zoomInButton_.setTooltip("Zoom in (T).");
     verticalOutButton_.setTooltip("Shorter lanes (Cmd+]).");
     verticalInButton_.setTooltip("Taller lanes (Cmd+[).");
-    fitButton_.setTooltip("Fit the whole session (Option+R).");
+    fitButton_.setTooltip("Fit every take across the width and every lane down the height (Option+R).");
     zoomOutButton_.onClick = [this] { zoomOut(); };
     zoomInButton_.onClick = [this] { zoomIn(); };
     verticalOutButton_.onClick = [this] { verticalZoomOut(); };
@@ -112,6 +114,8 @@ void TimelineView::zoomOut()
 void TimelineView::fitAll()
 {
     zoomStep_ = 0;
+    verticalStep_ = 0;
+    laneScroll_ = 0;
     viewStart_ = 0;
     syncScroll();
     repaint();
@@ -183,9 +187,7 @@ void TimelineView::scrollBarMoved(juce::ScrollBar* bar, double newRangeStart)
 
 std::int64_t TimelineView::fullSpan() const
 {
-    const double rate = view_.sampleRate > 0.0 ? view_.sampleRate : 48000.0;
-    const auto minimum = static_cast<std::int64_t>(rate * 30.0);
-    return std::max(view_.length, minimum);
+    return fitSpanSamples(view_.length, view_.sampleRate);
 }
 
 std::int64_t TimelineView::visibleSamples() const
@@ -347,6 +349,7 @@ void TimelineView::paint(juce::Graphics& graphics)
 
     graphics.saveState();
     graphics.reduceClipRegion(inner.toNearestInt());
+    std::vector<TakeMark> takeMarks;
 
     const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes)
     {
@@ -418,10 +421,26 @@ void TimelineView::paint(juce::Graphics& graphics)
         auto row = juce::Rectangle<float>(inner.getX(), inner.getY() + laneHeight * static_cast<float>(index),
                                           inner.getWidth(), std::max(1.0f, laneHeight - 1.0f));
         const auto wave = laneWaveColour(lane.color);
-        graphics.setColour(laneWashColour(lane.color));
+        graphics.setColour(theme::background);
         graphics.fillRect(row);
         for (const auto& region : lane.regions)
+        {
+            rememberTakeMark(takeMarks, region.number, region.start);
+            if (region.length <= 0 && (region.peaks == nullptr || region.peaks->empty()))
+                continue;
+            float x1 = 0.0f;
+            float x2 = 0.0f;
+            timelineRegionPixels(inner.getX(), width, viewStart_, visible, region.start,
+                                 std::max<std::int64_t>(region.length, 1), x1, x2);
+            if (x2 < inner.getX() || x1 > inner.getRight())
+                continue;
+            auto block = juce::Rectangle<float>(x1, row.getY(), x2 - x1, row.getHeight()).getIntersection(row);
+            if (block.isEmpty())
+                continue;
+            graphics.setColour(laneWashColour(lane.color));
+            graphics.fillRect(block);
             drawRegion(region, row, wave);
+        }
         if (showNumbers)
         {
             graphics.setColour(theme::text);
@@ -436,6 +455,34 @@ void TimelineView::paint(juce::Graphics& graphics)
         laneProvider_(paintLanes);
     else
         paintLanes({});
+
+    std::sort(takeMarks.begin(), takeMarks.end(), [](const TakeMark& left, const TakeMark& right)
+    {
+        if (left.start != right.start)
+            return left.start < right.start;
+        return left.number < right.number;
+    });
+    graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
+    for (std::size_t markIndex = 0; markIndex < takeMarks.size(); ++markIndex)
+    {
+        const float markX = sampleToX(takeMarks[markIndex].start);
+        if (markX < inner.getX() - 1.0f || markX > inner.getRight() + 1.0f)
+            continue;
+        graphics.setColour(theme::amber);
+        graphics.drawLine(markX, inner.getY(), markX, inner.getBottom(), 2.0f);
+        float nextX = inner.getRight();
+        if (markIndex + 1 < takeMarks.size())
+            nextX = sampleToX(takeMarks[markIndex + 1].start);
+        const float room = nextX - markX;
+        const auto label = room < 58.0f ? juce::String(takeMarks[markIndex].number)
+                                        : "TAKE " + juce::String(takeMarks[markIndex].number);
+        auto pill = juce::Rectangle<float>(markX + 3.0f, inner.getY() + 1.0f,
+                                           std::min(78.0f, std::max(18.0f, room - 6.0f)), 16.0f);
+        graphics.setColour(theme::amber);
+        graphics.fillRoundedRectangle(pill, 3.0f);
+        graphics.setColour(juce::Colour(0xff141414));
+        graphics.drawText(label, pill, juce::Justification::centred, true);
+    }
 
     const auto playhead = view_.position;
     if (playhead >= viewStart_ && playhead <= viewStart_ + visible)

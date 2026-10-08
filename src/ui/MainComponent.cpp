@@ -18,11 +18,11 @@ public:
     BitDepthSlot()
     {
         setComponentID("youhost-bit-depth");
-        addAndMakeVisible(label_);
         addAndMakeVisible(box_);
-        label_.setText("Bit depth", juce::dontSendNotification);
-        label_.setJustificationType(juce::Justification::centredLeft);
-        label_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        // Same attachment as JUCE's "Sample rate:" row: the label sits to the
+        // left of the combo, and the combo itself uses the standard row bounds.
+        label_.setText("Bit depth:", juce::dontSendNotification);
+        label_.attachToComponent(this, true);
         box_.addItem("16-bit", 16);
         box_.addItem("24-bit", 24);
         box_.addItem("32-bit float", 32);
@@ -31,9 +31,7 @@ public:
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(4, 2);
-        label_.setBounds(area.removeFromLeft(juce::jmin(120, area.getWidth() / 3)));
-        box_.setBounds(area);
+        box_.setBounds(getLocalBounds());
     }
 
     int selectedId() const { return box_.getSelectedId(); }
@@ -71,15 +69,20 @@ constexpr const char* kShortcutHelp =
     "2  Plugins\n"
     "3  Open or close the plugin scanner\n"
     "4 or D  Open or close the dropout timeline\n"
+    "5  Open or close the latency card\n"
     "Space  Play, or Stop when already playing or recording\n"
     "Cmd+Space  Record immediately\n"
     "Left / Right  Previous or next take\n"
     "Shift+Left / Shift+Right  Move 5 seconds\n"
     "T  Zoom the timeline in\n"
     "R  Zoom the timeline out until the whole session fits\n"
-    "Option+R  Fit the whole session\n"
+    "Option+R  Fit the whole session across and down\n"
     "Cmd+[  Taller timeline lanes\n"
     "Cmd+]  Shorter timeline lanes\n"
+    "Tab  Commit the channel name and edit the next visible channel\n"
+    "Shift+Tab  Commit the channel name and edit the previous visible channel\n"
+    "Enter  Commit a channel name and leave the editor\n"
+    "Esc  Cancel a channel name edit\n"
     "Cmd+S  Save\n"
     "Cmd+Shift+S  Save a copy of the session folder\n"
     "Option-drag  Copy a plugin and its settings\n\n"
@@ -87,7 +90,12 @@ constexpr const char* kShortcutHelp =
     "Play while not armed is the virtual soundcheck. Stop turns record arm off.\n"
     "Cmd+Space records immediately. Cmd+S also works from the File menu and while a plugin window is in front.\n"
     "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
-    "The + and - buttons zoom the same way as T and R. Fit and Option+R show the whole session.\n"
+    "The + and - buttons zoom the same way as T and R.\n"
+    "Fit and Option+R show every take, from 0 to just past the last take, and every visible lane. With no takes yet the timeline shows 60 seconds.\n"
+    "A take is a colored block that starts and ends with that take. Empty time stays dark. TAKE and the number mark each start. While recording, the block grows.\n"
+    "Double-click a channel name to edit it. Tab and Shift+Tab move through the visible channels and skip folded groups.\n"
+    "An empty plugin slot lists plugins by manufacturer. Search matches the plugin name or the manufacturer.\n"
+    "3, 4, D, and 5 open that window, or close it when it is already open, including when that window is in front.\n"
     "v+ and v- zoom the lanes taller or shorter, the same as Cmd+[ and Cmd+]. Option or Cmd plus the scroll wheel does that too.\n"
     "The plain wheel scrolls the lanes when they are zoomed. Drag the timeline's bottom edge to change its height.\n"
     "If YouHost quits unexpectedly, the next launch names the plugin that was loading. Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"
@@ -939,6 +947,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterViewport_.setScrollBarsShown(false, true);
 
     latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, settings_, "windowLatency", 480, 360, 420, 280);
+    if (keys_ != nullptr)
+    {
+        scanner_.addKeyListener(keys_.get());
+        dropouts_.addKeyListener(keys_.get());
+        latencyWindow_->addKeyListener(keys_.get());
+    }
     setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
     commandManager_.registerAllCommandsForTarget(this);
     commandManager_.setFirstCommandTarget(this);
@@ -985,8 +999,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     dropoutsButton_.onClick = [this] { toggleDropouts(); };
     recorderButton_.setTooltip("Recorder page (1).");
     pluginsButton_.setTooltip("Plugins page (2).");
-    dropoutsButton_.setTooltip("Dropout timeline (4 or D).");
-    latencyButton_.setTooltip("Open the latency card.");
+    dropoutsButton_.setTooltip("Open or close the dropout timeline (4 or D).");
+    latencyButton_.setTooltip("Open or close the latency card (5).");
     fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
     helpButton_.setTooltip("Show keyboard shortcuts.");
     groupButton_.setTooltip("Rename or recolor a group.");
@@ -994,16 +1008,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
     saveButton_.setTooltip("Save session.youhost (Cmd+S).");
-    latencyButton_.onClick = [this]
-    {
-        const bool show = latencyWindow_ == nullptr || ! latencyWindow_->isVisible();
-        if (latencyWindow_ != nullptr)
-        {
-            latencyWindow_->setVisible(show);
-            if (show)
-                latencyWindow_->toFront(true);
-        }
-    };
+    latencyButton_.onClick = [this] { toggleLatency(); };
 
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
@@ -1074,7 +1079,16 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     {
         engine_.setRecordArmed(channel, ! engine_.isRecordArmed(channel));
     });
-    meterGrid_.setChannelMenuHandler([this](int channel) { showChannelMenu(engine_, meterGrid_, channel); });
+    meterGrid_.setChannelMenuHandler([this](int channel)
+    {
+        showChannelMenu(engine_, meterGrid_, channel, [this](int chosen) { meterGrid_.beginNameEdit(chosen); });
+    });
+    meterGrid_.setNameCommitHandler([this](int channel, juce::String name) { engine_.setChannelName(channel, name); });
+    meterGrid_.setNameStepHandler([this](int channel, int direction)
+    {
+        const auto strips = engine_.displayStrips(engine_.visibleChannels());
+        return adjacentVisibleChannel(strips.data(), static_cast<int>(strips.size()), channel, direction);
+    });
     meterGrid_.setGroupMenuHandler([this](int group) { showGroupMenu(engine_, meterGrid_, group); });
     meterGrid_.setGroupRenameHandler([this](int group) { renameGroup(engine_, group); });
     meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
@@ -1143,6 +1157,13 @@ MainComponent::~MainComponent()
             keyTarget_->removeKeyListener(keys_.get());
         keyTarget_->removeKeyListener(commandManager_.getKeyMappings());
     }
+    if (keys_ != nullptr)
+    {
+        scanner_.removeKeyListener(keys_.get());
+        dropouts_.removeKeyListener(keys_.get());
+        if (latencyWindow_ != nullptr)
+            latencyWindow_->removeKeyListener(keys_.get());
+    }
     engine_.setMeterRestoreHandler(nullptr);
     engine_.setPageRestoreHandler(nullptr);
     latencyWindow_.reset();
@@ -1169,19 +1190,24 @@ void MainComponent::parentHierarchyChanged()
     grabKeyboardFocus();
 }
 
-bool MainComponent::shortcutBlocked(juce::Component* originating) const
+bool textEditing(juce::Component* component)
 {
-    if (originating == nullptr)
+    if (component == nullptr)
         return false;
-    if (dynamic_cast<juce::TextEditor*>(originating) != nullptr)
+    if (dynamic_cast<juce::TextEditor*>(component) != nullptr)
         return true;
-    if (originating->findParentComponentOfClass<juce::TextEditor>() != nullptr)
+    if (component->findParentComponentOfClass<juce::TextEditor>() != nullptr)
         return true;
-    if (dynamic_cast<juce::AudioProcessorEditor*>(originating) != nullptr)
+    if (dynamic_cast<juce::AudioProcessorEditor*>(component) != nullptr)
         return true;
-    if (originating->findParentComponentOfClass<juce::AudioProcessorEditor>() != nullptr)
+    if (component->findParentComponentOfClass<juce::AudioProcessorEditor>() != nullptr)
         return true;
     return false;
+}
+
+bool MainComponent::shortcutBlocked(juce::Component* originating) const
+{
+    return textEditing(originating) || textEditing(juce::Component::getCurrentlyFocusedComponent());
 }
 
 bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* originating)
@@ -1211,6 +1237,11 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     if ((character == '4' || character == 'd') && ! shift && ! command)
     {
         toggleDropouts();
+        return true;
+    }
+    if (character == '5' && ! shift && ! command)
+    {
+        toggleLatency();
         return true;
     }
     const auto code = key.getKeyCode();
@@ -1486,6 +1517,17 @@ void MainComponent::toggleDropouts()
 {
     dropouts_.toggle();
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+}
+
+void MainComponent::toggleLatency()
+{
+    if (latencyWindow_ == nullptr)
+        return;
+    const bool show = ! latencyWindow_->isVisible();
+    latencyWindow_->setVisible(show);
+    latencyButton_.setToggleState(show, juce::dontSendNotification);
+    if (show)
+        latencyWindow_->toFront(true);
 }
 
 void MainComponent::saveSession()

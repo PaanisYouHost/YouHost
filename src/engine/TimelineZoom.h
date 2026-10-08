@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace youhost
@@ -34,6 +35,22 @@ inline int clampZoomStep(int step, std::int64_t span) noexcept
     if (step > maxStep)
         return maxStep;
     return step;
+}
+
+// Step 0 is the fitted session. Empty sessions show one minute. A recorded session
+// runs from 0 to the end of the last take, plus a small margin so the end is visible.
+inline std::int64_t fitSpanSamples(std::int64_t contentEnd, double sampleRate) noexcept
+{
+    const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    if (contentEnd < 0)
+        contentEnd = 0;
+    if (contentEnd == 0)
+        return std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(rate * 60.0)));
+
+    const auto halfSecond = std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(rate * 0.5)));
+    const auto twoPercent = contentEnd / 50;
+    const auto margin = std::max(halfSecond, twoPercent);
+    return contentEnd + margin;
 }
 
 // Step 0 shows the whole span. Each step halves it, down to a short detail view.

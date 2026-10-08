@@ -28,6 +28,8 @@ private:
     class GroupHeader;
     void rebuild();
     void showPluginList(int channel, int slot);
+    void beginNameEdit(int channel);
+    void stepNameEdit(int channel, int direction);
 
     AudioEngine& engine_;
     AppSettings& settings_;
