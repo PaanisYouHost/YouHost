@@ -1,5 +1,8 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "MeterScale.h"
+#include "SessionDocument.h"
+#include "SessionFiles.h"
 
 #include <algorithm>
 #include <chrono>
@@ -85,6 +88,9 @@ AudioDeviceID findCoreAudioDevice(const juce::String& name)
 AudioEngine::AudioEngine(AppSettings& settings)
     : settings_(settings)
 {
+    catalogue_ = std::make_unique<PluginCatalogue>(settings_);
+    rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_);
+    rack_->setDirtyHandler([this] { noteSessionEdit(); });
 }
 
 AudioEngine::~AudioEngine()
@@ -130,11 +136,13 @@ void AudioEngine::pollDeviceStats()
     if (device == nullptr || ! device->isOpen())
     {
         deviceOpen_.store(false, std::memory_order_relaxed);
+        cpuUsage_.store(0.0f, std::memory_order_relaxed);
         deviceName_ = "No device";
         return;
     }
 
     deviceName_ = device->getName();
+    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
     const double rate = device->getCurrentSampleRate();
     const int buffer = device->getCurrentBufferSizeSamples();
     const int inputLatency = device->getInputLatencyInSamples();
@@ -286,6 +294,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                        strips_.data(),
                        kMaxChannels);
 
+    // Plugins and the alignment delay run on the dry copy. No lock and no allocation.
+    if (rack_ != nullptr)
+        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing);
+
     noteDropout(dropoutOverrunCount(steadyNowNs() - startedNs, config.expectedPeriodNs));
 }
 
@@ -306,6 +318,10 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     if (device != nullptr)
     {
         publishConfig(*device);
+        if (rack_ != nullptr)
+            rack_->prepare(device->getCurrentSampleRate(),
+                           device->getCurrentBufferSizeSamples(),
+                           currentConfig().routing);
         installOverloadListener(device->getName());
     }
 }
@@ -314,6 +330,8 @@ void AudioEngine::audioDeviceStopped()
 {
     deviceOpen_.store(false, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
+    if (rack_ != nullptr)
+        rack_->deviceStopped();
     removeOverloadListener();
 }
 
@@ -395,6 +413,9 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     juce::ignoreUnused(source);
     pollDeviceStats();
     saveSetupIfAllowed();
+    if (auto* device = deviceManager_.getCurrentAudioDevice())
+        if (device->isOpen() && rack_ != nullptr)
+            rack_->updateRouting(routingFromDevice(*device));
 }
 
 void AudioEngine::saveSetupIfAllowed()
@@ -404,6 +425,193 @@ void AudioEngine::saveSetupIfAllowed()
 
     if (auto xml = deviceManager_.createStateXml())
         settings_.saveAudioSetup(xml.get());
+}
+
+Routing AudioEngine::routingFromDevice(const juce::AudioIODevice& device) const
+{
+    std::array<bool, kMaxChannels> inputs {};
+    std::array<bool, kMaxChannels> outputs {};
+    const auto inputMask = device.getActiveInputChannels();
+    const auto outputMask = device.getActiveOutputChannels();
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        inputs[static_cast<std::size_t>(channel)] = inputMask[channel];
+        outputs[static_cast<std::size_t>(channel)] = outputMask[channel];
+    }
+    return makeRouting(inputs, outputs);
+}
+
+void AudioEngine::pushRouting(const Routing& routing)
+{
+    if (rack_ != nullptr)
+        rack_->updateRouting(routing);
+}
+
+ChannelSnapshot AudioEngine::channelSnapshot(int channel) const
+{
+    if (rack_ == nullptr)
+        return {};
+    return rack_->snapshot(channel);
+}
+
+void AudioEngine::loadPlugin(int channel, int slot, const juce::PluginDescription& description)
+{
+    if (rack_ != nullptr)
+        rack_->loadPlugin(channel, slot, description, {}, false, true);
+}
+
+void AudioEngine::removePlugin(int channel, int slot)
+{
+    if (rack_ != nullptr)
+        rack_->removePlugin(channel, slot);
+}
+
+void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
+{
+    if (rack_ != nullptr)
+        rack_->setBypassed(channel, slot, bypassed);
+}
+
+void AudioEngine::setChannelExcluded(int channel, bool excluded)
+{
+    if (channel >= 0 && channel < kMaxChannels)
+        strips_[static_cast<std::size_t>(channel)].excludeFromCompensation = excluded;
+    if (rack_ != nullptr)
+        rack_->setExcluded(channel, excluded);
+}
+
+void AudioEngine::openPluginEditor(int channel, int slot)
+{
+    if (rack_ != nullptr)
+        rack_->openEditor(channel, slot);
+}
+
+void AudioEngine::setSessionMeters(bool peak, int rmsReferenceDb)
+{
+    sessionPeak_ = peak;
+    sessionReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
+}
+
+void AudioEngine::noteSessionEdit()
+{
+    if (restoringSession_)
+        return;
+    sessionDirty_ = true;
+    sessionDirtyAtMs_ = juce::Time::getMillisecondCounter();
+}
+
+void AudioEngine::setMeterRestoreHandler(std::function<void(bool, int)> handler)
+{
+    meterRestoreHandler_ = std::move(handler);
+}
+
+void AudioEngine::maintainSession()
+{
+    if (catalogue_ != nullptr)
+        catalogue_->flushSave();
+
+    if (! sessionDirty_ || sessionFolder_ == juce::File())
+        return;
+    if (juce::Time::getMillisecondCounter() - sessionDirtyAtMs_ < 1500u)
+        return;
+
+    sessionDirty_ = false;
+    saveSession();
+}
+
+juce::File AudioEngine::suggestedSessionFolder() const
+{
+    if (sessionFolder_ != juce::File())
+        return sessionFolder_;
+    const auto last = settings_.loadLastSessionFolder();
+    if (last.isNotEmpty())
+        return juce::File(last);
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+}
+
+bool AudioEngine::saveSession()
+{
+    if (sessionFolder_ == juce::File())
+        return false;
+    return saveSessionToFolder(sessionFolder_);
+}
+
+bool AudioEngine::saveSessionToFolder(const juce::File& folder)
+{
+    if (folder == juce::File())
+        return false;
+
+    const auto layout = sessionLayoutFor(folder.getFullPathName().toStdString());
+    sessionFolder_ = juce::File(layout.folder);
+    sessionFolder_.createDirectory();
+    juce::File(layout.audioFolder).createDirectory();
+
+    SessionData data;
+    data.peakMeter = sessionPeak_;
+    data.rmsReferenceDb = sessionReferenceDb_;
+    if (persistSetup_)
+        data.device = deviceManager_.createStateXml();
+    if (rack_ != nullptr)
+        rack_->captureSession(data);
+
+    const juce::File file(layout.sessionFile);
+    if (! writeSessionFile(file, data))
+    {
+        sessionMessage_ = "Could not write the session file.";
+        sessionDirty_ = true;
+        return false;
+    }
+
+    settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
+    sessionMessage_ = "Saved " + sessionFolder_.getFileName();
+    sessionDirty_ = false;
+    return true;
+}
+
+bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
+{
+    juce::File folder = fileOrFolder;
+    if (fileOrFolder.existsAsFile())
+        folder = fileOrFolder.getParentDirectory();
+
+    const auto layout = sessionLayoutFor(folder.getFullPathName().toStdString());
+    SessionData data;
+    if (! readSessionFile(juce::File(layout.sessionFile), data))
+    {
+        sessionMessage_ = "Could not read session.youhost.";
+        return false;
+    }
+
+    restoringSession_ = true;
+    sessionFolder_ = juce::File(layout.folder);
+    sessionPeak_ = data.peakMeter;
+    sessionReferenceDb_ = data.rmsReferenceDb;
+    if (meterRestoreHandler_ != nullptr)
+        meterRestoreHandler_(sessionPeak_, sessionReferenceDb_);
+
+    if (rack_ != nullptr)
+        rack_->restoreSession(data);
+
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        strips_[static_cast<std::size_t>(channel)].excludeFromCompensation =
+            data.channels[static_cast<std::size_t>(channel)].excludeFromCompensation;
+
+    if (microphoneGranted_ && data.device != nullptr)
+    {
+        deviceManager_.removeAudioCallback(this);
+        deviceManager_.removeChangeListener(this);
+        openError_ = deviceManager_.initialise(kMaxChannels, kMaxChannels, data.device.get(), true);
+        deviceManager_.addChangeListener(this);
+        deviceManager_.addAudioCallback(this);
+        pollDeviceStats();
+        saveSetupIfAllowed();
+    }
+
+    settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
+    sessionMessage_ = "Opened " + sessionFolder_.getFileName();
+    sessionDirty_ = false;
+    restoringSession_ = false;
+    return true;
 }
 
 } // namespace youhost

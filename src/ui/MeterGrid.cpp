@@ -10,7 +10,7 @@ namespace youhost
 namespace
 {
 
-constexpr float kScaleGutter = 42.0f;
+constexpr float kScaleGutter = 44.0f;
 
 juce::Colour colourForLevel(float linearGain)
 {
@@ -26,18 +26,22 @@ struct BarParts
 {
     juce::Rectangle<float> bar;
     juce::Rectangle<float> clip;
+    juce::Rectangle<float> slotRow;
     juce::Rectangle<float> number;
 };
 
 BarParts splitCell(juce::Rectangle<float> cell)
 {
-    const float numberHeight = juce::jlimit(10.0f, 14.0f, cell.getHeight() * 0.18f);
+    const float numberHeight = juce::jlimit(10.0f, 14.0f, cell.getHeight() * 0.12f);
+    const float slotHeight = juce::jlimit(9.0f, 12.0f, cell.getHeight() * 0.1f);
     auto body = cell.reduced(3.0f, 2.0f);
     auto number = body.removeFromBottom(numberHeight);
+    body.removeFromBottom(1.0f);
+    auto slotRow = body.removeFromBottom(slotHeight);
     body.removeFromBottom(2.0f);
     const auto clip = body.removeFromTop(juce::jmin(7.0f, body.getHeight() * 0.08f));
     body.removeFromTop(2.0f);
-    return { body, clip, number };
+    return { body, clip, slotRow, number };
 }
 
 juce::String tickText(int label)
@@ -47,16 +51,22 @@ juce::String tickText(int label)
     return juce::String(label);
 }
 
-void drawScale(juce::Graphics& graphics, juce::Rectangle<float> bar, bool peak, int referenceDb)
+struct PlacedTick
 {
+    float y = 0.0f;
+    int label = 0;
+};
+
+std::vector<PlacedTick> placeTicks(juce::Rectangle<float> bar, bool peak, int referenceDb)
+{
+    std::vector<PlacedTick> placed;
     if (bar.getHeight() < 8.0f)
-        return;
+        return placed;
 
     MeterTick ticks[9];
     const int count = peak ? peakTicks(ticks, 9) : rmsTicks(referenceDb, ticks, 9);
     const MeterSpan span = peak ? peakMeterSpan() : rmsMeterSpan(referenceDb);
 
-    // Keep 0 and the two ends, then fill the rest wherever the labels still fit.
     std::vector<int> order;
     order.reserve(static_cast<std::size_t>(count));
     for (int index = 0; index < count; ++index)
@@ -69,16 +79,7 @@ void drawScale(juce::Graphics& graphics, juce::Rectangle<float> bar, bool peak, 
     for (int index = 0; index < count; ++index)
         order.push_back(index);
 
-    struct Placed
-    {
-        float y = 0.0f;
-        int label = 0;
-    };
-    std::vector<Placed> placed;
-    placed.reserve(static_cast<std::size_t>(count));
-    // -3 and -6 are 3 dB apart. Keep both while the bar is tall enough to separate them.
     constexpr float minSeparation = 9.0f;
-
     for (int index : order)
     {
         const float y = bar.getBottom() - normaliseDb(ticks[index].dbFs, span) * bar.getHeight();
@@ -95,16 +96,71 @@ void drawScale(juce::Graphics& graphics, juce::Rectangle<float> bar, bool peak, 
             continue;
         placed.push_back({ y, ticks[index].label });
     }
+    return placed;
+}
 
+void drawScaleLabels(juce::Graphics& graphics, const std::vector<PlacedTick>& ticks, float barLeft, float barRight)
+{
     graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-    for (const auto& tick : placed)
+    for (const auto& tick : ticks)
     {
-        graphics.setColour(theme::panelEdge);
-        graphics.fillRect(bar.getX() - 5.0f, tick.y, 4.0f, 1.0f);
-
         graphics.setColour(tick.label == 0 ? theme::text : theme::dim);
-        const auto area = juce::Rectangle<float>(0.0f, tick.y - 6.0f, bar.getX() - 6.0f, 12.0f);
-        graphics.drawText(tickText(tick.label), area, juce::Justification::centredRight, false);
+        const auto left = juce::Rectangle<float>(barLeft - kScaleGutter, tick.y - 6.0f, kScaleGutter - 6.0f, 12.0f);
+        const auto right = juce::Rectangle<float>(barRight + 6.0f, tick.y - 6.0f, kScaleGutter - 8.0f, 12.0f);
+        graphics.drawText(tickText(tick.label), left, juce::Justification::centredRight, false);
+        graphics.drawText(tickText(tick.label), right, juce::Justification::centredLeft, false);
+    }
+}
+
+void drawScaleLines(juce::Graphics& graphics, const std::vector<PlacedTick>& ticks, float barLeft, float barRight)
+{
+    const float width = juce::jmax(0.0f, barRight - barLeft);
+    for (const auto& tick : ticks)
+    {
+        if (tick.label == 0)
+            continue;
+        graphics.setColour(juce::Colour(0x66c5d0e0));
+        graphics.fillRect(barLeft, tick.y - 0.5f, width, 1.0f);
+    }
+    for (const auto& tick : ticks)
+    {
+        if (tick.label != 0)
+            continue;
+        graphics.setColour(theme::text);
+        graphics.fillRect(barLeft, tick.y - 1.0f, width, 2.0f);
+    }
+}
+
+void drawSlotChips(juce::Graphics& graphics, juce::Rectangle<float> row, const std::array<SlotMark, kSlotsPerChannel>& slots)
+{
+    if (row.getWidth() < 4.0f || row.getHeight() < 4.0f)
+        return;
+
+    const float gap = 1.0f;
+    const float chipWidth = (row.getWidth() - gap * static_cast<float>(kSlotsPerChannel - 1)) / static_cast<float>(kSlotsPerChannel);
+    for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+    {
+        const auto chip = juce::Rectangle<float>(row.getX() + static_cast<float>(slot) * (chipWidth + gap),
+                                                 row.getY(),
+                                                 chipWidth,
+                                                 row.getHeight())
+                              .reduced(0.0f, 1.0f);
+        const auto& mark = slots[static_cast<std::size_t>(slot)];
+        if (mark.loading)
+            graphics.setColour(theme::amber);
+        else if (! mark.occupied)
+            graphics.setColour(theme::panelEdge);
+        else if (mark.bypassed)
+            graphics.setColour(theme::fainter);
+        else
+            graphics.setColour(theme::green);
+
+        graphics.fillRoundedRectangle(chip, 1.5f);
+        if (mark.selected)
+        {
+            graphics.setColour(theme::text);
+            graphics.drawRoundedRectangle(chip, 1.5f, 1.0f);
+        }
     }
 }
 
@@ -128,37 +184,65 @@ void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
     onClearClip_ = std::move(handler);
 }
 
+void MeterGrid::setSlotHandler(std::function<void(int channel, int slot)> handler)
+{
+    onSlot_ = std::move(handler);
+}
+
 MeterLayout MeterGrid::layoutFor(int count) const
 {
     if (count <= 0)
         return {};
 
-    const float bridgeWidth = std::max(1.0f, static_cast<float>(getWidth()) - kScaleGutter);
+    const float bridgeWidth = std::max(1.0f, static_cast<float>(getWidth()) - kScaleGutter * 2.0f);
     auto layout = layoutMeters(count, bridgeWidth, static_cast<float>(getHeight()));
     layout.originX += kScaleGutter;
     return layout;
 }
 
-int MeterGrid::channelAt(juce::Point<float> position) const
+MeterHit MeterGrid::meterAt(juce::Point<float> position) const
 {
+    MeterHit hit;
     const int count = static_cast<int>(readings_.size());
     if (count <= 0 || layout_.cellWidth <= 0.0f || layout_.cellHeight <= 0.0f)
-        return -1;
+        return hit;
 
     const float localX = position.x - layout_.originX;
     const float localY = position.y;
     if (localX < 0.0f || localY < 0.0f)
-        return -1;
+        return hit;
 
     const int column = static_cast<int>(localX / layout_.cellWidth);
     const int row = static_cast<int>(localY / layout_.cellHeight);
     if (column < 0 || column >= layout_.columns || row < 0 || row >= layout_.rows)
-        return -1;
+        return hit;
 
     const int index = row * layout_.columns + column;
     if (index < 0 || index >= count)
-        return -1;
-    return index;
+        return hit;
+
+    const auto cell = juce::Rectangle<float>(layout_.originX + static_cast<float>(column) * layout_.cellWidth,
+                                             static_cast<float>(row) * layout_.cellHeight,
+                                             layout_.cellWidth,
+                                             layout_.cellHeight);
+    const auto parts = splitCell(cell);
+    hit.channel = index;
+    if (parts.clip.contains(position))
+    {
+        hit.clip = true;
+        return hit;
+    }
+
+    if (parts.slotRow.contains(position))
+    {
+        const float width = parts.slotRow.getWidth() / static_cast<float>(kSlotsPerChannel);
+        if (width > 0.0f)
+        {
+            const int slot = juce::jlimit(0, kSlotsPerChannel - 1, static_cast<int>((position.x - parts.slotRow.getX()) / width));
+            hit.slot = slot;
+        }
+    }
+    return hit;
 }
 
 void MeterGrid::paint(juce::Graphics& graphics)
@@ -178,15 +262,6 @@ void MeterGrid::paint(juce::Graphics& graphics)
     layout_ = layoutFor(count);
     const float fontSize = juce::jlimit(8.0f, 12.0f, layout_.cellWidth * 0.42f);
     const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(rmsReferenceDb_);
-
-    for (int row = 0; row < layout_.rows; ++row)
-    {
-        const auto probe = juce::Rectangle<float>(layout_.originX,
-                                                 static_cast<float>(row) * layout_.cellHeight,
-                                                 layout_.cellWidth,
-                                                 layout_.cellHeight);
-        drawScale(graphics, splitCell(probe).bar, showPeak_, rmsReferenceDb_);
-    }
 
     for (int index = 0; index < count; ++index)
     {
@@ -214,18 +289,46 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.setColour(reading.clipped ? theme::red : theme::panelEdge);
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
 
+        drawSlotChips(graphics, parts.slotRow, reading.slots);
+
         graphics.setColour(reading.hasInput ? theme::dim : theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(fontSize)));
         graphics.drawText(juce::String(index + 1), parts.number, juce::Justification::centred, false);
+    }
+
+    for (int row = 0; row < layout_.rows; ++row)
+    {
+        const int rowStart = row * layout_.columns;
+        const int rowCount = std::min(layout_.columns, count - rowStart);
+        if (rowCount <= 0)
+            continue;
+
+        const auto first = juce::Rectangle<float>(layout_.originX,
+                                                  static_cast<float>(row) * layout_.cellHeight,
+                                                  layout_.cellWidth,
+                                                  layout_.cellHeight);
+        const auto last = juce::Rectangle<float>(layout_.originX + static_cast<float>(rowCount - 1) * layout_.cellWidth,
+                                                 static_cast<float>(row) * layout_.cellHeight,
+                                                 layout_.cellWidth,
+                                                 layout_.cellHeight);
+        const auto firstBar = splitCell(first).bar;
+        const auto lastBar = splitCell(last).bar;
+        const auto ticks = placeTicks(firstBar, showPeak_, rmsReferenceDb_);
+        drawScaleLines(graphics, ticks, firstBar.getX(), lastBar.getRight());
+        drawScaleLabels(graphics, ticks, firstBar.getX(), lastBar.getRight());
     }
 }
 
 void MeterGrid::mouseDown(const juce::MouseEvent& event)
 {
     layout_ = layoutFor(static_cast<int>(readings_.size()));
-    const int channel = channelAt(event.position);
-    if (channel >= 0 && onClearClip_ != nullptr)
-        onClearClip_(channel);
+    const auto hit = meterAt(event.position);
+    if (hit.channel < 0)
+        return;
+    if (hit.slot >= 0 && onSlot_ != nullptr)
+        onSlot_(hit.channel, hit.slot);
+    else if (hit.clip && onClearClip_ != nullptr)
+        onClearClip_(hit.channel);
 }
 
 } // namespace youhost

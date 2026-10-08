@@ -1,4 +1,5 @@
 #include "YouHostApplication.h"
+#include "engine/PluginCatalogue.h"
 #include "ui/MainComponent.h"
 #include "ui/Theme.h"
 
@@ -15,13 +16,13 @@ public:
         setUsingNativeTitleBar(true);
         setContentOwned(new MainComponent(engine, settings), true);
         setResizable(true, false);
-        setResizeLimits(880, 640, 2600, 1700);
+        setResizeLimits(960, 720, 2600, 1800);
 
         const auto stored = settings_.loadWindowState();
         if (stored.isNotEmpty())
             restoreWindowStateFromString(stored);
         else
-            centreWithSize(1180, 820);
+            centreWithSize(1280, 900);
 
         setVisible(true);
     }
@@ -58,12 +59,30 @@ const juce::String YouHostApplication::getApplicationVersion()
 
 bool YouHostApplication::moreThanOneInstanceAllowed()
 {
+    // The scanner is a second copy of this executable. The single-instance
+    // guard runs before initialise, so the child has to be allowed through.
+    const auto arguments = juce::JUCEApplicationBase::getCommandLineParameterArray();
+    for (const auto& argument : arguments)
+        if (argument.contains("YouHostScan:"))
+            return true;
     return false;
 }
 
 void YouHostApplication::initialise(const juce::String& commandLine)
 {
-    juce::ignoreUnused(commandLine);
+    if (isScanWorkerCommandLine(commandLine))
+    {
+        worker_ = std::make_unique<ScanWorker>();
+        if (worker_->initialiseFromCommandLine(commandLine, "YouHostScan", 15000))
+        {
+            workerMode_ = true;
+            return;
+        }
+
+        worker_.reset();
+        quit();
+        return;
+    }
 
     lookAndFeel_ = std::make_unique<YouHostLookAndFeel>();
     juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel_.get());
@@ -91,6 +110,12 @@ void YouHostApplication::openWindow()
 
 void YouHostApplication::shutdown()
 {
+    if (workerMode_)
+    {
+        worker_.reset();
+        return;
+    }
+
     mainWindow_.reset();
     engine_.reset();
     settings_.reset();

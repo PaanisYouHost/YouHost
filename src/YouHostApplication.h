@@ -2,6 +2,7 @@
 
 #include "AppSettings.h"
 #include "engine/AudioEngine.h"
+#include "engine/PluginCatalogue.h"
 #include "ui/YouHostLookAndFeel.h"
 
 #include <memory>
@@ -32,6 +33,8 @@ private:
     std::unique_ptr<AppSettings> settings_;
     std::unique_ptr<AudioEngine> engine_;
     std::unique_ptr<MainWindow> mainWindow_;
+    std::unique_ptr<ScanWorker> worker_;
+    bool workerMode_ = false;
 };
 
 } // namespace youhost

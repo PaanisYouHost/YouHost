@@ -1,8 +1,10 @@
 #include "engine/DropoutDetect.h"
+#include "engine/LatencyCompensation.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterLayout.h"
 #include "engine/MeterScale.h"
 #include "engine/Passthrough.h"
+#include "engine/SessionFiles.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -286,6 +288,48 @@ void testDropoutDecisions()
     CHECK(youhost::dropoutOverrunCount(period, 0) == 0);
 }
 
+void testLatencyCompensation()
+{
+    youhost::ChannelLatencyInput channels[4] {};
+    channels[0] = { 100, true };
+    channels[1] = { 40, true };
+    channels[2] = { 500, false };
+    channels[3] = { 0, true };
+
+    const auto plan = youhost::planCompensation(channels, 4);
+    CHECK(plan.alignmentSamples == 100);
+    CHECK(plan.delaySamples[0] == 0);
+    CHECK(plan.delaySamples[1] == 60);
+    CHECK(plan.delaySamples[2] == 0);
+    CHECK(plan.delaySamples[3] == 100);
+
+    youhost::ChannelLatencyInput matched[2] {};
+    matched[0] = { 100, true };
+    matched[1] = { 100, true };
+    const auto even = youhost::planCompensation(matched, 2);
+    CHECK(even.alignmentSamples == 100);
+    CHECK(even.delaySamples[0] == 0);
+    CHECK(even.delaySamples[1] == 0);
+
+    youhost::ChannelLatencyInput huge[1] {};
+    huge[0] = { 10000000, true };
+    const auto clamped = youhost::planCompensation(huge, 1);
+    CHECK(clamped.alignmentSamples == youhost::kMaxCompensationSamples);
+
+    const int latencies[] = { 10, 20, 30, 40 };
+    const bool occupied[] = { true, true, true, false };
+    const bool bypassed[] = { false, true, false, false };
+    CHECK(youhost::sumSlotLatency(latencies, occupied, bypassed, 4) == 40);
+}
+
+void testSessionLayout()
+{
+    const auto layout = youhost::sessionLayoutFor("/tmp/My Session/");
+    CHECK(layout.folder == "/tmp/My Session");
+    CHECK(layout.sessionFile == "/tmp/My Session/session.youhost");
+    CHECK(layout.audioFolder == "/tmp/My Session/audio");
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -303,6 +347,8 @@ int main()
     testClipClearWithoutAnOpenInput();
     testMeterScales();
     testDropoutDecisions();
+    testLatencyCompensation();
+    testSessionLayout();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
     testMeterLayoutScales();

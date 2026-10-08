@@ -35,6 +35,10 @@ target_sources(YouHost PRIVATE
     src/Main.cpp
     src/YouHostApplication.cpp
     src/engine/AudioEngine.cpp
+    src/engine/PluginCatalogue.cpp
+    src/engine/PluginRack.cpp
+    src/engine/SessionDocument.cpp
+    src/ui/ChannelStripPanel.cpp
     src/ui/LatencyReadout.cpp
     src/ui/MeterGrid.cpp
     src/ui/MainComponent.cpp)
@@ -45,15 +49,25 @@ target_compile_definitions(YouHost PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_PLUGINHOST_VST3=1
     YOUHOST_VERSION="${PROJECT_VERSION}")
 
+if(APPLE)
+    target_compile_definitions(YouHost PRIVATE JUCE_PLUGINHOST_AU=1)
+endif()
+
 target_link_libraries(YouHost PRIVATE
+    juce::juce_audio_processors
     juce::juce_audio_utils
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 
 if(APPLE)
-    target_link_libraries(YouHost PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+    target_link_libraries(YouHost PRIVATE
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework CoreAudio"
+        "-framework CoreFoundation")
 endif()
 
 add_executable(YouHostTests tests/engine_tests.cpp)

@@ -35,6 +35,12 @@ public:
         setColour(juce::ToggleButton::textColourId, theme::text);
         setColour(juce::ToggleButton::tickColourId, theme::green);
         setColour(juce::ToggleButton::tickDisabledColourId, theme::fainter);
+        setColour(juce::TextEditor::backgroundColourId, theme::background);
+        setColour(juce::TextEditor::textColourId, theme::text);
+        setColour(juce::TextEditor::outlineColourId, theme::panelEdge);
+        setColour(juce::TextEditor::highlightColourId, theme::buttonOn);
+        setColour(juce::CaretComponent::caretColourId, theme::text);
+        setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
     }
 };
 

@@ -96,6 +96,51 @@ public:
             settings->saveIfNeeded();
     }
 
+    std::unique_ptr<juce::XmlElement> loadKnownPlugins()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getXmlValue("knownPlugins");
+        return {};
+    }
+
+    void saveKnownPlugins(const juce::XmlElement* xml)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            if (xml != nullptr)
+                settings->setValue("knownPlugins", xml);
+            else
+                settings->removeValue("knownPlugins");
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::String loadLastSessionFolder()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("lastSessionFolder");
+        return {};
+    }
+
+    void saveLastSessionFolder(const juce::String& folder)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("lastSessionFolder", folder);
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::File supportDirectory()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getFile().getParentDirectory();
+
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+            .getChildFile("Ambient Audio")
+            .getChildFile("YouHost");
+    }
+
 private:
     juce::ApplicationProperties properties_;
 };
