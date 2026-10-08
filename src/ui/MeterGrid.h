@@ -76,6 +76,7 @@ public:
     void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb);
     void setFitWidth(int viewportWidth);
     int preferredWidth(int viewportWidth) const;
+    int naturalContentWidth(int viewportWidth) const;
 
     void setClearHandler(std::function<void(int channel)> handler);
     void setRecordHandler(std::function<void(int channel)> handler);

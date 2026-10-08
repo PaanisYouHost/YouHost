@@ -136,8 +136,9 @@ void MeterScaleRail::paint(juce::Graphics& graphics)
     for (const auto& tick : ticks)
     {
         graphics.setColour(tick.label == 0 ? theme::text : theme::dim);
+        const float textX = alignRight_ ? 0.0f : 1.0f;
         graphics.drawText(tickText(tick.label),
-                          juce::Rectangle<float>(2.0f, tick.y - 6.0f, area.getWidth() - 4.0f, 12.0f),
+                          juce::Rectangle<float>(textX, tick.y - 7.0f, area.getWidth() - 1.0f, 14.0f),
                           alignRight_ ? juce::Justification::centredLeft : juce::Justification::centredRight,
                           false);
     }
@@ -165,6 +166,12 @@ int MeterGrid::preferredWidth(int viewportWidth) const
 {
     const auto metrics = metricsFor(std::max(1, viewportWidth));
     return std::max(viewportWidth, static_cast<int>(std::ceil(metrics.contentWidth)));
+}
+
+int MeterGrid::naturalContentWidth(int viewportWidth) const
+{
+    const auto metrics = metricsFor(std::max(1, viewportWidth));
+    return std::max(1, static_cast<int>(std::ceil(metrics.contentWidth)));
 }
 
 void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
@@ -392,6 +399,12 @@ void MeterGrid::paint(juce::Graphics& graphics)
         {
             graphics.setColour(theme::text);
             graphics.drawRoundedRectangle(bounds.reduced(1.0f), 3.0f, 1.5f);
+        }
+
+        if (&cell != &cells_.back())
+        {
+            graphics.setColour(juce::Colour(0xff8b95a8));
+            graphics.fillRect(bounds.getRight() - 1.0f, 0.0f, 1.0f, bounds.getHeight());
         }
     }
 

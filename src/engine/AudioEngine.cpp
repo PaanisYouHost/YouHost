@@ -133,8 +133,6 @@ void AudioEngine::start(bool allowInput)
     started_ = true;
     pollDeviceStats();
     saveSetupIfAllowed();
-    if (deviceManager_.getCurrentAudioDevice() != nullptr)
-        ensureSessionFolder();
 }
 
 void AudioEngine::pollDeviceStats()
@@ -555,7 +553,6 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
         {
             if (rack_ != nullptr)
                 rack_->updateRouting(routingFromDevice(*device));
-            ensureSessionFolder();
         }
     }
 }
@@ -672,9 +669,22 @@ juce::String AudioEngine::channelName(int channel) const
     return recorder_ != nullptr ? recorder_->channelName(channel) : juce::String();
 }
 
+void AudioEngine::toggleRecordReady()
+{
+    if (recorder_ != nullptr && recorder_->isRecording())
+        return;
+    recordReady_ = ! recordReady_;
+}
+
 void AudioEngine::transportRecord()
 {
-    ensureSessionFolder();
+    recordReady_ = true;
+    const auto problem = sessionRecordProblem();
+    if (problem.isNotEmpty())
+    {
+        sessionMessage_ = problem;
+        return;
+    }
     if (recorder_ == nullptr)
         return;
     const auto routing = currentConfig().routing;
@@ -684,6 +694,7 @@ void AudioEngine::transportRecord()
 
 void AudioEngine::transportStop()
 {
+    recordReady_ = false;
     if (recorder_ == nullptr)
         return;
     const bool recording = recorder_->isRecording();
@@ -697,8 +708,16 @@ void AudioEngine::transportStop()
 
 void AudioEngine::transportPlay()
 {
-    if (recorder_ != nullptr)
-        recorder_->play();
+    if (recorder_ == nullptr)
+        return;
+    if (recorder_->isRecording() || recorder_->isPlaying())
+        return;
+    if (recordReady_)
+    {
+        transportRecord();
+        return;
+    }
+    recorder_->play();
 }
 
 void AudioEngine::transportLocate(std::int64_t sample)
@@ -730,13 +749,121 @@ void AudioEngine::startNewSession()
 {
     if (recorder_ != nullptr)
         recorder_->stop();
+    recordReady_ = false;
     if (sessionFolder_ != juce::File())
         saveSession();
     if (recorder_ != nullptr)
         recorder_->clearTakes();
     sessionFolder_ = juce::File();
+    sessionOnInternalDisk_ = false;
     sessionDirty_ = false;
-    ensureSessionFolder();
+    sessionMessage_ = "New session. Choose a name and a folder.";
+}
+
+bool AudioEngine::isInternalFallback(const juce::File& folder) const
+{
+    const auto root = juce::File::getSpecialLocation(juce::File::userMusicDirectory).getChildFile("YouHost");
+    return folder.isAChildOf(root);
+}
+
+void AudioEngine::rememberSessionParent(const juce::File& sessionFolder)
+{
+    if (sessionFolder == juce::File() || isInternalFallback(sessionFolder))
+        return;
+    settings_.saveSessionParentFolder(sessionFolder.getParentDirectory().getFullPathName());
+}
+
+juce::File AudioEngine::defaultSessionParent() const
+{
+    const auto saved = juce::File(settings_.loadSessionParentFolder());
+    if (saved.isDirectory())
+        return saved;
+    return juce::File::getSpecialLocation(juce::File::userMusicDirectory);
+}
+
+juce::String AudioEngine::missingSessionParentNote() const
+{
+    const auto saved = settings_.loadSessionParentFolder();
+    if (saved.isNotEmpty() && ! juce::File(saved).isDirectory())
+        return "The last drive is not available. Choose a folder.";
+    return {};
+}
+
+juce::String AudioEngine::sessionRecordProblem() const
+{
+    if (sessionFolder_ == juce::File())
+        return "This session has no folder yet. Recording did not start.";
+
+    const auto parent = sessionFolder_.getParentDirectory();
+    if (! parent.isDirectory())
+        return "The session drive is not available. " + sessionFolder_.getFullPathName()
+               + " may be unmounted. Recording did not start.";
+    if (sessionFolder_.existsAsFile())
+        return sessionFolder_.getFullPathName() + " is not a folder. Recording did not start.";
+
+    const auto probe = sessionFolder_.isDirectory() ? sessionFolder_ : parent;
+    if (! probe.hasWriteAccess())
+        return "The session folder is not writable. " + sessionFolder_.getFullPathName()
+               + " Recording did not start.";
+    return {};
+}
+
+bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk)
+{
+    if (folder.getFullPathName().isEmpty())
+        return false;
+
+    if (recorder_ != nullptr)
+        recorder_->stop();
+    recordReady_ = false;
+    if (sessionFolder_ != juce::File() && sessionFolder_ != folder)
+    {
+        if (! saveSession())
+            return false;
+    }
+    if (recorder_ != nullptr)
+        recorder_->clearTakes();
+
+    sessionOnInternalDisk_ = internalDisk;
+    if (! saveSessionToFolder(folder))
+        return false;
+
+    if (internalDisk)
+        sessionMessage_ = "This session is on the internal disk: " + sessionFolder_.getFullPathName();
+    else
+    {
+        rememberSessionParent(sessionFolder_);
+        sessionMessage_ = "Session folder " + sessionFolder_.getFullPathName();
+    }
+    return true;
+}
+
+bool AudioEngine::createInternalSession()
+{
+    auto root = juce::File::getSpecialLocation(juce::File::userMusicDirectory).getChildFile("YouHost");
+    root.createDirectory();
+    if (! root.isDirectory() || ! root.hasWriteAccess())
+    {
+        sessionMessage_ = "The internal Music folder is not writable.";
+        return false;
+    }
+
+    const auto stamp = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S");
+    auto folder = root.getChildFile(stamp);
+    int suffix = 2;
+    while (folder.exists())
+        folder = root.getChildFile(stamp + "-" + juce::String(suffix++));
+
+    if (! placeNewSession(folder, true))
+        return false;
+    sessionMessage_ = "This session is on the internal disk: " + sessionFolder_.getFullPathName();
+    return true;
+}
+
+void AudioEngine::setGlobalKeyListener(juce::KeyListener* listener)
+{
+    if (rack_ != nullptr)
+        rack_->setGlobalKeyListener(listener);
 }
 
 void AudioEngine::setSessionMeters(bool peak, int rmsReferenceDb)
@@ -804,25 +931,6 @@ void AudioEngine::syncRecorderFolder()
     recorder_->setAudioFolder(juce::File(layout.audioFolder));
 }
 
-void AudioEngine::ensureSessionFolder()
-{
-    if (sessionFolder_.getFullPathName().isNotEmpty())
-    {
-        syncRecorderFolder();
-        return;
-    }
-
-    auto root = juce::File::getSpecialLocation(juce::File::userMusicDirectory).getChildFile("YouHost");
-    root.createDirectory();
-    const auto stamp = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S");
-    auto folder = root.getChildFile(stamp);
-    int suffix = 2;
-    while (folder.exists())
-        folder = root.getChildFile(stamp + "-" + juce::String(suffix++));
-
-    saveSessionToFolder(folder);
-    sessionMessage_ = "Session folder " + folder.getFullPathName();
-}
 
 void AudioEngine::setMeterRestoreHandler(std::function<void(bool, int)> handler)
 {
@@ -851,15 +959,16 @@ juce::File AudioEngine::suggestedSessionFolder() const
     const auto last = settings_.loadLastSessionFolder();
     if (last.isNotEmpty())
         return juce::File(last);
-    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    return defaultSessionParent();
 }
 
 bool AudioEngine::saveSession()
 {
     if (sessionFolder_ == juce::File())
-        ensureSessionFolder();
-    if (sessionFolder_ == juce::File())
+    {
+        sessionMessage_ = "Choose where to save this session.";
         return false;
+    }
     return saveSessionToFolder(sessionFolder_);
 }
 
@@ -955,6 +1064,9 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
     settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
     settings_.rememberRecentSession(sessionFolder_.getFullPathName());
+    rememberSessionParent(sessionFolder_);
+    sessionOnInternalDisk_ = isInternalFallback(sessionFolder_);
+    recordReady_ = false;
     sessionMessage_ = "Opened " + sessionFolder_.getFileName();
     sessionDirty_ = false;
     restoringSession_ = false;
@@ -970,8 +1082,15 @@ bool AudioEngine::saveSessionAs(const juce::File& folder)
     if (recorder_ != nullptr)
         recorder_->stop();
     if (sessionFolder_ == juce::File())
-        ensureSessionFolder();
-    else if (! saveSession())
+    {
+        sessionOnInternalDisk_ = false;
+        if (! saveSessionToFolder(folder))
+            return false;
+        rememberSessionParent(sessionFolder_);
+        sessionMessage_ = "Session folder " + sessionFolder_.getFullPathName();
+        return true;
+    }
+    if (! saveSession())
         return false;
 
     if (folder.getFullPathName() == sessionFolder_.getFullPathName())
@@ -1001,6 +1120,8 @@ bool AudioEngine::saveSessionAs(const juce::File& folder)
     syncRecorderFolder();
     if (! saveSession())
         return false;
+    rememberSessionParent(sessionFolder_);
+    sessionOnInternalDisk_ = isInternalFallback(sessionFolder_);
     sessionMessage_ = "Saved a copy in " + folder.getFullPathName() + ". The original folder is unchanged.";
     return true;
 }
@@ -1024,7 +1145,11 @@ bool AudioEngine::importRecordingFolder(const juce::File& folder)
 
     if (recorder_ != nullptr)
         recorder_->stop();
-    ensureSessionFolder();
+    if (sessionFolder_ == juce::File())
+    {
+        sessionMessage_ = "Save the session before importing.";
+        return false;
+    }
     const auto layout = sessionLayoutFor(sessionFolder_.getFullPathName().toStdString());
     const juce::File audioFolder(layout.audioFolder);
     audioFolder.createDirectory();

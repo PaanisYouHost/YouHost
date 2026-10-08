@@ -84,6 +84,7 @@ public:
     void captureSession(SessionData& data);
     void restoreSession(const SessionData& data);
     void setDirtyHandler(std::function<void()> handler);
+    void setGlobalKeyListener(juce::KeyListener* listener);
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
 private:
@@ -134,6 +135,7 @@ private:
     std::atomic<int>& compensationSamples_;
     AppSettings* settings_ = nullptr;
     std::function<void()> dirtyHandler_;
+    juce::KeyListener* commandKeys_ = nullptr;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 
     mutable std::mutex lifeLock_;

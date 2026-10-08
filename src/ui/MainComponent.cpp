@@ -2,8 +2,10 @@
 #include "ChannelMenu.h"
 #include "Theme.h"
 #include "WindowMemory.h"
+#include "engine/HostLimits.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
+#include "engine/SessionFiles.h"
 
 #include <vector>
 
@@ -18,13 +20,20 @@ constexpr const char* kShortcutHelp =
     "3  Open or close the plugin scanner\n"
     "4 or D  Open or close the dropout timeline\n"
     "Space  Play, or Stop when already playing or recording\n"
-    "Shift+Space, R, or Cmd+Space  Record\n"
+    "Cmd+Space  Record immediately\n"
     "Left / Right  Previous or next take\n"
     "Shift+Left / Shift+Right  Move 5 seconds\n"
+    "T  Zoom the timeline in\n"
+    "R  Zoom the timeline out\n"
     "Cmd+S  Save\n"
-    "Cmd+Shift+S  Save a copy of the session folder\n\n"
-    "Cmd+Space works only when Spotlight is not using that shortcut. Shift+Space and R always work.\n"
-    "Shortcuts do nothing while a text field or a plugin window has focus.";
+    "Cmd+Shift+S  Save a copy of the session folder\n"
+    "Option-drag  Copy a plugin and its settings\n\n"
+    "Record arms the take and the button blinks red. Play while armed starts recording.\n"
+    "Play while not armed is the virtual soundcheck. Stop turns record arm off.\n"
+    "Cmd+Space records immediately. Cmd+S also works from the File menu and while a plugin window is in front.\n"
+    "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
+    "The + and - buttons at the bottom right of the timeline zoom the same way as T and R.\n"
+    "Other shortcuts do nothing while a text field has focus.";
 
 void hideTestButtons(juce::Component& component)
 {
@@ -115,23 +124,23 @@ private:
 class SetupWindow : public juce::DocumentWindow
 {
 public:
-    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AppSettings& settings)
+    SetupWindow(juce::AudioDeviceSelectorComponent& selector,
+                juce::Label& bitLabel,
+                juce::ComboBox& bitBox,
+                AppSettings& settings)
         : juce::DocumentWindow("Audio setup", theme::background, juce::DocumentWindow::closeButton),
           settings_(settings),
-          selector_(selector)
+          content_(selector, bitLabel, bitBox)
     {
-        viewport_.setViewedComponent(&selector_, false);
-        viewport_.setScrollBarsShown(true, true);
         setUsingNativeTitleBar(true);
-        setContentNonOwned(&viewport_, false);
-        prepareRememberedWindow(*this, settings_, "windowSetup", 760, 640, 560, 420);
+        setContentNonOwned(&content_, false);
+        prepareRememberedWindow(*this, settings_, "windowSetup", 760, 700, 560, 460);
         setVisible(false);
     }
 
     ~SetupWindow() override
     {
         saveRememberedWindow(*this, settings_, "windowSetup");
-        viewport_.setViewedComponent(nullptr, false);
     }
 
     void closeButtonPressed() override
@@ -140,17 +149,48 @@ public:
         setVisible(false);
     }
 
-    void resized() override
-    {
-        juce::DocumentWindow::resized();
-        const int width = std::max(520, viewport_.getMaximumVisibleWidth());
-        selector_.setSize(width, std::max(selector_.getHeight(), viewport_.getMaximumVisibleHeight()));
-    }
-
 private:
+    class Content : public juce::Component
+    {
+    public:
+        Content(juce::AudioDeviceSelectorComponent& selector, juce::Label& bitLabel, juce::ComboBox& bitBox)
+            : selector_(selector),
+              bitLabel_(bitLabel),
+              bitBox_(bitBox)
+        {
+            addAndMakeVisible(bitLabel_);
+            addAndMakeVisible(bitBox_);
+            addAndMakeVisible(viewport_);
+            viewport_.setViewedComponent(&selector_, false);
+            viewport_.setScrollBarsShown(true, true);
+        }
+
+        ~Content() override
+        {
+            viewport_.setViewedComponent(nullptr, false);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(12, 8);
+            auto row = area.removeFromTop(32);
+            bitLabel_.setBounds(row.removeFromLeft(84));
+            bitBox_.setBounds(row.removeFromLeft(180).reduced(4, 2));
+            area.removeFromTop(8);
+            viewport_.setBounds(area);
+            const int width = std::max(520, viewport_.getMaximumVisibleWidth());
+            selector_.setSize(width, std::max(selector_.getHeight(), std::max(640, viewport_.getMaximumVisibleHeight())));
+        }
+
+    private:
+        juce::AudioDeviceSelectorComponent& selector_;
+        juce::Label& bitLabel_;
+        juce::ComboBox& bitBox_;
+        juce::Viewport viewport_;
+    };
+
     AppSettings& settings_;
-    juce::AudioDeviceSelectorComponent& selector_;
-    juce::Viewport viewport_;
+    Content content_;
 };
 
 void gatherToggleLists(juce::Component& component, std::vector<std::vector<juce::ToggleButton*>>& lists)
@@ -166,6 +206,512 @@ void gatherToggleLists(juce::Component& component, std::vector<std::vector<juce:
         if (child != nullptr && dynamic_cast<juce::ToggleButton*>(child) == nullptr)
             gatherToggleLists(*child, lists);
 }
+
+juce::String sessionNameProblem(const juce::File& parent, const juce::String& rawName, juce::File& folderOut)
+{
+    if (! parent.isDirectory())
+        return "That location is not available. The drive may be missing or unmounted.";
+    if (! parent.hasWriteAccess())
+        return "That location is not writable.";
+
+    const auto clean = sanitiseSessionName(rawName.toStdString());
+    folderOut = parent.getChildFile(juce::String(clean));
+    if (folderOut.existsAsFile())
+        return folderOut.getFullPathName() + " is a file. Choose another name.";
+    if (folderOut.getChildFile(kSessionFileName).existsAsFile())
+        return "That folder already has a session. Open it, or choose another name.";
+    return {};
+}
+
+class SessionPlaceWindow : public juce::DocumentWindow
+{
+public:
+    SessionPlaceWindow(const juce::String& title,
+                       juce::File parent,
+                       juce::String parentNote,
+                       std::function<void(juce::File folder, bool internalDisk)> done)
+        : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
+          content_(std::move(parent), std::move(parentNote), std::move(done))
+    {
+        setUsingNativeTitleBar(true);
+        setContentNonOwned(&content_, false);
+        setResizable(true, false);
+        setResizeLimits(480, 260, 900, 520);
+        centreWithSize(560, 300);
+        setVisible(true);
+    }
+
+    void closeButtonPressed() override
+    {
+        content_.cancel();
+    }
+
+    ~SessionPlaceWindow() override
+    {
+        if (isCurrentlyModal())
+            exitModalState(0);
+    }
+
+private:
+    class Content : public juce::Component
+    {
+    public:
+        Content(juce::File parent, juce::String parentNote, std::function<void(juce::File, bool)> done)
+            : parent_(std::move(parent)),
+              done_(std::move(done))
+        {
+            addAndMakeVisible(nameLabel_);
+            addAndMakeVisible(name_);
+            addAndMakeVisible(locationLabel_);
+            addAndMakeVisible(location_);
+            addAndMakeVisible(note_);
+            addAndMakeVisible(browse_);
+            addAndMakeVisible(create_);
+            addAndMakeVisible(internal_);
+            addAndMakeVisible(cancel_);
+            nameLabel_.setText("Session name", juce::dontSendNotification);
+            locationLabel_.setText("Location", juce::dontSendNotification);
+            name_.setText(juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S"), juce::dontSendNotification);
+            name_.setSelectAllWhenFocused(true);
+            location_.setJustificationType(juce::Justification::centredLeft);
+            note_.setJustificationType(juce::Justification::centredLeft);
+            note_.setColour(juce::Label::textColourId, theme::amber);
+            note_.setText(parentNote, juce::dontSendNotification);
+            refreshLocation();
+            browse_.onClick = [this] { browse(); };
+            create_.onClick = [this] { create(); };
+            internal_.onClick = [this] { confirmInternal(); };
+            cancel_.onClick = [this] { cancel(); };
+            for (auto* button : { &browse_, &create_, &internal_, &cancel_ })
+            {
+                button->setMouseClickGrabsKeyboardFocus(false);
+                button->setWantsKeyboardFocus(false);
+            }
+        }
+
+        void cancel()
+        {
+            if (done_ == nullptr)
+                return;
+            auto done = std::move(done_);
+            done(juce::File(), false);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(16, 14);
+            auto row = area.removeFromTop(28);
+            nameLabel_.setBounds(row.removeFromLeft(110));
+            name_.setBounds(row);
+            area.removeFromTop(8);
+            row = area.removeFromTop(28);
+            locationLabel_.setBounds(row.removeFromLeft(110));
+            browse_.setBounds(row.removeFromRight(96).reduced(4, 0));
+            location_.setBounds(row);
+            area.removeFromTop(4);
+            note_.setBounds(area.removeFromTop(36));
+            area.removeFromTop(8);
+            row = area.removeFromTop(32);
+            create_.setBounds(row.removeFromLeft(150).reduced(0, 2));
+            row.removeFromLeft(8);
+            internal_.setBounds(row.removeFromLeft(140).reduced(0, 2));
+            cancel_.setBounds(row.removeFromRight(100).reduced(0, 2));
+        }
+
+    private:
+        void refreshLocation()
+        {
+            location_.setText(parent_.getFullPathName(), juce::dontSendNotification);
+        }
+
+        void browse()
+        {
+            if (chooser_ != nullptr)
+                return;
+            chooser_ = std::make_unique<juce::FileChooser>("Choose a Drive or Folder", parent_, juce::String(), true);
+            chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                                  [safe = juce::Component::SafePointer<Content>(this)](const juce::FileChooser& chooser)
+                                  {
+                                      const auto chosen = chooser.getResult();
+                                      juce::MessageManager::callAsync([safe, chosen]
+                                      {
+                                          if (safe == nullptr)
+                                              return;
+                                          safe->chooser_.reset();
+                                          if (chosen.isDirectory())
+                                          {
+                                              safe->parent_ = chosen;
+                                              safe->note_.setText({}, juce::dontSendNotification);
+                                              safe->refreshLocation();
+                                          }
+                                      });
+                                  });
+        }
+
+        void create()
+        {
+            juce::File folder;
+            const auto problem = sessionNameProblem(parent_, name_.getText(), folder);
+            if (problem.isNotEmpty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Cannot create the session",
+                                                       problem);
+                return;
+            }
+            if (done_ == nullptr)
+                return;
+            auto done = std::move(done_);
+            done(folder, false);
+        }
+
+        void confirmInternal()
+        {
+            juce::AlertWindow::showOkCancelBox(
+                juce::MessageBoxIconType::WarningIcon,
+                "Session on the internal disk?",
+                "This stores the session in the Music folder on the internal disk. Recordings usually belong on an external drive.",
+                "Use internal disk",
+                "Cancel",
+                nullptr,
+                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this)](int result)
+                {
+                    if (result != 1 || safe == nullptr || safe->done_ == nullptr)
+                        return;
+                    auto done = std::move(safe->done_);
+                    done(juce::File(), true);
+                }));
+        }
+
+        juce::File parent_;
+        std::function<void(juce::File, bool)> done_;
+        std::unique_ptr<juce::FileChooser> chooser_;
+        juce::Label nameLabel_;
+        juce::TextEditor name_;
+        juce::Label locationLabel_;
+        juce::Label location_;
+        juce::Label note_;
+        juce::TextButton browse_ { "Browse…" };
+        juce::TextButton create_ { "Create session" };
+        juce::TextButton internal_ { "Internal disk…" };
+        juce::TextButton cancel_ { "Cancel" };
+    };
+
+    Content content_;
+};
+
+class StartupWindow : public juce::DocumentWindow
+{
+public:
+    StartupWindow(AudioEngine& engine, std::function<void()> onDone)
+        : juce::DocumentWindow("Start session", theme::background, juce::DocumentWindow::closeButton),
+          content_(engine, [this] { finish(); })
+    {
+        onDone_ = std::move(onDone);
+        setUsingNativeTitleBar(true);
+        setContentNonOwned(&content_, false);
+        setResizable(true, false);
+        setResizeLimits(680, 640, 1400, 1200);
+        centreWithSize(860, 820);
+        setVisible(true);
+    }
+
+    ~StartupWindow() override
+    {
+        if (isCurrentlyModal())
+            exitModalState(0);
+    }
+
+    void closeButtonPressed() override
+    {
+        finish();
+    }
+
+private:
+    void finish()
+    {
+        if (finished_)
+            return;
+        finished_ = true;
+        if (onDone_)
+            onDone_();
+    }
+
+    class Content : public juce::Component,
+                    private juce::Timer
+    {
+    public:
+        Content(AudioEngine& engine, std::function<void()> onDone)
+            : engine_(engine),
+              onDone_(std::move(onDone)),
+              selector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false),
+              parent_(engine.defaultSessionParent())
+        {
+            addAndMakeVisible(intro_);
+            addAndMakeVisible(deviceViewport_);
+            addAndMakeVisible(nameLabel_);
+            addAndMakeVisible(name_);
+            addAndMakeVisible(locationLabel_);
+            addAndMakeVisible(location_);
+            addAndMakeVisible(note_);
+            addAndMakeVisible(browse_);
+            addAndMakeVisible(create_);
+            addAndMakeVisible(open_);
+            addAndMakeVisible(internal_);
+            addAndMakeVisible(recentLabel_);
+            addAndMakeVisible(recentViewport_);
+            intro_.setText("Choose the interface, then create a session or open one. Recordings usually go on an external drive. "
+                           "Ticks in this list open device channels. In the mixer, REC and OFF are the channel switches.",
+                           juce::dontSendNotification);
+            intro_.setJustificationType(juce::Justification::topLeft);
+            nameLabel_.setText("Session name", juce::dontSendNotification);
+            locationLabel_.setText("Location", juce::dontSendNotification);
+            recentLabel_.setText("Open recent", juce::dontSendNotification);
+            name_.setText(juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S"), juce::dontSendNotification);
+            location_.setJustificationType(juce::Justification::centredLeft);
+            note_.setColour(juce::Label::textColourId, theme::amber);
+            note_.setText(engine_.missingSessionParentNote(), juce::dontSendNotification);
+            refreshLocation();
+            deviceViewport_.setViewedComponent(&selector_, false);
+            deviceViewport_.setScrollBarsShown(true, false);
+            selector_.setItemHeight(22);
+            recentViewport_.setViewedComponent(&recent_, false);
+            recentViewport_.setScrollBarsShown(true, false);
+            browse_.onClick = [this] { browse(); };
+            create_.onClick = [this] { create(); };
+            open_.onClick = [this] { openExisting(); };
+            internal_.onClick = [this] { confirmInternal(); };
+            rebuildRecent();
+            hideTestButtons(selector_);
+            startTimerHz(4);
+        }
+
+        ~Content() override
+        {
+            stopTimer();
+            deviceViewport_.setViewedComponent(nullptr, false);
+            recentViewport_.setViewedComponent(nullptr, false);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(16, 12);
+            intro_.setBounds(area.removeFromTop(52));
+            area.removeFromTop(6);
+            deviceViewport_.setBounds(area.removeFromTop(std::max(220, area.getHeight() / 2)));
+            const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
+            selector_.setSize(width, std::max(selector_.getHeight(), 480));
+            area.removeFromTop(10);
+            auto row = area.removeFromTop(28);
+            nameLabel_.setBounds(row.removeFromLeft(110));
+            name_.setBounds(row);
+            area.removeFromTop(6);
+            row = area.removeFromTop(28);
+            locationLabel_.setBounds(row.removeFromLeft(110));
+            browse_.setBounds(row.removeFromRight(96).reduced(4, 0));
+            location_.setBounds(row);
+            note_.setBounds(area.removeFromTop(22));
+            area.removeFromTop(6);
+            row = area.removeFromTop(32);
+            create_.setBounds(row.removeFromLeft(150).reduced(0, 2));
+            row.removeFromLeft(8);
+            open_.setBounds(row.removeFromLeft(140).reduced(0, 2));
+            row.removeFromLeft(8);
+            internal_.setBounds(row.removeFromLeft(140).reduced(0, 2));
+            area.removeFromTop(8);
+            recentLabel_.setBounds(area.removeFromTop(20));
+            recentViewport_.setBounds(area);
+            layoutRecent();
+        }
+
+    private:
+        void timerCallback() override
+        {
+            hideTestButtons(selector_);
+        }
+
+        void refreshLocation()
+        {
+            location_.setText(parent_.getFullPathName(), juce::dontSendNotification);
+        }
+
+        void layoutRecent()
+        {
+            const int width = std::max(200, recentViewport_.getMaximumVisibleWidth());
+            int y = 0;
+            for (auto& button : recentButtons_)
+            {
+                button->setBounds(0, y, width, 26);
+                y += 28;
+            }
+            if (recentButtons_.empty())
+            {
+                emptyRecent_.setBounds(0, 0, width, 28);
+                y = 28;
+            }
+            recent_.setSize(width, std::max(y, recentViewport_.getMaximumVisibleHeight()));
+        }
+
+        void rebuildRecent()
+        {
+            recentButtons_.clear();
+            emptyRecent_.setText("No recent sessions.", juce::dontSendNotification);
+            emptyRecent_.setColour(juce::Label::textColourId, theme::dim);
+            const auto sessions = engine_.recentSessions();
+            if (sessions.isEmpty())
+            {
+                recent_.addAndMakeVisible(emptyRecent_);
+                return;
+            }
+            for (int index = 0; index < sessions.size() && index < 10; ++index)
+            {
+                const auto file = juce::File(sessions[index]);
+                auto button = std::make_unique<juce::TextButton>(file.getFileName());
+                button->setTooltip(file.getFullPathName());
+                button->setMouseClickGrabsKeyboardFocus(false);
+                button->onClick = [this, file]
+                {
+                    if (engine_.loadSessionFrom(file))
+                        finish();
+                    else
+                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                               "Could not open that session",
+                                                               engine_.sessionMessage());
+                };
+                recent_.addAndMakeVisible(*button);
+                recentButtons_.push_back(std::move(button));
+            }
+        }
+
+        void browse()
+        {
+            if (chooser_ != nullptr)
+                return;
+            chooser_ = std::make_unique<juce::FileChooser>("Choose a Drive or Folder", parent_, juce::String(), true);
+            chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                                  [safe = juce::Component::SafePointer<Content>(this)](const juce::FileChooser& chooser)
+                                  {
+                                      const auto chosen = chooser.getResult();
+                                      juce::MessageManager::callAsync([safe, chosen]
+                                      {
+                                          if (safe == nullptr)
+                                              return;
+                                          safe->chooser_.reset();
+                                          if (chosen.isDirectory())
+                                          {
+                                              safe->parent_ = chosen;
+                                              safe->note_.setText({}, juce::dontSendNotification);
+                                              safe->refreshLocation();
+                                          }
+                                      });
+                                  });
+        }
+
+        void create()
+        {
+            juce::File folder;
+            const auto problem = sessionNameProblem(parent_, name_.getText(), folder);
+            if (problem.isNotEmpty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Cannot create the session",
+                                                       problem);
+                return;
+            }
+            if (engine_.placeNewSession(folder, false))
+                finish();
+            else
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Cannot create the session",
+                                                       engine_.sessionMessage());
+        }
+
+        void openExisting()
+        {
+            if (chooser_ != nullptr)
+                return;
+            chooser_ = std::make_unique<juce::FileChooser>("Open a Session",
+                                                           engine_.suggestedSessionFolder(),
+                                                           "*.youhost",
+                                                           true);
+            chooser_->launchAsync(juce::FileBrowserComponent::openMode
+                                      | juce::FileBrowserComponent::canSelectFiles
+                                      | juce::FileBrowserComponent::canSelectDirectories,
+                                  [safe = juce::Component::SafePointer<Content>(this)](const juce::FileChooser& chooser)
+                                  {
+                                      const auto chosen = chooser.getResult();
+                                      juce::MessageManager::callAsync([safe, chosen]
+                                      {
+                                          if (safe == nullptr)
+                                              return;
+                                          safe->chooser_.reset();
+                                          if (safe == nullptr || chosen.getFullPathName().isEmpty())
+                                              return;
+                                          if (safe->engine_.loadSessionFrom(chosen))
+                                              safe->finish();
+                                          else
+                                              juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                                                     "Could not open that session",
+                                                                                     safe->engine_.sessionMessage());
+                                      });
+                                  });
+        }
+
+        void confirmInternal()
+        {
+            juce::AlertWindow::showOkCancelBox(
+                juce::MessageBoxIconType::WarningIcon,
+                "Session on the internal disk?",
+                "This stores the session in the Music folder on the internal disk. Recordings usually belong on an external drive.",
+                "Use internal disk",
+                "Cancel",
+                nullptr,
+                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this)](int result)
+                {
+                    if (result != 1 || safe == nullptr)
+                        return;
+                    if (safe->engine_.createInternalSession())
+                        safe->finish();
+                    else
+                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                               "Cannot create the session",
+                                                               safe->engine_.sessionMessage());
+                }));
+        }
+
+        void finish()
+        {
+            if (onDone_)
+                onDone_();
+        }
+
+        AudioEngine& engine_;
+        std::function<void()> onDone_;
+        juce::AudioDeviceSelectorComponent selector_;
+        juce::File parent_;
+        std::unique_ptr<juce::FileChooser> chooser_;
+        juce::Label intro_;
+        juce::Viewport deviceViewport_;
+        juce::Label nameLabel_;
+        juce::TextEditor name_;
+        juce::Label locationLabel_;
+        juce::Label location_;
+        juce::Label note_;
+        juce::TextButton browse_ { "Browse…" };
+        juce::TextButton create_ { "Create session" };
+        juce::TextButton open_ { "Open existing…" };
+        juce::TextButton internal_ { "Internal disk…" };
+        juce::Label recentLabel_;
+        juce::Viewport recentViewport_;
+        juce::Component recent_;
+        juce::Label emptyRecent_;
+        std::vector<std::unique_ptr<juce::TextButton>> recentButtons_;
+    };
+
+    std::function<void()> onDone_;
+    bool finished_ = false;
+    Content content_;
+};
 
 } // namespace
 
@@ -215,18 +761,8 @@ public:
         menu.addSubMenu("Open Recent", recent, ! sessions.isEmpty());
         menu.addItem(5, "Import Recording Folder…");
         menu.addSeparator();
-
-        juce::PopupMenu::Item save;
-        save.itemID = 3;
-        save.text = "Save";
-        save.shortcutKeyDescription = "Cmd+S";
-        menu.addItem(save);
-
-        juce::PopupMenu::Item saveAs;
-        saveAs.itemID = 4;
-        saveAs.text = "Save As…";
-        saveAs.shortcutKeyDescription = "Cmd+Shift+S";
-        menu.addItem(saveAs);
+        menu.addCommandItem(&owner.commandManager_, MainComponent::saveCommand);
+        menu.addCommandItem(&owner.commandManager_, MainComponent::saveAsCommand);
         menu.addSeparator();
         menu.addItem(6, "Clear Timeline…");
         return menu;
@@ -234,14 +770,12 @@ public:
 
     void menuItemSelected(int id, int) override
     {
+        if (id == MainComponent::saveCommand || id == MainComponent::saveAsCommand)
+            return;
         if (id == 1)
-            owner.engine_.startNewSession();
+            owner.newSession();
         else if (id == 2)
             owner.openSession();
-        else if (id == 3)
-            owner.saveSession();
-        else if (id == 4)
-            owner.saveSessionAs();
         else if (id == 5)
             owner.importRecordings();
         else if (id == 6)
@@ -297,8 +831,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(peakButton_);
     addAndMakeVisible(referenceLabel_);
     addAndMakeVisible(referenceBox_);
-    addAndMakeVisible(bitDepthLabel_);
-    addAndMakeVisible(bitDepthBox_);
     addAndMakeVisible(clearClipsButton_);
     addAndMakeVisible(newButton_);
     addAndMakeVisible(openButton_);
@@ -308,6 +840,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
     addAndMakeVisible(retryButton_);
+    addAndMakeVisible(groupButton_);
     addAndMakeVisible(allButton_);
     addAndMakeVisible(hideButton_);
     addAndMakeVisible(latencyLabel_);
@@ -315,7 +848,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterViewport_.setScrollBarsShown(false, true);
 
     latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, settings_, "windowLatency", 480, 360, 420, 280);
-    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
+    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, bitDepthLabel_, bitDepthBox_, settings_);
+    commandManager_.registerAllCommandsForTarget(this);
+    commandManager_.setFirstCommandTarget(this);
+    engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
     latencyReadout_.setGraphHandler([this] { toggleDropouts(); });
     fileMenu_ = std::make_unique<FileMenu>(*this);
@@ -326,11 +862,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
-                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_, &allButton_, &hideButton_ })
+                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
+                          &allButton_, &hideButton_ })
         quiet(*button);
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &latencyButton_,
-                          &setupButton_, &allButton_, &hideButton_ })
+                          &setupButton_, &groupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
@@ -338,11 +875,19 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     scannerButton_.onClick = [this] { toggleScanner(); };
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
-    stopButton_.onClick = [this] { engine_.transportStop(); };
-    playButton_.onClick = [this] { engine_.transportPlay(); };
-    recButton_.onClick = [this] { engine_.transportRecord(); };
+    stopButton_.onClick = [this] { engine_.transportStop(); refresh(); };
+    playButton_.onClick = [this]
+    {
+        if (engine_.transportView().mode != TransportMode::stopped)
+            return;
+        if (engine_.isRecordReady())
+            requestRecord();
+        else
+            engine_.transportPlay();
+    };
+    recButton_.onClick = [this] { engine_.toggleRecordReady(); refresh(); };
     helpButton_.onClick = [this] { showHelp(); };
-    newButton_.onClick = [this] { engine_.startNewSession(); refresh(); };
+    newButton_.onClick = [this] { newSession(); };
     openButton_.onClick = [this] { openSession(); };
     saveButton_.onClick = [this] { saveSession(); };
     fileButton_.onClick = [this] { showFileMenu(); };
@@ -353,6 +898,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     latencyButton_.setTooltip("Open the latency card.");
     fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
     helpButton_.setTooltip("Show keyboard shortcuts.");
+    groupButton_.setTooltip("Rename or recolor a group.");
+    groupButton_.onClick = [this] { showGroupsMenu(); };
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
     saveButton_.setTooltip("Save session.youhost (Cmd+S).");
@@ -370,14 +917,20 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
     stopButton_.setTooltip("Stop (Space).");
-    playButton_.setTooltip("Play the recorded takes through the plugins (Space). Channels that are OFF stay silent.");
-    recButton_.setTooltip("Record a new take (Shift+Space, R, or Cmd+Space).");
+    playButton_.setTooltip("Play the recorded takes (Space). If Record is armed, Play starts the take.");
+    recButton_.setTooltip("Arm recording. The button blinks red. Press Play to start, or Cmd+Space to record immediately.");
     helpButton_.setTooltip(kShortcutHelp);
     scannerButton_.setTooltip("Open or close the plugin scanner (3).");
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
-    recButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff8d2430));
-    playButton_.setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
+    recButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8d2430));
+    recButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffff3344));
+    recButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    recButton_.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    playButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1f7a4a));
+    playButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2fbf6e));
+    playButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    playButton_.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
 
     timeLabel_.setFont(juce::Font(juce::FontOptions(28.0f).withStyle("Bold")));
     timeLabel_.setJustificationType(juce::Justification::centred);
@@ -402,6 +955,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     referenceBox_.addItem("-20 dBFS", 3);
     referenceBox_.setSelectedId(referenceIdFor(rmsReferenceDb_), juce::dontSendNotification);
     referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS. Meters are green below this point and yellow above it.");
+    bitDepthLabel_.setText("Bit depth", juce::dontSendNotification);
     bitDepthLabel_.setJustificationType(juce::Justification::centredRight);
     bitDepthLabel_.setFont(juce::Font(juce::FontOptions(13.0f)));
     bitDepthBox_.addItem("16-bit", 16);
@@ -459,6 +1013,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     engine_.pluginCatalogue().startIfEmpty();
     showPage(1);
     refresh();
+    juce::Component::SafePointer<MainComponent> safe(this);
+    juce::MessageManager::callAsync([safe]
+    {
+        if (safe != nullptr)
+            safe->openStartup();
+    });
 }
 
 MainComponent::~MainComponent()
@@ -467,10 +1027,22 @@ MainComponent::~MainComponent()
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
+    commandManager_.setFirstCommandTarget(nullptr);
+    engine_.setGlobalKeyListener(nullptr);
+    if (startupWindow_ != nullptr && startupWindow_->isCurrentlyModal())
+        startupWindow_->exitModalState(0);
+    startupWindow_.reset();
+    if (placeWindow_ != nullptr && placeWindow_->isCurrentlyModal())
+        placeWindow_->exitModalState(0);
+    placeWindow_.reset();
     setupWindow_.reset();
     fileMenu_.reset();
-    if (keyTarget_ != nullptr && keys_ != nullptr)
-        keyTarget_->removeKeyListener(keys_.get());
+    if (keyTarget_ != nullptr)
+    {
+        if (keys_ != nullptr)
+            keyTarget_->removeKeyListener(keys_.get());
+        keyTarget_->removeKeyListener(commandManager_.getKeyMappings());
+    }
     engine_.setMeterRestoreHandler(nullptr);
     engine_.setPageRestoreHandler(nullptr);
     latencyWindow_.reset();
@@ -481,11 +1053,19 @@ void MainComponent::parentHierarchyChanged()
     auto* top = getTopLevelComponent();
     if (top == keyTarget_)
         return;
-    if (keyTarget_ != nullptr && keys_ != nullptr)
-        keyTarget_->removeKeyListener(keys_.get());
+    if (keyTarget_ != nullptr)
+    {
+        if (keys_ != nullptr)
+            keyTarget_->removeKeyListener(keys_.get());
+        keyTarget_->removeKeyListener(commandManager_.getKeyMappings());
+    }
     keyTarget_ = top;
-    if (keyTarget_ != nullptr && keys_ != nullptr)
-        keyTarget_->addKeyListener(keys_.get());
+    if (keyTarget_ != nullptr)
+    {
+        if (keys_ != nullptr)
+            keyTarget_->addKeyListener(keys_.get());
+        keyTarget_->addKeyListener(commandManager_.getKeyMappings());
+    }
     grabKeyboardFocus();
 }
 
@@ -533,30 +1113,29 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         toggleDropouts();
         return true;
     }
-    if (character == 's' && command)
+    if ((character == 't' || character == 'r') && ! shift && ! command)
     {
-        if (shift)
-            saveSessionAs();
+        if (character == 't')
+            timeline_.zoomIn();
         else
-            saveSession();
+            timeline_.zoomOut();
         return true;
     }
 
     if (key.isKeyCode(juce::KeyPress::spaceKey))
     {
         const auto mode = engine_.transportView().mode;
-        if (shift || command || (character == 'r'))
-            engine_.transportRecord();
+        if (command && ! shift)
+            requestRecord();
         else if (mode == TransportMode::stopped)
-            engine_.transportPlay();
+        {
+            if (engine_.isRecordReady())
+                requestRecord();
+            else
+                engine_.transportPlay();
+        }
         else
             engine_.transportStop();
-        return true;
-    }
-
-    if ((character == 'r') && ! command)
-    {
-        engine_.transportRecord();
         return true;
     }
 
@@ -578,6 +1157,196 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     }
 
     return false;
+}
+
+juce::ApplicationCommandTarget* MainComponent::getNextCommandTarget()
+{
+    return nullptr;
+}
+
+void MainComponent::getAllCommands(juce::Array<juce::CommandID>& commands)
+{
+    commands.add(saveCommand);
+    commands.add(saveAsCommand);
+}
+
+void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationCommandInfo& result)
+{
+    if (commandID == saveCommand)
+    {
+        result.setInfo("Save", "Save session.youhost", "File", 0);
+        result.addDefaultKeypress('s', juce::ModifierKeys::commandModifier);
+    }
+    else if (commandID == saveAsCommand)
+    {
+        result.setInfo("Save As…", "Save a copy of this session", "File", 0);
+        result.addDefaultKeypress('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier);
+    }
+}
+
+bool MainComponent::perform(const juce::ApplicationCommandTarget::InvocationInfo& info)
+{
+    if (startupWindow_ != nullptr || placeWindow_ != nullptr)
+        return true;
+
+    if (info.commandID == saveCommand)
+    {
+        saveSession();
+        return true;
+    }
+    if (info.commandID == saveAsCommand)
+    {
+        saveSessionAs();
+        return true;
+    }
+    return false;
+}
+
+void MainComponent::openStartup()
+{
+    if (startupWindow_ != nullptr)
+        return;
+    juce::Component::SafePointer<MainComponent> safe(this);
+    startupWindow_ = std::make_unique<StartupWindow>(engine_, [safe]
+    {
+        juce::MessageManager::callAsync([safe]
+        {
+            if (safe != nullptr)
+                safe->dismissStartup();
+        });
+    });
+    startupWindow_->enterModalState(true, nullptr, false);
+}
+
+void MainComponent::dismissStartup()
+{
+    if (startupWindow_ == nullptr)
+        return;
+    if (startupWindow_->isCurrentlyModal())
+        startupWindow_->exitModalState(0);
+    startupWindow_.reset();
+    refresh();
+    grabKeyboardFocus();
+}
+
+void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then)
+{
+    if (placeWindow_ != nullptr || startupWindow_ != nullptr)
+        return;
+
+    juce::Component::SafePointer<MainComponent> safe(this);
+    placeWindow_ = std::make_unique<SessionPlaceWindow>(
+        title,
+        engine_.defaultSessionParent(),
+        engine_.missingSessionParentNote(),
+        [safe, then](juce::File chosen, bool internalDisk)
+        {
+            juce::MessageManager::callAsync([safe, then, chosen, internalDisk]
+            {
+                if (safe == nullptr)
+                    return;
+                if (safe->placeWindow_ != nullptr && safe->placeWindow_->isCurrentlyModal())
+                    safe->placeWindow_->exitModalState(0);
+                safe->placeWindow_.reset();
+
+                bool placed = false;
+                if (internalDisk)
+                    placed = safe->engine_.createInternalSession();
+                else if (chosen.getFullPathName().isNotEmpty())
+                    placed = safe->engine_.placeNewSession(chosen, false);
+
+                safe->refresh();
+                if (then != nullptr)
+                    then(placed);
+            });
+        });
+    placeWindow_->enterModalState(true, nullptr, false);
+}
+
+void MainComponent::newSession()
+{
+    promptForSession("New Session", nullptr);
+}
+
+void MainComponent::requestRecord()
+{
+    if (startupWindow_ != nullptr || placeWindow_ != nullptr)
+        return;
+    if (! engine_.hasSession())
+    {
+        promptForSession("Choose Where to Record", [this](bool placed)
+        {
+            if (placed)
+                startRecordingIfReady();
+        });
+        return;
+    }
+    startRecordingIfReady();
+}
+
+void MainComponent::startRecordingIfReady()
+{
+    const auto problem = engine_.sessionRecordProblem();
+    if (problem.isNotEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Cannot record",
+                                               problem);
+        refresh();
+        return;
+    }
+    engine_.transportRecord();
+    refresh();
+}
+
+void MainComponent::showGroupsMenu()
+{
+    juce::PopupMenu menu;
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+        menu.addItem(group + 1, engine_.groupName(group));
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&groupButton_),
+                       [this](int result)
+                       {
+                           if (result > 0)
+                               showGroupMenu(engine_, groupButton_, result - 1);
+                       });
+}
+
+void MainComponent::layoutMeters()
+{
+    if (page_ != 1 || bridgeArea_.isEmpty())
+        return;
+
+    constexpr int scaleW = 36;
+    const int guess = std::max(1, bridgeArea_.getWidth() - scaleW * 2);
+    const int natural = meterGrid_.naturalContentWidth(guess);
+    if (natural == laidOutNatural_ && bridgeArea_ == laidOutBridge_ && meterViewport_.getWidth() > 0)
+        return;
+
+    laidOutNatural_ = natural;
+    laidOutBridge_ = bridgeArea_;
+
+    juce::Rectangle<int> view;
+    if (natural + scaleW * 2 <= bridgeArea_.getWidth())
+    {
+        const int block = natural + scaleW * 2;
+        const int x = bridgeArea_.getX() + (bridgeArea_.getWidth() - block) / 2;
+        leftScale_.setBounds(x, bridgeArea_.getY(), scaleW, bridgeArea_.getHeight());
+        view = { x + scaleW, bridgeArea_.getY(), natural, bridgeArea_.getHeight() };
+        rightScale_.setBounds(x + scaleW + natural, bridgeArea_.getY(), scaleW, bridgeArea_.getHeight());
+    }
+    else
+    {
+        leftScale_.setBounds(bridgeArea_.getX(), bridgeArea_.getY(), scaleW, bridgeArea_.getHeight());
+        rightScale_.setBounds(bridgeArea_.getRight() - scaleW, bridgeArea_.getY(), scaleW, bridgeArea_.getHeight());
+        view = bridgeArea_.withTrimmedLeft(scaleW).withTrimmedRight(scaleW);
+    }
+
+    meterViewport_.setBounds(view);
+    meterGrid_.setFitWidth(view.getWidth());
+    const int width = std::max(view.getWidth(), meterGrid_.preferredWidth(view.getWidth()));
+    const int height = std::max(1, meterViewport_.getMaximumVisibleHeight());
+    meterGrid_.setSize(width, height);
 }
 
 void MainComponent::showPage(int page)
@@ -603,12 +1372,22 @@ void MainComponent::toggleDropouts()
 
 void MainComponent::saveSession()
 {
+    if (! engine_.hasSession())
+    {
+        promptForSession("Choose Where to Save This Session", nullptr);
+        return;
+    }
     engine_.saveSession();
     refresh();
 }
 
 void MainComponent::saveSessionAs()
 {
+    if (! engine_.hasSession())
+    {
+        saveSession();
+        return;
+    }
     if (fileChooser_ != nullptr)
         return;
 
@@ -633,6 +1412,15 @@ void MainComponent::saveSessionAs()
 
 void MainComponent::importRecordings()
 {
+    if (! engine_.hasSession())
+    {
+        promptForSession("Choose Where to Save This Session", [this](bool placed)
+        {
+            if (placed)
+                importRecordings();
+        });
+        return;
+    }
     if (fileChooser_ != nullptr)
         return;
 
@@ -808,7 +1596,8 @@ void MainComponent::refresh()
     timeLabel_.setColour(juce::Label::backgroundColourId, recording ? juce::Colour(0xff8d2430) : theme::panel);
     modeLabel_.setText(playing ? "PLAYBACK" : recording ? "RECORD" : juce::String(), juce::dontSendNotification);
     modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
-    recButton_.setToggleState(recording, juce::dontSendNotification);
+    const bool blink = engine_.isRecordReady() && ! recording && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
+    recButton_.setToggleState(recording || blink, juce::dontSendNotification);
     playButton_.setToggleState(playing, juce::dontSendNotification);
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
@@ -872,14 +1661,7 @@ void MainComponent::refresh()
         cells.push_back(std::move(cell));
     }
     meterGrid_.setCells(std::move(cells), showPeak_, rmsReferenceDb_);
-    if (page_ == 1 && meterViewport_.getWidth() > 0)
-    {
-        meterGrid_.setFitWidth(meterViewport_.getWidth());
-        const int width = std::max(meterViewport_.getWidth(), meterGrid_.preferredWidth(meterViewport_.getWidth()));
-        const int height = std::max(1, meterViewport_.getMaximumVisibleHeight());
-        if (meterGrid_.getWidth() != width || meterGrid_.getHeight() != height)
-            meterGrid_.setSize(width, height);
-    }
+    layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
     repaint();
@@ -949,8 +1731,12 @@ void MainComponent::paint(juce::Graphics& graphics)
     }
     status << "   " << engine_.wavBitDepthLabel();
     status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
-    if (engine_.hasSession())
+    if (! engine_.hasSession())
+        status << "   No session";
+    else
         status << "   " << engine_.sessionName();
+    if (engine_.sessionIsOnInternalDisk())
+        status << " (internal disk)";
     const auto transport = engine_.transportView();
     if (transport.status.isNotEmpty())
         status << "   " << transport.status;
@@ -974,9 +1760,9 @@ void MainComponent::paint(juce::Graphics& graphics)
 
     juce::String hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty() && page_ == 1)
-        hint = "The channel number stays visible. REC is on. OFF cuts the meter, plugins, and output immediately. Live sound still passes through while recording. Right-click a channel for color and groups.";
+        hint = "The channel number stays visible. Record blinks when armed. Play starts the take. Cmd+Space records immediately. T and R zoom the timeline. Live sound still passes through.";
     if (hint.isEmpty())
-        hint = "The channel number stays visible. Drag a slot to move it. Option-drag to copy the plugin and its settings. Right-click a group bar to rename it or set its color.";
+        hint = "The channel number stays visible. Drag a slot to move it. Option-drag to copy the plugin and its settings. Right-click or double-click a group bar to rename it.";
 
     graphics.setColour(engine_.openError().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -992,34 +1778,43 @@ void MainComponent::resized()
     area.removeFromTop(6);
 
     auto views = area.removeFromTop(34);
-    recorderButton_.setBounds(views.removeFromLeft(112).reduced(0, 2));
+    newButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     views.removeFromLeft(4);
-    pluginsButton_.setBounds(views.removeFromLeft(100).reduced(0, 2));
+    openButton_.setBounds(views.removeFromLeft(50).reduced(0, 2));
     views.removeFromLeft(4);
-    scannerButton_.setBounds(views.removeFromLeft(104).reduced(0, 2));
+    saveButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     views.removeFromLeft(4);
-    dropoutsButton_.setBounds(views.removeFromLeft(112).reduced(0, 2));
+    setupButton_.setBounds(views.removeFromLeft(96).reduced(0, 2));
     views.removeFromLeft(4);
-    latencyButton_.setBounds(views.removeFromLeft(84).reduced(0, 2));
+    fileButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
+    views.removeFromLeft(8);
+    groupButton_.setBounds(views.removeFromLeft(56).reduced(0, 2));
     views.removeFromLeft(4);
-    fileButton_.setBounds(views.removeFromLeft(58).reduced(0, 2));
+    allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
-    helpButton_.setBounds(views.removeFromLeft(36).reduced(0, 2));
-    views.removeFromLeft(10);
-    allButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
-    views.removeFromLeft(4);
-    hideButton_.setBounds(views.removeFromLeft(58).reduced(0, 2));
+    hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
+    latencyButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
+    views.removeFromRight(4);
+    dropoutsButton_.setBounds(views.removeFromRight(96).reduced(0, 2));
+    views.removeFromRight(4);
+    scannerButton_.setBounds(views.removeFromRight(88).reduced(0, 2));
+    views.removeFromRight(4);
+    pluginsButton_.setBounds(views.removeFromRight(84).reduced(0, 2));
+    views.removeFromRight(4);
+    recorderButton_.setBounds(views.removeFromRight(96).reduced(0, 2));
 
     area.removeFromTop(4);
     auto transport = area.removeFromTop(40);
-    prevButton_.setBounds(transport.removeFromLeft(72).reduced(0, 4));
-    nextButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
-    stopButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
-    playButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
-    recButton_.setBounds(transport.removeFromLeft(78).reduced(0, 4));
-    transport.removeFromLeft(8);
-    timeLabel_.setBounds(transport.removeFromLeft(148).reduced(0, 2));
-    modeLabel_.setBounds(transport.removeFromLeft(96).reduced(4, 8));
+    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + 8 + 148 + 96;
+    auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
+    prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, 4));
+    nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, 4));
+    stopButton_.setBounds(cluster.removeFromLeft(64).reduced(2, 4));
+    playButton_.setBounds(cluster.removeFromLeft(72).reduced(2, 4));
+    recButton_.setBounds(cluster.removeFromLeft(84).reduced(2, 4));
+    cluster.removeFromLeft(8);
+    timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
+    modeLabel_.setBounds(cluster.reduced(4, 8));
 
     area.removeFromTop(4);
     auto tools = area.removeFromTop(32);
@@ -1029,16 +1824,7 @@ void MainComponent::resized()
     referenceLabel_.setBounds(tools.removeFromLeft(52));
     referenceBox_.setBounds(tools.removeFromLeft(110).reduced(0, 2));
     tools.removeFromLeft(8);
-    bitDepthLabel_.setBounds(tools.removeFromLeft(36));
-    bitDepthBox_.setBounds(tools.removeFromLeft(124).reduced(0, 2));
-    tools.removeFromLeft(8);
     clearClipsButton_.setBounds(tools.removeFromLeft(96).reduced(0, 2));
-    tools.removeFromLeft(8);
-    newButton_.setBounds(tools.removeFromLeft(52).reduced(0, 2));
-    openButton_.setBounds(tools.removeFromLeft(58).reduced(0, 2));
-    saveButton_.setBounds(tools.removeFromLeft(54).reduced(0, 2));
-    tools.removeFromLeft(8);
-    setupButton_.setBounds(tools.removeFromLeft(108).reduced(0, 2));
     latencyLabel_.setBounds(tools.reduced(8, 0));
 
     const bool showBanner = ! engine_.microphoneGranted();
@@ -1056,6 +1842,8 @@ void MainComponent::resized()
 
     area.removeFromTop(8);
     hintArea_ = area.removeFromBottom(32);
+    helpButton_.setBounds(getWidth() - 40, getHeight() - 36, 28, 28);
+    hintArea_.removeFromRight(36);
     area.removeFromBottom(6);
 
     const bool recorder = page_ == 1;
@@ -1065,22 +1853,19 @@ void MainComponent::resized()
     rightScale_.setVisible(recorder);
     pluginPage_.setVisible(! recorder);
 
-    const int timelineHeight = recorder ? juce::jlimit(72, 160, getHeight() / 8)
-                                        : juce::jlimit(52, 72, getHeight() / 12);
+    const int timelineHeight = recorder ? juce::jlimit(96, 180, getHeight() / 7)
+                                        : juce::jlimit(88, 120, getHeight() / 10);
     timeline_.setBounds(area.removeFromTop(timelineHeight));
     area.removeFromTop(8);
     if (recorder)
     {
-        auto bridge = area;
-        leftScale_.setBounds(bridge.removeFromLeft(44));
-        rightScale_.setBounds(bridge.removeFromRight(44));
-        meterViewport_.setBounds(bridge);
-        meterGrid_.setFitWidth(meterViewport_.getWidth());
-        const int width = std::max(meterViewport_.getWidth(), meterGrid_.preferredWidth(meterViewport_.getWidth()));
-        meterGrid_.setSize(width, std::max(1, meterViewport_.getMaximumVisibleHeight()));
+        bridgeArea_ = area;
+        laidOutNatural_ = -1;
+        layoutMeters();
     }
     else
     {
+        bridgeArea_ = {};
         pluginPage_.setBounds(area);
     }
 }

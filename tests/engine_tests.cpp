@@ -12,6 +12,7 @@
 #include "engine/SessionFiles.h"
 #include "engine/TakeImport.h"
 #include "engine/TakePlan.h"
+#include "engine/TimelineZoom.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -577,6 +578,24 @@ void testSessionLayout()
     CHECK(layout.folder == "/tmp/My Session");
     CHECK(layout.sessionFile == "/tmp/My Session/session.youhost");
     CHECK(layout.audioFolder == "/tmp/My Session/audio");
+    CHECK(youhost::sanitiseSessionName("Friday/show") == "Fridayshow");
+    CHECK(youhost::sanitiseSessionName("  ") == "Session");
+    CHECK(youhost::sanitiseSessionName("Ok.") == "Ok");
+}
+
+void testTimelineZoom()
+{
+    CHECK(youhost::zoomVisibleSamples(48000, 0) == 48000);
+    CHECK(youhost::zoomVisibleSamples(48000, 1) == 24000);
+    CHECK(youhost::clampZoomStep(99) == youhost::kMaxTimelineZoomStep);
+    const auto start = youhost::viewStartKeepingPlayhead(1000, 0, 1000, 100, 400);
+    CHECK(start <= 400);
+    CHECK(start + 100 > 400);
+    CHECK(youhost::followPlayhead(1000, 0, 1000, 400) == 0);
+    const auto followed = youhost::followPlayhead(10000, 0, 1000, 5000);
+    CHECK(followed > 0);
+    CHECK(5000 >= followed);
+    CHECK(5000 < followed + 1000);
 }
 
 void testRaiseUnit()
@@ -603,6 +622,7 @@ int main()
     testTakeImportGroups();
     testDropoutWindow();
     testSessionLayout();
+    testTimelineZoom();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
     testTakePlan();

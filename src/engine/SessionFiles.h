@@ -31,4 +31,31 @@ inline SessionLayout sessionLayoutFor(std::string_view folder)
     return layout;
 }
 
+// A folder name the user typed. Slashes and other path characters are dropped.
+// An empty result becomes "Session" so the chooser always has a name.
+inline std::string sanitiseSessionName(std::string_view name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (const char ch : name)
+    {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 32 || ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?'
+            || ch == '"' || ch == '<' || ch == '>' || ch == '|')
+            continue;
+        out.push_back(ch);
+    }
+    while (! out.empty() && (out.front() == ' ' || out.front() == '.'))
+        out.erase(out.begin());
+    while (! out.empty() && (out.back() == ' ' || out.back() == '.'))
+        out.pop_back();
+    if (out.size() > 80)
+        out.resize(80);
+    while (! out.empty() && (out.back() == ' ' || out.back() == '.'))
+        out.pop_back();
+    if (out.empty())
+        return "Session";
+    return out;
+}
+
 } // namespace youhost

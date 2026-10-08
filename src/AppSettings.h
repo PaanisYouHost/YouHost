@@ -257,6 +257,25 @@ public:
         }
     }
 
+    // Parent folder of the last session the user actually chose (not the internal fallback).
+    juce::String loadSessionParentFolder()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("sessionParentFolder");
+        return {};
+    }
+
+    void saveSessionParentFolder(const juce::String& folder)
+    {
+        if (folder.isEmpty())
+            return;
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("sessionParentFolder", folder);
+            settings->saveIfNeeded();
+        }
+    }
+
     juce::File supportDirectory()
     {
         if (auto* settings = properties_.getUserSettings())

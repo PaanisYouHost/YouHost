@@ -11,13 +11,15 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <functional>
 #include <memory>
 
 namespace youhost
 {
 
 class MainComponent : public juce::Component,
-                      private juce::Timer
+                      private juce::Timer,
+                      private juce::ApplicationCommandTarget
 {
 public:
     MainComponent(AudioEngine& engine, AppSettings& settings);
@@ -47,7 +49,26 @@ private:
     void openRecent(int index);
     void showFileMenu();
     void showHelp();
+    void showGroupsMenu();
+    void layoutMeters();
+    void openStartup();
+    void dismissStartup();
+    void promptForSession(const juce::String& title, std::function<void(bool placed)> then);
+    void newSession();
+    void requestRecord();
+    void startRecordingIfReady();
     bool shortcutBlocked(juce::Component* originating) const;
+
+    juce::ApplicationCommandTarget* getNextCommandTarget() override;
+    void getAllCommands(juce::Array<juce::CommandID>& commands) override;
+    void getCommandInfo(juce::CommandID commandID, juce::ApplicationCommandInfo& result) override;
+    bool perform(const juce::ApplicationCommandTarget::InvocationInfo& info) override;
+
+    enum CommandIDs
+    {
+        saveCommand = 0x2101,
+        saveAsCommand = 0x2102
+    };
 
     AudioEngine& engine_;
     AppSettings& settings_;
@@ -87,6 +108,7 @@ private:
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "Latency" };
     juce::TextButton retryButton_ { "Retry" };
+    juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
     juce::Label latencyLabel_;
@@ -100,6 +122,9 @@ private:
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;
     juce::Component* keyTarget_ = nullptr;
+    juce::ApplicationCommandManager commandManager_;
+    std::unique_ptr<juce::DocumentWindow> startupWindow_;
+    std::unique_ptr<juce::DocumentWindow> placeWindow_;
 
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
@@ -110,6 +135,9 @@ private:
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> hintArea_;
+    juce::Rectangle<int> bridgeArea_;
+    juce::Rectangle<int> laidOutBridge_;
+    int laidOutNatural_ = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

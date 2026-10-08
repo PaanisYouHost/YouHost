@@ -368,6 +368,9 @@ public:
             graphics.setColour(meterLevelColour(level, referenceDb_));
             graphics.fillRect(meter.getX(), meter.getY(), static_cast<int>(filled), meter.getHeight());
         }
+
+        graphics.setColour(juce::Colour(0xff8b95a8));
+        graphics.fillRect(0, getHeight() - 1, getWidth(), 1);
     }
 
     void setMeterMode(bool peak, int referenceDb)
@@ -548,7 +551,7 @@ public:
             graphics.drawRect(getLocalBounds(), 1);
         }
 
-        graphics.setColour(theme::panelEdge.withAlpha(0.35f));
+        graphics.setColour(juce::Colour(0xff8b95a8));
         graphics.fillRect(0, getHeight() - 1, getWidth(), 1);
 
         const bool on = engine_.isRecordArmed(channel_);

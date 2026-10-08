@@ -570,8 +570,28 @@ void PluginRack::openEditor(int channel, int slot)
     const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
     if (stored.isEmpty() || ! window->restoreWindowStateFromString(stored))
         window->centreWithSize(juce::jmax(360, window->getWidth()), juce::jmax(240, window->getHeight()));
+    if (commandKeys_ != nullptr)
+        window->addKeyListener(commandKeys_);
     window->setVisible(true);
     editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
+}
+
+void PluginRack::setGlobalKeyListener(juce::KeyListener* listener)
+{
+    if (commandKeys_ == listener)
+        return;
+
+    for (auto& row : editors_)
+        for (auto& editor : row)
+            if (editor != nullptr && commandKeys_ != nullptr)
+                editor->removeKeyListener(commandKeys_);
+
+    commandKeys_ = listener;
+
+    for (auto& row : editors_)
+        for (auto& editor : row)
+            if (editor != nullptr && commandKeys_ != nullptr)
+                editor->addKeyListener(commandKeys_);
 }
 
 void PluginRack::closeEditor(int channel, int slot)

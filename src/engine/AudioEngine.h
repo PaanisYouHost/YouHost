@@ -105,6 +105,8 @@ public:
     void selectChannel(int channel, bool extend);
     bool isChannelSelected(int channel) const;
     std::vector<int> selectedChannels() const;
+    void toggleRecordReady();
+    bool isRecordReady() const noexcept { return recordReady_; }
     void transportRecord();
     void transportStop();
     void transportPlay();
@@ -113,6 +115,13 @@ public:
     void transportNudge(double seconds);
     TransportView transportView() const;
     void startNewSession();
+    bool placeNewSession(const juce::File& folder, bool internalDisk);
+    bool createInternalSession();
+    juce::String sessionRecordProblem() const;
+    bool sessionIsOnInternalDisk() const noexcept { return sessionOnInternalDisk_; }
+    juce::File sessionFolder() const { return sessionFolder_; }
+    juce::File defaultSessionParent() const;
+    juce::String missingSessionParentNote() const;
 
     void setSessionMeters(bool peak, int rmsReferenceDb);
     void setWavBitDepth(int bits, bool markDirty);
@@ -136,6 +145,7 @@ public:
     juce::StringArray recentSessions() const;
     juce::String sessionMessage() const { return sessionMessage_; }
     void setMeterRestoreHandler(std::function<void(bool peak, int referenceDb)> handler);
+    void setGlobalKeyListener(juce::KeyListener* listener);
 
 private:
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -151,8 +161,9 @@ private:
 
     void publishConfig(juce::AudioIODevice& device);
     void saveSetupIfAllowed();
-    void ensureSessionFolder();
     void syncRecorderFolder();
+    void rememberSessionParent(const juce::File& sessionFolder);
+    bool isInternalFallback(const juce::File& folder) const;
     void pushRouting(const Routing& routing);
     Routing routingFromDevice(const juce::AudioIODevice& device) const;
     void installOverloadListener(const juce::String& deviceName);
@@ -199,6 +210,8 @@ private:
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
     int wavBitDepth_ = kDefaultWavBitDepth;
     int sessionPage_ = 1;
+    bool recordReady_ = false;
+    bool sessionOnInternalDisk_ = false;
     juce::File sessionFolder_;
     juce::String sessionMessage_;
     bool sessionDirty_ = false;
