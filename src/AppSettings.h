@@ -74,6 +74,22 @@ public:
         }
     }
 
+    int loadWavBitDepth()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return normaliseWavBitDepth(settings->getIntValue("wavBitDepth", kDefaultWavBitDepth));
+        return kDefaultWavBitDepth;
+    }
+
+    void saveWavBitDepth(int bits)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("wavBitDepth", normaliseWavBitDepth(bits));
+            settings->saveIfNeeded();
+        }
+    }
+
     juce::String loadWindowState()
     {
         if (auto* settings = properties_.getUserSettings())
@@ -83,9 +99,25 @@ public:
 
     void saveWindowState(const juce::String& state)
     {
+        saveNamedWindow("windowState", state);
+    }
+
+    juce::String loadNamedWindow(const juce::String& key)
+    {
+        if (key.isEmpty())
+            return {};
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue(key);
+        return {};
+    }
+
+    void saveNamedWindow(const juce::String& key, const juce::String& state)
+    {
+        if (key.isEmpty())
+            return;
         if (auto* settings = properties_.getUserSettings())
         {
-            settings->setValue("windowState", state);
+            settings->setValue(key, state);
             settings->saveIfNeeded();
         }
     }

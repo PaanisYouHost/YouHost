@@ -1,5 +1,6 @@
 #include "ScannerWindow.h"
 #include "Theme.h"
+#include "WindowMemory.h"
 
 #include <algorithm>
 
@@ -198,18 +199,19 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(12);
-        auto buttons = area.removeFromTop(28);
-        scanButton_.setBounds(buttons.removeFromLeft(72));
-        buttons.removeFromLeft(6);
-        rescanButton_.setBounds(buttons.removeFromLeft(84));
-        buttons.removeFromLeft(6);
-        stopButton_.setBounds(buttons.removeFromLeft(72));
-        buttons.removeFromLeft(6);
-        clearButton_.setBounds(buttons.removeFromLeft(110));
-        buttons.removeFromLeft(6);
-        fileButton_.setBounds(buttons.removeFromLeft(100));
-        buttons.removeFromLeft(6);
-        selectedButton_.setBounds(buttons.removeFromLeft(140));
+        juce::Component* buttons[] = { &scanButton_, &rescanButton_, &stopButton_, &clearButton_, &fileButton_, &selectedButton_ };
+        const int widths[] = { 72, 84, 72, 118, 100, 148 };
+        auto row = area.removeFromTop(28);
+        for (int index = 0; index < 6; ++index)
+        {
+            if (row.getWidth() < widths[index])
+            {
+                area.removeFromTop(4);
+                row = area.removeFromTop(28);
+            }
+            buttons[index]->setBounds(row.removeFromLeft(std::min(widths[index], row.getWidth())));
+            row.removeFromLeft(6);
+        }
         area.removeFromTop(6);
         wavesButton_.setBounds(area.removeFromTop(22));
         appleButton_.setBounds(area.removeFromTop(22));
@@ -292,24 +294,25 @@ private:
     std::unique_ptr<juce::FileChooser> chooser_;
 };
 
-ScannerWindow::ScannerWindow(AudioEngine& engine)
+ScannerWindow::ScannerWindow(AudioEngine& engine, AppSettings& settings)
     : juce::DocumentWindow("Plugin scanner",
                            theme::panel,
                            juce::DocumentWindow::closeButton),
-      engine_(engine)
+      engine_(engine),
+      settings_(settings)
 {
     auto content = std::make_unique<Content>(engine_);
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    setResizable(true, false);
-    centreWithSize(860, 560);
+    prepareRememberedWindow(*this, settings_, "windowScanner", 860, 560, 640, 420);
     setVisible(false);
     startTimerHz(4);
 }
 
 ScannerWindow::~ScannerWindow()
 {
+    saveRememberedWindow(*this, settings_, "windowScanner");
     stopTimer();
 }
 
@@ -326,6 +329,7 @@ void ScannerWindow::toggle()
 
 void ScannerWindow::closeButtonPressed()
 {
+    saveRememberedWindow(*this, settings_, "windowScanner");
     setVisible(false);
 }
 

@@ -78,6 +78,8 @@ public:
     bool isArmed(int channel) const;
     void setChannelName(int channel, const juce::String& name);
     juce::String channelName(int channel) const;
+    void setWavBitDepth(int bits);
+    int wavBitDepth() const;
 
     void record(const std::int16_t* inputPacked, int packedCount);
     void stop();
@@ -159,6 +161,7 @@ private:
     std::vector<OpenWriter> writers_;
     std::vector<OpenReader> readers_;
     juce::File audioFolder_;
+    int wavBitDepth_ = kDefaultWavBitDepth;
 
     std::atomic<int> mode_ { static_cast<int>(TransportMode::stopped) };
     std::atomic<bool> callbacksLive_ { false };

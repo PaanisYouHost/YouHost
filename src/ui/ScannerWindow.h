@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AppSettings.h"
 #include "engine/AudioEngine.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -11,7 +12,7 @@ class ScannerWindow : public juce::DocumentWindow,
                       private juce::Timer
 {
 public:
-    explicit ScannerWindow(AudioEngine& engine);
+    ScannerWindow(AudioEngine& engine, AppSettings& settings);
     ~ScannerWindow() override;
 
     void toggle();
@@ -23,6 +24,7 @@ private:
     void timerCallback() override;
 
     AudioEngine& engine_;
+    AppSettings& settings_;
     Content* content_ = nullptr;
 };
 

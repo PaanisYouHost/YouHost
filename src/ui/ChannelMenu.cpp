@@ -116,6 +116,16 @@ void showChannelMenu(AudioEngine& engine, juce::Component& target, int channel)
                        });
 }
 
+void renameGroup(AudioEngine& engine, int group)
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return;
+    renameWithPrompt("Rename " + engine.groupName(group),
+                     "The group name is only a label. It does not change the audio.",
+                     engine.groupName(group),
+                     [&engine, group](juce::String name) { engine.setGroupName(group, name); });
+}
+
 void showGroupMenu(AudioEngine& engine, juce::Component& target, int group)
 {
     if (group < 0 || group >= kMaxDisplayGroups)
@@ -130,12 +140,7 @@ void showGroupMenu(AudioEngine& engine, juce::Component& target, int group)
                        [&engine, group](int result)
                        {
                            if (result == 300)
-                           {
-                               renameWithPrompt("Rename " + engine.groupName(group),
-                                                "Group names are only a label. They do not change the audio.",
-                                                engine.groupName(group),
-                                                [&engine, group](juce::String name) { engine.setGroupName(group, name); });
-                           }
+                               renameGroup(engine, group);
                            else if (result == 2)
                            {
                                engine.clearGroup(group);

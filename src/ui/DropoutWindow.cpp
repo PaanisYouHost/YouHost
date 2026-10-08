@@ -1,5 +1,6 @@
 #include "DropoutWindow.h"
 #include "Theme.h"
+#include "WindowMemory.h"
 #include "engine/DropoutLog.h"
 
 #include <algorithm>
@@ -171,22 +172,23 @@ private:
     DropoutSnapshot snapshot_;
 };
 
-DropoutWindow::DropoutWindow(AudioEngine& engine)
+DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)
     : juce::DocumentWindow("Dropouts", theme::panel, juce::DocumentWindow::closeButton),
-      engine_(engine)
+      engine_(engine),
+      settings_(settings)
 {
     auto content = std::make_unique<Content>(engine_);
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    setResizable(true, false);
-    centreWithSize(720, 360);
+    prepareRememberedWindow(*this, settings_, "windowDropouts", 720, 420, 520, 300);
     setVisible(false);
     startTimerHz(4);
 }
 
 DropoutWindow::~DropoutWindow()
 {
+    saveRememberedWindow(*this, settings_, "windowDropouts");
     stopTimer();
 }
 
@@ -203,6 +205,7 @@ void DropoutWindow::toggle()
 
 void DropoutWindow::closeButtonPressed()
 {
+    saveRememberedWindow(*this, settings_, "windowDropouts");
     setVisible(false);
 }
 

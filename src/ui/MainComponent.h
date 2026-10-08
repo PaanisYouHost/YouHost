@@ -34,6 +34,8 @@ private:
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
     void hideDeviceTestTone();
+    void mirrorSetupToggles();
+    void toggleSetup();
     void showPage(int page);
     void toggleScanner();
     void toggleDropouts();
@@ -74,6 +76,8 @@ private:
     juce::TextButton peakButton_ { "Peak" };
     juce::Label referenceLabel_ { {}, "RMS 0" };
     juce::ComboBox referenceBox_;
+    juce::Label bitDepthLabel_ { {}, "WAV" };
+    juce::ComboBox bitDepthBox_;
     juce::TextButton clearClipsButton_ { "Clear clips" };
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
@@ -86,11 +90,11 @@ private:
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
     juce::Label latencyLabel_;
-    juce::Viewport viewport_;
     juce::Viewport meterViewport_;
     MeterScaleRail leftScale_;
     MeterScaleRail rightScale_;
     juce::AudioDeviceSelectorComponent deviceSelector_;
+    std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
@@ -99,7 +103,6 @@ private:
 
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
-    bool setupVisible_ = false;
     int page_ = 1;
     int pollDivider_ = 0;
 
@@ -107,8 +110,6 @@ private:
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> hintArea_;
-    juce::Rectangle<int> setupPanel_;
-    juce::Rectangle<int> setupTitle_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

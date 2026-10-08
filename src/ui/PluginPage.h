@@ -4,13 +4,19 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <memory>
+
 namespace youhost
 {
 
-class PluginPage : public juce::Component
+class AppSettings;
+class PluginListWindow;
+
+class PluginPage : public juce::Component,
+                   public juce::DragAndDropContainer
 {
 public:
-    explicit PluginPage(AudioEngine& engine);
+    PluginPage(AudioEngine& engine, AppSettings& settings);
     ~PluginPage() override;
 
     void setMeterMode(bool peak, int referenceDb);
@@ -21,8 +27,10 @@ private:
     class Row;
     class GroupHeader;
     void rebuild();
+    void showPluginList(int channel, int slot);
 
     AudioEngine& engine_;
+    AppSettings& settings_;
     juce::Component content_;
     juce::Label empty_;
     juce::Viewport viewport_;
@@ -30,6 +38,7 @@ private:
     std::vector<std::unique_ptr<GroupHeader>> headers_;
     std::vector<juce::Component*> order_;
     std::vector<int> heights_;
+    std::unique_ptr<PluginListWindow> pluginList_;
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
     int channels_ = -1;

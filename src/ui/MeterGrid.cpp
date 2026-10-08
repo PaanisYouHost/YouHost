@@ -1,4 +1,5 @@
 #include "MeterGrid.h"
+#include "MeterColours.h"
 #include "Theme.h"
 #include "X32Look.h"
 #include "engine/MeterScale.h"
@@ -11,36 +12,30 @@ namespace youhost
 namespace
 {
 
-juce::Colour colourForLevel(float linearGain)
-{
-    const float db = gainToDb(linearGain);
-    if (db >= -6.0f)
-        return theme::red;
-    if (db >= -18.0f)
-        return theme::amber;
-    return theme::green;
-}
-
 struct BarParts
 {
     juce::Rectangle<float> bar;
     juce::Rectangle<float> clip;
     juce::Rectangle<float> button;
+    juce::Rectangle<float> name;
     juce::Rectangle<float> number;
 };
 
 BarParts splitCell(juce::Rectangle<float> cell)
 {
-    const float numberHeight = juce::jlimit(12.0f, 16.0f, cell.getHeight() * 0.1f);
-    const float buttonHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.12f);
+    const float numberHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.08f);
+    const float nameHeight = juce::jlimit(11.0f, 15.0f, cell.getHeight() * 0.05f);
+    const float buttonHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.1f);
     auto body = cell.reduced(2.0f, 2.0f);
     auto number = body.removeFromBottom(numberHeight);
+    body.removeFromBottom(1.0f);
+    auto name = body.removeFromBottom(nameHeight);
     body.removeFromBottom(2.0f);
     auto button = body.removeFromBottom(buttonHeight);
     body.removeFromBottom(2.0f);
     const auto clip = body.removeFromTop(juce::jmin(7.0f, body.getHeight() * 0.08f));
     body.removeFromTop(2.0f);
-    return { body, clip, button, number };
+    return { body, clip, button, name, number };
 }
 
 juce::String tickText(int label)
@@ -197,6 +192,11 @@ void MeterGrid::setGroupMenuHandler(std::function<void(int group)> handler)
     onGroupMenu_ = std::move(handler);
 }
 
+void MeterGrid::setGroupRenameHandler(std::function<void(int group)> handler)
+{
+    onGroupRename_ = std::move(handler);
+}
+
 void MeterGrid::setSelectHandler(std::function<void(int channel, bool extend)> handler)
 {
     onSelect_ = std::move(handler);
@@ -278,17 +278,27 @@ void MeterGrid::paint(juce::Graphics& graphics)
 
         if (cell.header)
         {
-            graphics.setColour(x32Fill(cell.color));
+            const int colourId = normaliseX32Colour(cell.color);
+            const bool inverted = kX32Colours[colourId].inverted;
+            const auto hue = x32Hue(cell.color);
+            const auto fill = hue.isTransparent() ? theme::panel
+                                                   : (inverted ? juce::Colour(0xff1a1d27) : hue);
+            const auto ink = hue.isTransparent() ? theme::text
+                                                  : (inverted ? hue
+                                                              : (hue.getPerceivedBrightness() > 0.55f
+                                                                     ? juce::Colour(0xff141414)
+                                                                     : juce::Colours::white));
+            graphics.setColour(fill);
             graphics.fillRoundedRectangle(bounds.reduced(1.0f), 4.0f);
-            if (kX32Colours[normaliseX32Colour(cell.color)].inverted)
+            if (! hue.isTransparent())
             {
-                graphics.setColour(x32Ink(cell.color));
-                graphics.fillRect(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 3.0f, bounds.getHeight() - 4.0f);
+                graphics.setColour(hue);
+                graphics.fillRect(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 7.0f, bounds.getHeight() - 4.0f);
             }
-            auto body = bounds.reduced(4.0f, 8.0f);
-            graphics.setColour(x32Ink(cell.color));
-            graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
-            graphics.drawFittedText(cell.title, body.removeFromTop(32.0f).toNearestInt(), juce::Justification::centred, 2);
+            auto body = bounds.reduced(8.0f, 8.0f);
+            graphics.setColour(ink);
+            graphics.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
+            graphics.drawFittedText(cell.title, body.removeFromTop(40.0f).toNearestInt(), juce::Justification::centred, 3);
 
             const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
             auto meter = body.removeFromTop(std::min(80.0f, body.getHeight() * 0.45f)).reduced(10.0f, 4.0f);
@@ -298,7 +308,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
             {
                 const float filled = normaliseDb(gainToDb(level), span) * meter.getHeight();
                 auto levelArea = meter.withTop(meter.getBottom() - filled);
-                graphics.setColour(colourForLevel(level));
+                graphics.setColour(meterLevelColour(level, rmsReferenceDb_));
                 graphics.fillRoundedRectangle(levelArea, 2.0f);
             }
 
@@ -314,18 +324,26 @@ void MeterGrid::paint(juce::Graphics& graphics)
             if (cell.collapsed)
                 state << "  folded";
 
-            graphics.setColour(x32Ink(cell.color));
+            graphics.setColour(ink);
             graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
             graphics.drawFittedText(state, body.toNearestInt(), juce::Justification::centred, 3);
             continue;
         }
 
-        graphics.setColour(x32Fill(cell.color));
-        graphics.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 4.0f);
-        if (kX32Colours[normaliseX32Colour(cell.color)].inverted)
+        graphics.setColour(theme::background);
+        graphics.fillRect(bounds);
+        const auto wash = x32Wash(cell.color);
+        if (! wash.isTransparent())
         {
-            graphics.setColour(x32Ink(cell.color));
-            graphics.fillRect(bounds.getX(), bounds.getY(), 3.0f, bounds.getHeight());
+            graphics.setColour(wash);
+            graphics.fillRect(bounds);
+        }
+        const auto hue = x32Hue(cell.color);
+        if (! hue.isTransparent())
+        {
+            graphics.setColour(hue);
+            graphics.fillRect(bounds.getX(), bounds.getY(), 6.0f, bounds.getHeight());
+            graphics.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 4.0f);
         }
 
         const auto parts = splitCell(bounds);
@@ -344,7 +362,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
         {
             const float filled = normaliseDb(gainToDb(level), span) * parts.bar.getHeight();
             auto levelArea = parts.bar.withTop(parts.bar.getBottom() - filled);
-            graphics.setColour(colourForLevel(level));
+            graphics.setColour(meterLevelColour(level, rmsReferenceDb_));
             graphics.fillRoundedRectangle(levelArea, 2.0f);
         }
 
@@ -359,10 +377,16 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.setFont(juce::Font(juce::FontOptions(fontSize).withStyle("Bold")));
         graphics.drawText(channelButtonText(cell.reading), button, juce::Justification::centred, false);
 
-        graphics.setColour(on ? theme::text : theme::fainter);
-        graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 12.0f, width * 0.28f))));
-        auto number = cell.title.isNotEmpty() ? cell.title : juce::String(cell.channel + 1);
-        graphics.drawText(number, parts.number, juce::Justification::centred, true);
+        if (cell.title.isNotEmpty())
+        {
+            graphics.setColour(on ? theme::dim : theme::fainter);
+            graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 11.0f, width * 0.24f))));
+            graphics.drawText(cell.title, parts.name, juce::Justification::centred, true);
+        }
+
+        graphics.setColour(theme::text);
+        graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(12.0f, 16.0f, width * 0.42f)).withStyle("Bold")));
+        graphics.drawText(juce::String(cell.channel + 1), parts.number, juce::Justification::centred, false);
 
         if (cell.selected)
         {
@@ -401,8 +425,20 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
-    if (hit.header && onGroupToggle_ != nullptr)
-        onGroupToggle_(hit.group);
+    if (hit.header)
+    {
+        if (event.getNumberOfClicks() >= 2)
+        {
+            if (onGroupToggle_ != nullptr)
+                onGroupToggle_(hit.group);
+            if (onGroupRename_ != nullptr)
+                onGroupRename_(hit.group);
+        }
+        else if (onGroupToggle_ != nullptr)
+        {
+            onGroupToggle_(hit.group);
+        }
+    }
     else if (hit.record && onRecord_ != nullptr)
         onRecord_(hit.channel);
     else if (hit.clip && onClearClip_ != nullptr)

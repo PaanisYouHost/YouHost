@@ -9,5 +9,6 @@ namespace youhost
 
 void showChannelMenu(AudioEngine& engine, juce::Component& target, int channel);
 void showGroupMenu(AudioEngine& engine, juce::Component& target, int group);
+void renameGroup(AudioEngine& engine, int group);
 
 } // namespace youhost

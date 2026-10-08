@@ -71,6 +71,7 @@ public:
     ChannelSnapshot channelSnapshot(int channel) const;
     void loadPlugin(int channel, int slot, const juce::PluginDescription& description, bool openEditor = false);
     void removePlugin(int channel, int slot);
+    void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setSlotBypassed(int channel, int slot, bool bypassed);
     void setChannelExcluded(int channel, bool excluded);
     void openPluginEditor(int channel, int slot);
@@ -114,6 +115,9 @@ public:
     void startNewSession();
 
     void setSessionMeters(bool peak, int rmsReferenceDb);
+    void setWavBitDepth(int bits, bool markDirty);
+    int wavBitDepth() const noexcept { return wavBitDepth_; }
+    juce::String wavBitDepthLabel() const;
     void noteSessionEdit();
     void touchSession();
     void maintainSession();
@@ -193,6 +197,7 @@ private:
     int playbackMax_ = 0;
     bool sessionPeak_ = false;
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
+    int wavBitDepth_ = kDefaultWavBitDepth;
     int sessionPage_ = 1;
     juce::File sessionFolder_;
     juce::String sessionMessage_;

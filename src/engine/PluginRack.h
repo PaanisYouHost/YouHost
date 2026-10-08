@@ -17,6 +17,7 @@
 namespace youhost
 {
 
+class AppSettings;
 class PluginCatalogue;
 
 struct SlotSnapshot
@@ -44,7 +45,7 @@ class PluginRack : private juce::Timer,
                    private juce::AudioProcessorListener
 {
 public:
-    PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples);
+    PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples, AppSettings* settings);
     ~PluginRack() override;
 
     PluginRack(const PluginRack&) = delete;
@@ -69,6 +70,7 @@ public:
                     bool openWhenReady = false);
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
+    void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setBypassed(int channel, int slot, bool bypassed);
     void setExcluded(int channel, bool excluded);
     void setAudible(int channel, bool audible);
@@ -130,6 +132,7 @@ private:
 
     PluginCatalogue& catalogue_;
     std::atomic<int>& compensationSamples_;
+    AppSettings* settings_ = nullptr;
     std::function<void()> dirtyHandler_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 

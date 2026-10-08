@@ -291,6 +291,18 @@ juce::String Recorder::channelName(int channel) const
     return names_[static_cast<std::size_t>(channel)];
 }
 
+void Recorder::setWavBitDepth(int bits)
+{
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    wavBitDepth_ = normaliseWavBitDepth(bits);
+}
+
+int Recorder::wavBitDepth() const
+{
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    return wavBitDepth_;
+}
+
 bool Recorder::waitUntilIdle()
 {
     for (int attempt = 0; attempt < 100; ++attempt)
@@ -357,6 +369,7 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     std::array<bool, kMaxChannels> armSnapshot {};
     std::array<juce::String, kMaxChannels> nameSnapshot {};
     int takeNumber = 1;
+    int bits = kDefaultWavBitDepth;
     std::int64_t start = 0;
     {
         const std::lock_guard<std::mutex> lock(stateLock_);
@@ -364,6 +377,7 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
         armSnapshot = armed_;
         nameSnapshot = names_;
         takeNumber = static_cast<int>(takes_.size()) + 1;
+        bits = wavBitDepth_;
         start = contentEndUnlocked();
         livePeaks_.clear();
     }
@@ -399,8 +413,10 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
         const auto options = juce::AudioFormatWriterOptions {}
                                  .withSampleRate(rate)
                                  .withNumChannels(1)
-                                 .withBitsPerSample(24)
-                                 .withSampleFormat(juce::AudioFormatWriterOptions::SampleFormat::integral);
+                                 .withBitsPerSample(bits)
+                                 .withSampleFormat(wavBitDepthIsFloat(bits)
+                                                       ? juce::AudioFormatWriterOptions::SampleFormat::floatingPoint
+                                                       : juce::AudioFormatWriterOptions::SampleFormat::integral);
         auto writer = wav.createWriterFor(stream, options);
         if (writer == nullptr)
             continue;
@@ -825,6 +841,7 @@ void Recorder::restoreSession(const SessionData& data, const juce::File& audioFo
     stop();
     const std::lock_guard<std::mutex> lock(stateLock_);
     audioFolder_ = audioFolder;
+    wavBitDepth_ = normaliseWavBitDepth(data.wavBitDepth);
     takes_.clear();
     livePeaks_.clear();
     for (int channel = 0; channel < kMaxChannels; ++channel)

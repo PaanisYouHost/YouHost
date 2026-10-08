@@ -10,7 +10,7 @@ namespace youhost
 inline constexpr int kMaxDisplayGroups = 10;
 inline constexpr float kMinStripWidth = 36.0f;
 inline constexpr float kMaxStripWidth = 68.0f;
-inline constexpr float kGroupHeaderWidth = 88.0f;
+inline constexpr float kGroupHeaderWidth = 108.0f;
 
 enum class StripKind
 {

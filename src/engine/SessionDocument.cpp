@@ -68,7 +68,8 @@ std::vector<WavePeak> decodePeaks(const juce::String& encoded)
 bool writeSessionFile(const juce::File& file, const SessionData& data)
 {
     juce::XmlElement root("YouHostSession");
-    root.setAttribute("version", 3);
+    root.setAttribute("version", 4);
+    root.setAttribute("bits", normaliseWavBitDepth(data.wavBitDepth));
     root.setAttribute("page", data.page == 2 ? 2 : 1);
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
@@ -166,6 +167,7 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     data = {};
     data.page = root->getIntAttribute("page", 1) == 2 ? 2 : 1;
     data.sampleRate = root->getDoubleAttribute("rate", 0.0);
+    data.wavBitDepth = normaliseWavBitDepth(root->getIntAttribute("bits", kDefaultWavBitDepth));
     if (auto* meters = root->getChildByName("Meters"))
     {
         data.peakMeter = meters->getBoolAttribute("peak", false);

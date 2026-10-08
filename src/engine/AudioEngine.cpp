@@ -91,10 +91,12 @@ AudioEngine::AudioEngine(AppSettings& settings)
 {
     channelGroup_.fill(-1);
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
-    rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_);
+    rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
+    wavBitDepth_ = settings_.loadWavBitDepth();
+    recorder_->setWavBitDepth(wavBitDepth_);
     dropoutOriginNs_ = steadyNowNs();
 }
 
@@ -606,6 +608,12 @@ void AudioEngine::removePlugin(int channel, int slot)
         rack_->removePlugin(channel, slot);
 }
 
+void AudioEngine::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
+{
+    if (rack_ != nullptr)
+        rack_->transferPlugin(fromChannel, fromSlot, toChannel, toSlot, copy);
+}
+
 void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
 {
     if (rack_ != nullptr)
@@ -737,6 +745,27 @@ void AudioEngine::setSessionMeters(bool peak, int rmsReferenceDb)
     sessionReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
 }
 
+void AudioEngine::setWavBitDepth(int bits, bool markDirty)
+{
+    const int next = normaliseWavBitDepth(bits);
+    const bool changed = next != wavBitDepth_;
+    wavBitDepth_ = next;
+    if (recorder_ != nullptr)
+        recorder_->setWavBitDepth(next);
+    settings_.saveWavBitDepth(next);
+    if (markDirty && changed)
+        noteSessionEdit();
+}
+
+juce::String AudioEngine::wavBitDepthLabel() const
+{
+    if (wavBitDepth_ == 16)
+        return "16-bit";
+    if (wavBitDepth_ == 32)
+        return "32-bit float";
+    return "24-bit";
+}
+
 void AudioEngine::noteSessionEdit()
 {
     if (restoringSession_)
@@ -792,7 +821,7 @@ void AudioEngine::ensureSessionFolder()
         folder = root.getChildFile(stamp + "-" + juce::String(suffix++));
 
     saveSessionToFolder(folder);
-    sessionMessage_ = "Recording to " + folder.getFullPathName();
+    sessionMessage_ = "Session folder " + folder.getFullPathName();
 }
 
 void AudioEngine::setMeterRestoreHandler(std::function<void(bool, int)> handler)
@@ -847,6 +876,7 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
     SessionData data;
     data.peakMeter = sessionPeak_;
     data.rmsReferenceDb = sessionReferenceDb_;
+    data.wavBitDepth = wavBitDepth_;
     if (persistSetup_)
         data.device = deviceManager_.createStateXml();
     if (rack_ != nullptr)
@@ -883,7 +913,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     SessionData data;
     if (! readSessionFile(juce::File(layout.sessionFile), data))
     {
-        sessionMessage_ = "Could not read session.youhost.";
+        sessionMessage_ = "Could not open that session. The session file is missing or unreadable.";
         return false;
     }
 
@@ -894,6 +924,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     sessionFolder_ = juce::File(layout.folder);
     sessionPeak_ = data.peakMeter;
     sessionReferenceDb_ = data.rmsReferenceDb;
+    setWavBitDepth(data.wavBitDepth, false);
     sessionPage_ = data.page == 2 ? 2 : 1;
     if (meterRestoreHandler_ != nullptr)
         meterRestoreHandler_(sessionPeak_, sessionReferenceDb_);
@@ -970,7 +1001,7 @@ bool AudioEngine::saveSessionAs(const juce::File& folder)
     syncRecorderFolder();
     if (! saveSession())
         return false;
-    sessionMessage_ = "Saved a copy to " + folder.getFullPathName() + ". The original folder was left in place.";
+    sessionMessage_ = "Saved a copy in " + folder.getFullPathName() + ". The original folder is unchanged.";
     return true;
 }
 
@@ -987,7 +1018,7 @@ bool AudioEngine::importRecordingFolder(const juce::File& folder)
         wavs = source.findChildFiles(juce::File::findFiles, true, "*.wav");
     if (wavs.isEmpty())
     {
-        sessionMessage_ = "No WAV files in that folder.";
+        sessionMessage_ = "That folder has no WAV files.";
         return false;
     }
 
@@ -1060,7 +1091,7 @@ bool AudioEngine::importRecordingFolder(const juce::File& folder)
 
     if (added == 0)
     {
-        sessionMessage_ = "Could not import those WAV files.";
+        sessionMessage_ = "Could not import those WAV files. Check the file names and that they share one sample rate.";
         return false;
     }
 

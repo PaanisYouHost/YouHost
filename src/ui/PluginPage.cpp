@@ -1,6 +1,9 @@
 #include "PluginPage.h"
+#include "AppSettings.h"
 #include "ChannelMenu.h"
+#include "MeterColours.h"
 #include "Theme.h"
+#include "WindowMemory.h"
 #include "X32Look.h"
 #include "engine/DisplayLayout.h"
 #include "engine/MeterScale.h"
@@ -97,8 +100,12 @@ private:
             return;
         const auto description = types_.getReference(shown_[static_cast<std::size_t>(row)]);
         onChoose_(description);
-        if (auto* box = findParentComponentOfClass<juce::CallOutBox>())
-            box->dismiss();
+    }
+
+public:
+    void setChoose(std::function<void(const juce::PluginDescription&)> onChoose)
+    {
+        onChoose_ = std::move(onChoose);
     }
 
     AudioEngine& engine_;
@@ -109,10 +116,29 @@ private:
     juce::ListBox list_;
 };
 
-class SlotButton : public juce::TextButton
+bool parseSlotDrag(const juce::var& description, int& channel, int& slot, bool& copy)
+{
+    const auto text = description.toString();
+    if (! text.startsWith("youhost-slot:"))
+        return false;
+    const auto parts = juce::StringArray::fromTokens(text.fromFirstOccurrenceOf("youhost-slot:", false, false), ":", "");
+    if (parts.size() < 3)
+        return false;
+    channel = parts[0].getIntValue();
+    slot = parts[1].getIntValue();
+    copy = parts[2] == "copy";
+    return true;
+}
+
+class SlotButton : public juce::TextButton,
+                   public juce::DragAndDropTarget
 {
 public:
     std::function<void()> onMenu;
+    std::function<bool()> canDrag;
+    std::function<void(bool copy)> onDrag;
+    std::function<void(int fromChannel, int fromSlot, bool copy)> onDrop;
+    bool dropHover = false;
 
     void mouseDown(const juce::MouseEvent& event) override
     {
@@ -122,11 +148,119 @@ public:
                 onMenu();
             return;
         }
+        dragged_ = false;
         juce::TextButton::mouseDown(event);
     }
+
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        if (dragged_ || event.mods.isPopupMenu())
+            return;
+        if (event.getDistanceFromDragStart() < 8.0f)
+            return;
+        if (canDrag == nullptr || ! canDrag())
+            return;
+        dragged_ = true;
+        if (onDrag != nullptr)
+            onDrag(event.mods.isAltDown());
+    }
+
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        if (dragged_)
+        {
+            dragged_ = false;
+            setState(juce::Button::buttonNormal);
+            return;
+        }
+        juce::TextButton::mouseUp(event);
+    }
+
+    bool isInterestedInDragSource(const SourceDetails& details) override
+    {
+        int channel = 0;
+        int slot = 0;
+        bool copy = false;
+        return parseSlotDrag(details.description, channel, slot, copy);
+    }
+
+    void itemDragEnter(const SourceDetails&) override
+    {
+        dropHover = true;
+        repaint();
+    }
+
+    void itemDragExit(const SourceDetails&) override
+    {
+        dropHover = false;
+        repaint();
+    }
+
+    void itemDropped(const SourceDetails& details) override
+    {
+        dropHover = false;
+        repaint();
+        int channel = 0;
+        int slot = 0;
+        bool copy = false;
+        if (parseSlotDrag(details.description, channel, slot, copy) && onDrop != nullptr)
+            onDrop(channel, slot, copy);
+    }
+
+    void paintButton(juce::Graphics& graphics, bool over, bool down) override
+    {
+        juce::TextButton::paintButton(graphics, over, down);
+        if (dropHover)
+        {
+            graphics.setColour(theme::text);
+            graphics.drawRect(getLocalBounds(), 2);
+        }
+    }
+
+private:
+    bool dragged_ = false;
 };
 
 } // namespace
+
+class PluginListWindow : public juce::DocumentWindow
+{
+public:
+    PluginListWindow(AudioEngine& engine, AppSettings& settings)
+        : juce::DocumentWindow("Plugins", theme::panel, juce::DocumentWindow::closeButton),
+          settings_(settings)
+    {
+        auto picker = std::make_unique<PluginPicker>(engine, [](const juce::PluginDescription&) {});
+        picker_ = picker.get();
+        setUsingNativeTitleBar(true);
+        setContentOwned(picker.release(), true);
+        prepareRememberedWindow(*this, settings_, "windowPluginList", 420, 480, 320, 240);
+        setVisible(false);
+    }
+
+    ~PluginListWindow() override
+    {
+        saveRememberedWindow(*this, settings_, "windowPluginList");
+    }
+
+    void closeButtonPressed() override
+    {
+        saveRememberedWindow(*this, settings_, "windowPluginList");
+        setVisible(false);
+    }
+
+    void showFor(std::function<void(const juce::PluginDescription&)> onChoose)
+    {
+        if (picker_ != nullptr)
+            picker_->setChoose(std::move(onChoose));
+        setVisible(true);
+        toFront(true);
+    }
+
+private:
+    AppSettings& settings_;
+    PluginPicker* picker_ = nullptr;
+};
 
 class PluginPage::GroupHeader : public juce::Component
 {
@@ -149,17 +283,36 @@ public:
             showGroupMenu(engine_, *this, group_);
             return;
         }
+        if (event.getNumberOfClicks() >= 2)
+        {
+            engine_.toggleGroupCollapsed(group_);
+            renameGroup(engine_, group_);
+            return;
+        }
         engine_.toggleGroupCollapsed(group_);
     }
 
     void paint(juce::Graphics& graphics) override
     {
         const int color = engine_.groupColor(group_);
-        graphics.setColour(x32Fill(color));
+        const int colourId = normaliseX32Colour(color);
+        const bool inverted = kX32Colours[colourId].inverted;
+        const auto hue = x32Hue(color);
+        const auto fill = hue.isTransparent() ? theme::panel
+                                               : (inverted ? juce::Colour(0xff1a1d27) : hue);
+        const auto ink = hue.isTransparent() ? theme::text
+                                              : (inverted ? hue
+                                                          : (hue.getPerceivedBrightness() > 0.55f
+                                                                 ? juce::Colour(0xff141414)
+                                                                 : juce::Colours::white));
+        graphics.setColour(fill);
         graphics.fillRect(getLocalBounds());
-        graphics.setColour(x32Ink(color));
-        if (kX32Colours[normaliseX32Colour(color)].inverted)
-            graphics.fillRect(0, 0, 4, getHeight());
+        if (! hue.isTransparent())
+        {
+            graphics.setColour(hue);
+            graphics.fillRect(0, 0, 8, getHeight());
+        }
+        graphics.setColour(ink);
 
         const int channels = std::max(0, engine_.visibleChannels());
         float level = 0.0f;
@@ -184,9 +337,9 @@ public:
             }
         }
 
-        auto area = getLocalBounds().reduced(10, 4);
-        graphics.setColour(x32Ink(color));
-        graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
+        auto area = getLocalBounds().reduced(14, 4);
+        graphics.setColour(ink);
+        graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
         auto title = engine_.groupName(group_);
         if (engine_.groupCollapsed(group_))
             title << "    folded";
@@ -201,6 +354,7 @@ public:
             state << "   CLIP";
         if (plugins)
             state << "   FX";
+        graphics.setColour(ink);
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
         graphics.drawText(state, area.removeFromRight(180), juce::Justification::centredRight, true);
 
@@ -211,7 +365,7 @@ public:
         {
             const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(referenceDb_);
             const float filled = normaliseDb(gainToDb(level), span) * static_cast<float>(meter.getWidth());
-            graphics.setColour(gainToDb(level) >= -6.0f ? theme::red : gainToDb(level) >= -18.0f ? theme::amber : theme::green);
+            graphics.setColour(meterLevelColour(level, referenceDb_));
             graphics.fillRect(meter.getX(), meter.getY(), static_cast<int>(filled), meter.getHeight());
         }
     }
@@ -241,10 +395,13 @@ public:
         addAndMakeVisible(arm_);
         addAndMakeVisible(exclude_);
         number_.setInterceptsMouseClicks(false, false);
-        number_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        number_.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
+        number_.setColour(juce::Label::textColourId, theme::text);
+        number_.setMinimumHorizontalScale(1.0f);
         number_.setJustificationType(juce::Justification::centred);
         name_.setEditable(false, true, false);
         name_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        name_.setMinimumHorizontalScale(0.6f);
         name_.setJustificationType(juce::Justification::centredLeft);
         name_.setTooltip("Double-click to rename. Right-click for color and group. The name is used in the WAV file name.");
         name_.onTextChange = [this]
@@ -273,6 +430,26 @@ public:
             button.setMouseClickGrabsKeyboardFocus(false);
             button.onClick = [this, slot] { slotClicked(slot); };
             button.onMenu = [this, slot] { showMenu(slot); };
+            button.canDrag = [this, slot]
+            {
+                const auto snap = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
+                return snap.occupied && ! snap.loading;
+            };
+            button.onDrag = [this, slot](bool copy)
+            {
+                auto* container = juce::DragAndDropContainer::findParentDragContainerFor(this);
+                if (container == nullptr)
+                    return;
+                auto& source = slots_[static_cast<std::size_t>(slot)];
+                const auto image = source.createComponentSnapshot(source.getLocalBounds(), true);
+                const auto description = "youhost-slot:" + juce::String(channel_) + ":" + juce::String(slot) + ":"
+                                         + (copy ? "copy" : "move");
+                container->startDragging(description, &source, juce::ScaledImage(image), true);
+            };
+            button.onDrop = [this, slot](int fromChannel, int fromSlot, bool copy)
+            {
+                engine_.transferPlugin(fromChannel, fromSlot, channel_, slot, copy);
+            };
         }
     }
 
@@ -320,12 +497,14 @@ public:
                 fill = juce::Colour(0xff3d3420);
             if (engine_.isPluginEditorOpen(channel_, slot))
                 fill = fill.brighter(0.2f);
+            const int color = engine_.channelColor(channel_);
+            if (color != 0)
+                fill = fill.interpolatedWith(x32Hue(color), 0.28f);
             button.setColour(juce::TextButton::buttonColourId, fill);
             button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
             button.setTooltip(source.error.isNotEmpty()
                                   ? source.error
-                                  : (source.bypassed ? "Bypassed. Right-click for bypass and remove."
-                                                     : "Right-click for bypass and remove."));
+                                  : "Drag to move. Option-drag to copy this plugin and its settings. Right-click for bypass and remove.");
         }
         repaint();
     }
@@ -333,8 +512,8 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(4, 2);
-        area.removeFromLeft(6);
-        number_.setBounds(area.removeFromLeft(32));
+        area.removeFromLeft(8);
+        number_.setBounds(area.removeFromLeft(46));
         arm_.setBounds(area.removeFromLeft(46).reduced(2, 4));
         name_.setBounds(area.removeFromLeft(128));
         meterArea_ = area.removeFromLeft(18).reduced(3, 3);
@@ -348,12 +527,19 @@ public:
     void paint(juce::Graphics& graphics) override
     {
         const int color = engine_.channelColor(channel_);
-        graphics.setColour(x32Fill(color));
-        graphics.fillRect(0, 0, 6, getHeight());
-        if (kX32Colours[normaliseX32Colour(color)].inverted)
+        graphics.setColour(theme::background);
+        graphics.fillRect(getLocalBounds());
+        const auto wash = x32Wash(color);
+        if (! wash.isTransparent())
         {
-            graphics.setColour(x32Ink(color));
-            graphics.fillRect(0, 0, 3, getHeight());
+            graphics.setColour(wash);
+            graphics.fillRect(getLocalBounds());
+        }
+        const auto hue = x32Hue(color);
+        if (! hue.isTransparent())
+        {
+            graphics.setColour(hue);
+            graphics.fillRect(0, 0, 8, getHeight());
         }
 
         if (engine_.isChannelSelected(channel_))
@@ -375,8 +561,7 @@ public:
             const float filled = normaliseDb(gainToDb(level), span) * static_cast<float>(meterArea_.getHeight());
             auto bar = meterArea_.toFloat();
             bar.setTop(bar.getBottom() - filled);
-            const float db = gainToDb(level);
-            graphics.setColour(db >= -6.0f ? theme::red : db >= -18.0f ? theme::amber : theme::green);
+            graphics.setColour(meterLevelColour(level, referenceDb_));
             graphics.fillRoundedRectangle(bar, 2.0f);
         }
         graphics.setColour(! on ? theme::panelEdge : engine_.clipFor(channel_) ? theme::red : theme::panelEdge);
@@ -413,13 +598,8 @@ private:
             return;
         }
 
-        auto* picker = new PluginPicker(engine_, [this, slot](const juce::PluginDescription& description)
-        {
-            engine_.loadPlugin(channel_, slot, description, true);
-        });
-        juce::CallOutBox::launchAsynchronously(std::unique_ptr<juce::Component>(picker),
-                                               slots_[static_cast<std::size_t>(slot)].getScreenBounds(),
-                                               nullptr);
+        if (auto* page = findParentComponentOfClass<PluginPage>())
+            page->showPluginList(channel_, slot);
     }
 
     void showMenu(int slot)
@@ -458,9 +638,11 @@ private:
     juce::Rectangle<int> meterArea_;
 };
 
-PluginPage::PluginPage(AudioEngine& engine)
-    : engine_(engine)
+PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
+    : engine_(engine),
+      settings_(settings)
 {
+    pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
     addAndMakeVisible(viewport_);
     empty_.setText("No input channels are open. Open Audio setup and enable the inputs.", juce::dontSendNotification);
     empty_.setJustificationType(juce::Justification::centred);
@@ -521,6 +703,18 @@ void PluginPage::rebuild()
         }
     }
     resized();
+}
+
+void PluginPage::showPluginList(int channel, int slot)
+{
+    if (pluginList_ == nullptr)
+        return;
+    pluginList_->showFor([this, channel, slot](const juce::PluginDescription& description)
+    {
+        engine_.loadPlugin(channel, slot, description, true);
+        if (pluginList_ != nullptr)
+            pluginList_->setVisible(false);
+    });
 }
 
 void PluginPage::refresh()

@@ -82,6 +82,7 @@ public:
     void setChannelMenuHandler(std::function<void(int channel)> handler);
     void setGroupToggleHandler(std::function<void(int group)> handler);
     void setGroupMenuHandler(std::function<void(int group)> handler);
+    void setGroupRenameHandler(std::function<void(int group)> handler);
     void setSelectHandler(std::function<void(int channel, bool extend)> handler);
 
     void paint(juce::Graphics& graphics) override;
@@ -100,6 +101,7 @@ private:
     std::function<void(int)> onChannelMenu_;
     std::function<void(int)> onGroupToggle_;
     std::function<void(int)> onGroupMenu_;
+    std::function<void(int)> onGroupRename_;
     std::function<void(int, bool)> onSelect_;
     BridgeMetrics metrics_ {};
 };

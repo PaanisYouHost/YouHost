@@ -16,4 +16,19 @@ inline constexpr float kMeterFloorDb = -60.0f;
 // RMS 0 is line level. The default leaves +20 dB of digital headroom above it.
 inline constexpr int kDefaultRmsReferenceDb = -20;
 
+// 16 and 24 are integer PCM. 32 is 32-bit float. Anything else becomes 24.
+inline constexpr int kDefaultWavBitDepth = 24;
+
+inline int normaliseWavBitDepth(int bits) noexcept
+{
+    if (bits == 16 || bits == 32)
+        return bits;
+    return kDefaultWavBitDepth;
+}
+
+inline bool wavBitDepthIsFloat(int bits) noexcept
+{
+    return normaliseWavBitDepth(bits) == 32;
+}
+
 } // namespace youhost

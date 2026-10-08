@@ -52,6 +52,7 @@ struct SessionData
 {
     bool peakMeter = false;
     int rmsReferenceDb = kDefaultRmsReferenceDb;
+    int wavBitDepth = kDefaultWavBitDepth;
     int page = 1;
     double sampleRate = 0.0;
     std::unique_ptr<juce::XmlElement> device;

@@ -223,9 +223,25 @@ void testTakePlan()
     CHECK(code.hours == 1);
     CHECK(code.minutes == 1);
     CHECK(code.seconds == 1);
-    CHECK(youhost::takeWaveName(1, 3, "Kick Drum") == "Take01_Ch03_Kick_Drum.wav");
-    CHECK(youhost::takeWaveName(12, 1, "Kick/Snare") == "Take12_Ch01_KickSnare.wav");
+    CHECK(youhost::takeWaveName(1, 3, "Kick Drum") == "3_1_Kick_Drum.wav");
+    CHECK(youhost::takeWaveName(12, 1, "Kick/Snare") == "1_12_KickSnare.wav");
+    CHECK(youhost::takeWaveName(1, 1, "") == "1_1.wav");
+    CHECK(youhost::takeWaveName(2, 2, "BD") == "2_2_BD.wav");
+    CHECK(youhost::takeWaveName(1, 1, "  ") == "1_1.wav");
     CHECK(youhost::sanitiseChannelName("  ") == "");
+    CHECK(youhost::meterColourForDb(-21.0f, -20) == youhost::MeterColour::green);
+    CHECK(youhost::meterColourForDb(-20.0f, -20) == youhost::MeterColour::yellow);
+    CHECK(youhost::meterColourForDb(-6.0f, -20) == youhost::MeterColour::yellow);
+    CHECK(youhost::meterColourForDb(0.0f, -20) == youhost::MeterColour::red);
+    CHECK(youhost::meterColourForDb(-15.0f, -14) == youhost::MeterColour::green);
+    CHECK(youhost::meterColourForDb(-13.0f, -14) == youhost::MeterColour::yellow);
+    CHECK(youhost::meterColourForDb(-15.0f, -20) == youhost::MeterColour::yellow);
+    CHECK(youhost::normaliseWavBitDepth(16) == 16);
+    CHECK(youhost::normaliseWavBitDepth(24) == 24);
+    CHECK(youhost::normaliseWavBitDepth(32) == 32);
+    CHECK(youhost::normaliseWavBitDepth(8) == 24);
+    CHECK(youhost::wavBitDepthIsFloat(32));
+    CHECK(! youhost::wavBitDepthIsFloat(24));
 }
 
 void testMeterLayoutScales()
@@ -514,6 +530,15 @@ void testTakeImportGroups()
     const auto slash = youhost::parseRecordingName("Take12_Ch01_KickSnare.wav");
     CHECK(slash.takeNumber == 12);
     CHECK(slash.channelNumber == 1);
+    const auto current = youhost::parseRecordingName("1_1_BD.wav");
+    CHECK(current.takeNumber == 1);
+    CHECK(current.channelNumber == 1);
+    const auto plain = youhost::parseRecordingName("3_2.wav");
+    CHECK(plain.takeNumber == 2);
+    CHECK(plain.channelNumber == 3);
+    const auto wide = youhost::parseRecordingName("12_3_Kick.wav");
+    CHECK(wide.takeNumber == 3);
+    CHECK(wide.channelNumber == 12);
     const auto loose = youhost::parseRecordingName("Track 4 snare.wav");
     CHECK(loose.takeNumber == 0);
     CHECK(loose.channelNumber == 4);

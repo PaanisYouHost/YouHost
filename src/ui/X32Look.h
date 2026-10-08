@@ -36,4 +36,25 @@ inline juce::Colour x32Ink(int index)
     return luma > 1200 ? juce::Colour(0xff141414) : juce::Colours::white;
 }
 
+// Hue used when a strip or row needs a visible colour, including the inverted
+// scribble colours whose solid fill is otherwise a dark panel.
+inline juce::Colour x32Hue(int index)
+{
+    const int id = normaliseX32Colour(index);
+    if (id == 0)
+        return juce::Colours::transparentBlack;
+    if (kX32Colours[id].inverted && id != 8)
+        return x32Rgb(kX32Colours[id]);
+    return x32Fill(id);
+}
+
+// Soft wash over the whole strip. The solid bar carries the colour; this only tints.
+inline juce::Colour x32Wash(int index)
+{
+    const auto hue = x32Hue(index);
+    if (hue.isTransparent())
+        return hue;
+    return hue.withAlpha(0.18f);
+}
+
 } // namespace youhost

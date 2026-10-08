@@ -1,4 +1,5 @@
 #include "PluginRack.h"
+#include "AppSettings.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
 #include "ui/Theme.h"
@@ -72,14 +73,33 @@ struct PluginRack::LiveGraph
     std::vector<std::shared_ptr<HostedPlugin>> keepAlive;
 };
 
+static juce::String editorWindowKey(const juce::PluginDescription& description)
+{
+    auto name = description.name.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+    if (name.isEmpty())
+        name = "Plugin";
+    if (name.length() > 48)
+        name = name.substring(0, 48);
+    return "windowEditor" + name;
+}
+
 struct PluginRack::EditorWindow : public juce::DocumentWindow
 {
-    EditorWindow(const juce::String& title, std::function<void()> onClose)
+    EditorWindow(const juce::String& title, std::function<void()> onClose, AppSettings* settings, juce::String key)
         : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
-          onClose_(std::move(onClose))
+          onClose_(std::move(onClose)),
+          settings_(settings),
+          key_(std::move(key))
     {
         setUsingNativeTitleBar(true);
         setResizable(true, false);
+        setResizeLimits(320, 200, 4000, 2400);
+    }
+
+    ~EditorWindow() override
+    {
+        if (settings_ != nullptr && key_.isNotEmpty())
+            settings_->saveNamedWindow(key_, getWindowStateAsString());
     }
 
     void closeButtonPressed() override
@@ -89,11 +109,14 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
     }
 
     std::function<void()> onClose_;
+    AppSettings* settings_ = nullptr;
+    juce::String key_;
 };
 
-PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples)
+PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples, AppSettings* settings)
     : catalogue_(catalogue),
-      compensationSamples_(compensationSamples)
+      compensationSamples_(compensationSamples),
+      settings_(settings)
 {
     audible_.fill(true);
     startTimerHz(5);
@@ -414,6 +437,32 @@ void PluginRack::removePlugin(int channel, int slot)
     notifyDirty();
 }
 
+void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
+{
+    if (! validSlot(fromChannel, fromSlot) || ! validSlot(toChannel, toSlot))
+        return;
+    if (fromChannel == toChannel && fromSlot == toSlot)
+        return;
+
+    juce::PluginDescription description;
+    juce::MemoryBlock state;
+    bool bypassed = false;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& source = model_[static_cast<std::size_t>(fromChannel)][static_cast<std::size_t>(fromSlot)];
+        if (source.loading || source.plugin == nullptr || source.plugin->instance == nullptr)
+            return;
+        source.plugin->instance->getStateInformation(source.plugin->state);
+        description = source.plugin->description;
+        state = source.plugin->state;
+        bypassed = source.plugin->bypassed;
+    }
+
+    loadPlugin(toChannel, toSlot, description, state, bypassed, true, false);
+    if (! copy)
+        removePlugin(fromChannel, fromSlot);
+}
+
 void PluginRack::setBypassed(int channel, int slot, bool bypassed)
 {
     if (! validSlot(channel, slot))
@@ -503,6 +552,7 @@ void PluginRack::openEditor(int channel, int slot)
         editor = new juce::GenericAudioProcessorEditor(*plugin->instance);
 
     auto alive = alive_;
+    const auto key = editorWindowKey(plugin->description);
     auto window = std::make_unique<EditorWindow>(
         plugin->description.name.isNotEmpty() ? plugin->description.name : "Plugin",
         [this, alive, channel, slot]
@@ -513,9 +563,13 @@ void PluginRack::openEditor(int channel, int slot)
                     return;
                 editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].reset();
             });
-        });
+        },
+        settings_,
+        key);
     window->setContentOwned(editor, true);
-    window->centreWithSize(juce::jmax(240, window->getWidth()), juce::jmax(160, window->getHeight()));
+    const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
+    if (stored.isEmpty() || ! window->restoreWindowStateFromString(stored))
+        window->centreWithSize(juce::jmax(360, window->getWidth()), juce::jmax(240, window->getHeight()));
     window->setVisible(true);
     editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
 }

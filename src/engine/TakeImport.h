@@ -80,11 +80,60 @@ inline bool prefixAt(std::string_view text, std::size_t index, std::string_view 
     return true;
 }
 
-// Understands YouHost names (Take01_Ch03_Kick.wav) and loose "track 4" / "ch3" names.
+// channel_take[_name].wav, with no zero padding. The rest of the name is ignored.
+inline bool parseChannelFirstName(std::string_view base, int& channel, int& take)
+{
+    channel = 0;
+    take = 0;
+    if (base.empty() || std::isdigit(static_cast<unsigned char>(base.front())) == 0)
+        return false;
+
+    std::size_t index = 0;
+    int value = 0;
+    int digits = 0;
+    while (index < base.size() && std::isdigit(static_cast<unsigned char>(base[index])) != 0 && digits < 6)
+    {
+        value = value * 10 + (base[index] - '0');
+        ++index;
+        ++digits;
+    }
+    if (digits == 0 || value <= 0 || index >= base.size() || base[index] != '_')
+        return false;
+
+    ++index;
+    const int channelValue = value;
+    value = 0;
+    digits = 0;
+    while (index < base.size() && std::isdigit(static_cast<unsigned char>(base[index])) != 0 && digits < 6)
+    {
+        value = value * 10 + (base[index] - '0');
+        ++index;
+        ++digits;
+    }
+    if (digits == 0 || value <= 0)
+        return false;
+    if (index < base.size() && base[index] != '_')
+        return false;
+
+    channel = channelValue;
+    take = value;
+    return true;
+}
+
+// Understands current names (1_1.wav, 3_1_BD.wav), older names (Take01_Ch03_Kick.wav),
+// and loose "track 4" / "ch3" names.
 inline ParsedRecordingName parseRecordingName(std::string_view path)
 {
     const auto base = stripExtension(fileNameOnly(path));
     ParsedRecordingName parsed;
+    int channelFirst = 0;
+    int takeFirst = 0;
+    if (parseChannelFirstName(base, channelFirst, takeFirst))
+    {
+        parsed.channelNumber = channelFirst;
+        parsed.takeNumber = takeFirst;
+        return parsed;
+    }
     for (std::size_t index = 0; index < base.size(); ++index)
     {
         const bool boundary = index == 0

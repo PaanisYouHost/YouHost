@@ -108,6 +108,24 @@ inline float normaliseDb(float db, MeterSpan span)
     return normalised;
 }
 
+enum class MeterColour
+{
+    green,
+    yellow,
+    red
+};
+
+// Green below line level (RMS 0), yellow from that point up to but not including
+// 0 dBFS, red at full scale. Peak mode uses the same dBFS points on its own ruler.
+inline MeterColour meterColourForDb(float dbFs, int referenceDb) noexcept
+{
+    if (dbFs >= 0.0f)
+        return MeterColour::red;
+    if (dbFs >= static_cast<float>(normaliseRmsReferenceDb(referenceDb)))
+        return MeterColour::yellow;
+    return MeterColour::green;
+}
+
 // 0 is the bottom of the ruler, 1 is the top. Peak is full scale. RMS is the VU ruler.
 inline float meterNormal(float linearGain, bool peak, int referenceDb)
 {

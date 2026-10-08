@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -165,14 +164,15 @@ inline std::string sanitiseChannelName(std::string_view name)
     return out;
 }
 
+// channel_take[_name].wav with no zero padding. An empty name is left off,
+// so a channel the user has not renamed is just "1_1.wav".
 inline std::string takeWaveName(int takeNumber, int channelNumber, std::string_view name)
 {
     const int take = takeNumber < 1 ? 1 : takeNumber;
     const int channel = channelNumber < 1 ? 1 : channelNumber;
-    char prefix[32];
-    std::snprintf(prefix, sizeof(prefix), "Take%02d_Ch%02d", take, channel);
-
-    std::string file(prefix);
+    std::string file = std::to_string(channel);
+    file.push_back('_');
+    file += std::to_string(take);
     const std::string clean = sanitiseChannelName(name);
     if (! clean.empty())
     {

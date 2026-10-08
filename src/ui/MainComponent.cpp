@@ -1,8 +1,11 @@
 #include "MainComponent.h"
 #include "ChannelMenu.h"
 #include "Theme.h"
+#include "WindowMemory.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
+
+#include <vector>
 
 namespace youhost
 {
@@ -75,18 +78,94 @@ void quiet(juce::Button& button)
 class FloatWindow : public juce::DocumentWindow
 {
 public:
-    FloatWindow(const juce::String& title, juce::Component& content, int width, int height)
-        : juce::DocumentWindow(title, theme::panel, juce::DocumentWindow::closeButton)
+    FloatWindow(const juce::String& title,
+                juce::Component& content,
+                AppSettings& settings,
+                const juce::String& key,
+                int width,
+                int height,
+                int minWidth,
+                int minHeight)
+        : juce::DocumentWindow(title, theme::panel, juce::DocumentWindow::closeButton),
+          settings_(settings),
+          key_(key)
     {
         setUsingNativeTitleBar(true);
-        setContentNonOwned(&content, true);
-        setResizable(true, false);
-        centreWithSize(width, height);
+        setContentNonOwned(&content, false);
+        prepareRememberedWindow(*this, settings_, key_, width, height, minWidth, minHeight);
         setVisible(false);
     }
 
-    void closeButtonPressed() override { setVisible(false); }
+    ~FloatWindow() override
+    {
+        saveRememberedWindow(*this, settings_, key_);
+    }
+
+    void closeButtonPressed() override
+    {
+        saveRememberedWindow(*this, settings_, key_);
+        setVisible(false);
+    }
+
+private:
+    AppSettings& settings_;
+    juce::String key_;
 };
+
+class SetupWindow : public juce::DocumentWindow
+{
+public:
+    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AppSettings& settings)
+        : juce::DocumentWindow("Audio setup", theme::background, juce::DocumentWindow::closeButton),
+          settings_(settings),
+          selector_(selector)
+    {
+        viewport_.setViewedComponent(&selector_, false);
+        viewport_.setScrollBarsShown(true, true);
+        setUsingNativeTitleBar(true);
+        setContentNonOwned(&viewport_, false);
+        prepareRememberedWindow(*this, settings_, "windowSetup", 760, 640, 560, 420);
+        setVisible(false);
+    }
+
+    ~SetupWindow() override
+    {
+        saveRememberedWindow(*this, settings_, "windowSetup");
+        viewport_.setViewedComponent(nullptr, false);
+    }
+
+    void closeButtonPressed() override
+    {
+        saveRememberedWindow(*this, settings_, "windowSetup");
+        setVisible(false);
+    }
+
+    void resized() override
+    {
+        juce::DocumentWindow::resized();
+        const int width = std::max(520, viewport_.getMaximumVisibleWidth());
+        selector_.setSize(width, std::max(selector_.getHeight(), viewport_.getMaximumVisibleHeight()));
+    }
+
+private:
+    AppSettings& settings_;
+    juce::AudioDeviceSelectorComponent& selector_;
+    juce::Viewport viewport_;
+};
+
+void gatherToggleLists(juce::Component& component, std::vector<std::vector<juce::ToggleButton*>>& lists)
+{
+    std::vector<juce::ToggleButton*> row;
+    for (auto* child : component.getChildren())
+        if (auto* toggle = dynamic_cast<juce::ToggleButton*>(child))
+            row.push_back(toggle);
+    if (! row.empty())
+        lists.push_back(std::move(row));
+
+    for (auto* child : component.getChildren())
+        if (child != nullptr && dynamic_cast<juce::ToggleButton*>(child) == nullptr)
+            gatherToggleLists(*child, lists);
+}
 
 } // namespace
 
@@ -134,7 +213,7 @@ public:
             recent.addItem(item);
         }
         menu.addSubMenu("Open Recent", recent, ! sessions.isEmpty());
-        menu.addItem(5, "Import recording folder…");
+        menu.addItem(5, "Import Recording Folder…");
         menu.addSeparator();
 
         juce::PopupMenu::Item save;
@@ -149,7 +228,7 @@ public:
         saveAs.shortcutKeyDescription = "Cmd+Shift+S";
         menu.addItem(saveAs);
         menu.addSeparator();
-        menu.addItem(6, "Clear timeline…");
+        menu.addItem(6, "Clear Timeline…");
         return menu;
     }
 
@@ -179,9 +258,9 @@ private:
 MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     : engine_(engine),
       settings_(settings),
-      pluginPage_(engine),
-      scanner_(engine),
-      dropouts_(engine),
+      pluginPage_(engine, settings),
+      scanner_(engine, settings),
+      dropouts_(engine, settings),
       deviceSelector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false)
 {
     setOpaque(true);
@@ -218,6 +297,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(peakButton_);
     addAndMakeVisible(referenceLabel_);
     addAndMakeVisible(referenceBox_);
+    addAndMakeVisible(bitDepthLabel_);
+    addAndMakeVisible(bitDepthBox_);
     addAndMakeVisible(clearClipsButton_);
     addAndMakeVisible(newButton_);
     addAndMakeVisible(openButton_);
@@ -230,11 +311,11 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(allButton_);
     addAndMakeVisible(hideButton_);
     addAndMakeVisible(latencyLabel_);
-    addAndMakeVisible(viewport_);
     meterViewport_.setViewedComponent(&meterGrid_, false);
     meterViewport_.setScrollBarsShown(false, true);
 
-    latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, 440, 280);
+    latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, settings_, "windowLatency", 480, 360, 420, 280);
+    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
     latencyReadout_.setGraphHandler([this] { toggleDropouts(); });
     fileMenu_ = std::make_unique<FileMenu>(*this);
@@ -249,7 +330,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         quiet(*button);
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &latencyButton_,
-                          &allButton_, &hideButton_ })
+                          &setupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
@@ -270,7 +351,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     pluginsButton_.setTooltip("Plugins page (2).");
     dropoutsButton_.setTooltip("Dropout timeline (4 or D).");
     latencyButton_.setTooltip("Open the latency card.");
-    fileButton_.setTooltip("New, Open, Open Recent, Save As, Import, and Clear timeline.");
+    fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
     helpButton_.setTooltip("Show keyboard shortcuts.");
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
@@ -308,8 +389,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     latencyLabel_.setColour(juce::Label::textColourId, theme::dim);
 
     deviceSelector_.setItemHeight(22);
-    viewport_.setViewedComponent(&deviceSelector_, false);
-    viewport_.setScrollBarsShown(true, false);
 
     rmsButton_.setRadioGroupId(1);
     peakButton_.setRadioGroupId(1);
@@ -322,19 +401,28 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     referenceBox_.addItem("-18 dBFS", 2);
     referenceBox_.addItem("-20 dBFS", 3);
     referenceBox_.setSelectedId(referenceIdFor(rmsReferenceDb_), juce::dontSendNotification);
-    referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS.");
+    referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS. Meters are green below this point and yellow above it.");
+    bitDepthLabel_.setJustificationType(juce::Justification::centredRight);
+    bitDepthLabel_.setFont(juce::Font(juce::FontOptions(13.0f)));
+    bitDepthBox_.addItem("16-bit", 16);
+    bitDepthBox_.addItem("24-bit", 24);
+    bitDepthBox_.addItem("32-bit float", 32);
+    bitDepthBox_.setSelectedId(engine_.wavBitDepth(), juce::dontSendNotification);
+    bitDepthBox_.setTooltip("Bit depth for the next take. 24-bit is the default. 32-bit is float. A take that is already recording keeps its depth.");
+    bitDepthBox_.onChange = [this]
+    {
+        const int chosen = bitDepthBox_.getSelectedId();
+        if (chosen > 0)
+            engine_.setWavBitDepth(chosen, true);
+    };
 
     rmsButton_.onClick = [this] { setPeakMode(false, true); };
     peakButton_.onClick = [this] { setPeakMode(true, true); };
     referenceBox_.onChange = [this] { setRmsReference(referenceDbFor(referenceBox_.getSelectedId()), true); };
     clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
     clearClipsButton_.setTooltip("Clear every latched clip mark");
-    setupButton_.onClick = [this]
-    {
-        setupVisible_ = ! setupVisible_;
-        setupButton_.setButtonText(setupVisible_ ? "Hide setup" : "Audio setup");
-        resized();
-    };
+    setupButton_.onClick = [this] { toggleSetup(); };
+    setupButton_.setTooltip("Channel ticks are the same as REC and OFF. The audio device stays open.");
 
     meterGrid_.setClearHandler([this](int channel)
     {
@@ -347,6 +435,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     meterGrid_.setChannelMenuHandler([this](int channel) { showChannelMenu(engine_, meterGrid_, channel); });
     meterGrid_.setGroupMenuHandler([this](int group) { showGroupMenu(engine_, meterGrid_, group); });
+    meterGrid_.setGroupRenameHandler([this](int group) { renameGroup(engine_, group); });
     meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
     meterGrid_.setSelectHandler([this](int channel, bool extend) { engine_.selectChannel(channel, extend); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
@@ -378,6 +467,7 @@ MainComponent::~MainComponent()
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
+    setupWindow_.reset();
     fileMenu_.reset();
     if (keyTarget_ != nullptr && keys_ != nullptr)
         keyTarget_->removeKeyListener(keys_.get());
@@ -522,11 +612,12 @@ void MainComponent::saveSessionAs()
     if (fileChooser_ != nullptr)
         return;
 
-    fileChooser_ = std::make_unique<juce::FileChooser>("Save a copy of this session",
+    fileChooser_ = std::make_unique<juce::FileChooser>("Save a Copy of This Session",
                                                        engine_.suggestedSessionFolder().getParentDirectory(),
-                                                       "*",
+                                                       juce::String(),
                                                        true);
-    fileChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+    fileChooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectDirectories
+                                  | juce::FileBrowserComponent::warnAboutOverwriting,
                               [this](const juce::FileChooser& chooser)
                               {
                                   const auto chosen = chooser.getResult();
@@ -545,9 +636,9 @@ void MainComponent::importRecordings()
     if (fileChooser_ != nullptr)
         return;
 
-    fileChooser_ = std::make_unique<juce::FileChooser>("Import a folder of WAV files",
+    fileChooser_ = std::make_unique<juce::FileChooser>("Import a Recording Folder",
                                                        engine_.suggestedSessionFolder(),
-                                                       "*",
+                                                       juce::String(),
                                                        true);
     fileChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                               [this](const juce::FileChooser& chooser)
@@ -566,9 +657,9 @@ void MainComponent::importRecordings()
 void MainComponent::confirmClearTimeline()
 {
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
-                                       "Clear the timeline?",
-                                       "This forgets the takes in this session. The WAV files stay in the audio folder.",
-                                       "Clear timeline",
+                                       "Clear the Timeline?",
+                                       "This removes the takes from the timeline. The WAV files stay in the audio folder.",
+                                       "Clear Timeline",
                                        "Cancel",
                                        nullptr,
                                        juce::ModalCallbackFunction::create([this](int result)
@@ -648,7 +739,7 @@ void MainComponent::openSession()
 
     if (engine_.hasSession())
         engine_.saveSession();
-    fileChooser_ = std::make_unique<juce::FileChooser>("Open a session",
+    fileChooser_ = std::make_unique<juce::FileChooser>("Open a Session",
                                                        engine_.suggestedSessionFolder(),
                                                        "*.youhost",
                                                        true);
@@ -677,7 +768,11 @@ void MainComponent::timerCallback()
         engine_.maintainSession();
     }
 
-    hideDeviceTestTone();
+    if (setupWindow_ != nullptr && setupWindow_->isVisible())
+    {
+        hideDeviceTestTone();
+        mirrorSetupToggles();
+    }
     refresh();
 }
 
@@ -718,6 +813,9 @@ void MainComponent::refresh()
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
+    setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
+    if (bitDepthBox_.getSelectedId() != engine_.wavBitDepth())
+        bitDepthBox_.setSelectedId(engine_.wavBitDepth(), juce::dontSendNotification);
     allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
     hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
     leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
@@ -763,8 +861,7 @@ void MainComponent::refresh()
             cell.channel = item.channel;
             cell.color = engine_.channelColor(item.channel);
             cell.selected = engine_.isChannelSelected(item.channel);
-            const auto name = engine_.channelName(item.channel);
-            cell.title = name.isNotEmpty() ? name : juce::String(item.channel + 1);
+            cell.title = engine_.channelName(item.channel);
             cell.reading.rms = engine_.rmsFor(item.channel);
             cell.reading.peak = engine_.peakFor(item.channel);
             cell.reading.clipped = engine_.clipFor(item.channel);
@@ -793,6 +890,49 @@ void MainComponent::hideDeviceTestTone()
     hideTestButtons(deviceSelector_);
 }
 
+void MainComponent::toggleSetup()
+{
+    if (setupWindow_ == nullptr)
+        return;
+    const bool show = ! setupWindow_->isVisible();
+    setupWindow_->setVisible(show);
+    if (show)
+    {
+        setupWindow_->toFront(true);
+        hideDeviceTestTone();
+        mirrorSetupToggles();
+    }
+}
+
+void MainComponent::mirrorSetupToggles()
+{
+    if (setupWindow_ == nullptr || ! setupWindow_->isVisible())
+        return;
+
+    std::vector<std::vector<juce::ToggleButton*>> lists;
+    gatherToggleLists(deviceSelector_, lists);
+    for (const auto& list : lists)
+    {
+        const int count = std::min(static_cast<int>(list.size()), kMaxChannels);
+        for (int index = 0; index < count; ++index)
+        {
+            auto* button = list[static_cast<std::size_t>(index)];
+            if (button == nullptr)
+                continue;
+            const bool armed = engine_.isRecordArmed(index);
+            if (button->getToggleState() != armed)
+                button->setToggleState(armed, juce::dontSendNotification);
+            button->onClick = [this, index, button]
+            {
+                engine_.setRecordArmed(index, button->getToggleState());
+            };
+            button->setTooltip(armed
+                                   ? "Same as REC. Untick to turn this channel OFF. The audio device stays open."
+                                   : "Same as OFF. Tick to turn this channel on. The audio device stays open.");
+        }
+    }
+}
+
 void MainComponent::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(theme::background);
@@ -807,6 +947,7 @@ void MainComponent::paint(juce::Graphics& graphics)
         status << "   " << engine_.inputCount() << " in / " << engine_.outputCount() << " out"
                << "   " << juce::String(numbers.sampleRate / 1000.0, 1) << " kHz";
     }
+    status << "   " << engine_.wavBitDepthLabel();
     status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
     if (engine_.hasSession())
         status << "   " << engine_.sessionName();
@@ -831,20 +972,11 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
-    if (setupVisible_ && ! setupPanel_.isEmpty())
-    {
-        graphics.setColour(theme::panel);
-        graphics.fillRoundedRectangle(setupPanel_.toFloat(), 10.0f);
-        graphics.setColour(theme::dim);
-        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText("Audio device", setupTitle_, juce::Justification::centredLeft, false);
-    }
-
     juce::String hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty() && page_ == 1)
-        hint = "REC is on. OFF cuts the meter, plugins, and output immediately. This take's files stay as they were. Right-click a channel for color and groups.";
+        hint = "The channel number stays visible. REC is on. OFF cuts the meter, plugins, and output immediately. Live sound still passes through while recording. Right-click a channel for color and groups.";
     if (hint.isEmpty())
-        hint = "Click an empty slot to load a plugin. Click the slot again to close its window. Right-click a slot to bypass or remove it. Right-click the name for color and groups.";
+        hint = "The channel number stays visible. Drag a slot to move it. Option-drag to copy the plugin and its settings. Right-click a group bar to rename it or set its color.";
 
     graphics.setColour(engine_.openError().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -897,6 +1029,9 @@ void MainComponent::resized()
     referenceLabel_.setBounds(tools.removeFromLeft(52));
     referenceBox_.setBounds(tools.removeFromLeft(110).reduced(0, 2));
     tools.removeFromLeft(8);
+    bitDepthLabel_.setBounds(tools.removeFromLeft(36));
+    bitDepthBox_.setBounds(tools.removeFromLeft(124).reduced(0, 2));
+    tools.removeFromLeft(8);
     clearClipsButton_.setBounds(tools.removeFromLeft(96).reduced(0, 2));
     tools.removeFromLeft(8);
     newButton_.setBounds(tools.removeFromLeft(52).reduced(0, 2));
@@ -922,21 +1057,6 @@ void MainComponent::resized()
     area.removeFromTop(8);
     hintArea_ = area.removeFromBottom(32);
     area.removeFromBottom(6);
-
-    viewport_.setVisible(setupVisible_);
-    if (setupVisible_)
-    {
-        setupPanel_ = area.removeFromBottom(230);
-        setupTitle_ = setupPanel_.removeFromTop(22).reduced(12, 0);
-        viewport_.setBounds(setupPanel_.reduced(8, 4));
-        deviceSelector_.setSize(viewport_.getMaximumVisibleWidth(), deviceSelector_.getHeight());
-        area.removeFromBottom(8);
-    }
-    else
-    {
-        setupPanel_ = {};
-        setupTitle_ = {};
-    }
 
     const bool recorder = page_ == 1;
     timeline_.setVisible(true);
