@@ -1,8 +1,54 @@
 #include "MainComponent.h"
 #include "Theme.h"
+#include "engine/MeterScale.h"
 
 namespace youhost
 {
+namespace
+{
+
+void hideTestButtons(juce::Component& component)
+{
+    for (auto* child : component.getChildren())
+    {
+        if (child == nullptr)
+            continue;
+
+        if (auto* button = dynamic_cast<juce::TextButton*>(child))
+        {
+            // JUCE's device panel plays a 440 Hz tone at -6 dBFS. Drop the button
+            // instead of letting that tone hit a live desk.
+            if (button->getButtonText() == "Test")
+            {
+                button->setVisible(false);
+                button->setEnabled(false);
+                button->onClick = nullptr;
+            }
+        }
+
+        hideTestButtons(*child);
+    }
+}
+
+int referenceIdFor(int db)
+{
+    if (db == -14)
+        return 1;
+    if (db == -18)
+        return 2;
+    return 3;
+}
+
+int referenceDbFor(int id)
+{
+    if (id == 1)
+        return -14;
+    if (id == 2)
+        return -18;
+    return kDefaultRmsReferenceDb;
+}
+
+} // namespace
 
 MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     : engine_(engine),
@@ -19,11 +65,15 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 {
     setOpaque(true);
     showPeak_ = settings_.loadPeakMeter();
+    rmsReferenceDb_ = settings_.loadRmsReferenceDb();
 
     addAndMakeVisible(latencyReadout_);
     addAndMakeVisible(meterGrid_);
     addAndMakeVisible(rmsButton_);
     addAndMakeVisible(peakButton_);
+    addAndMakeVisible(referenceLabel_);
+    addAndMakeVisible(referenceBox_);
+    addAndMakeVisible(clearClipsButton_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(retryButton_);
     addAndMakeVisible(viewport_);
@@ -39,8 +89,22 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     rmsButton_.setToggleState(! showPeak_, juce::dontSendNotification);
     peakButton_.setToggleState(showPeak_, juce::dontSendNotification);
 
+    referenceLabel_.setJustificationType(juce::Justification::centredRight);
+    referenceLabel_.setFont(juce::Font(juce::FontOptions(13.0f)));
+    referenceBox_.addItem("-14 dBFS", 1);
+    referenceBox_.addItem("-18 dBFS", 2);
+    referenceBox_.addItem("-20 dBFS", 3);
+    referenceBox_.setSelectedId(referenceIdFor(rmsReferenceDb_), juce::dontSendNotification);
+    referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS.");
+    referenceBox_.setEnabled(! showPeak_);
+    referenceLabel_.setEnabled(! showPeak_);
+
     rmsButton_.onClick = [this] { setPeakMode(false); };
     peakButton_.onClick = [this] { setPeakMode(true); };
+    referenceBox_.onChange = [this] { setRmsReference(referenceDbFor(referenceBox_.getSelectedId())); };
+    clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
+    clearClipsButton_.setTooltip("Clear every latched clip mark");
+    latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
     setupButton_.onClick = [this]
     {
         setupVisible_ = ! setupVisible_;
@@ -68,6 +132,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
 
     startTimerHz(30);
+    hideDeviceTestTone();
     refresh();
 }
 
@@ -85,6 +150,20 @@ void MainComponent::setPeakMode(bool peak)
     rmsButton_.setToggleState(! showPeak_, juce::dontSendNotification);
     peakButton_.setToggleState(showPeak_, juce::dontSendNotification);
     settings_.savePeakMeter(showPeak_);
+    referenceBox_.setEnabled(! showPeak_);
+    referenceLabel_.setEnabled(! showPeak_);
+    refresh();
+}
+
+void MainComponent::setRmsReference(int db)
+{
+    db = normaliseRmsReferenceDb(db);
+    if (rmsReferenceDb_ == db)
+        return;
+
+    rmsReferenceDb_ = db;
+    referenceBox_.setSelectedId(referenceIdFor(db), juce::dontSendNotification);
+    settings_.saveRmsReferenceDb(db);
     refresh();
 }
 
@@ -96,6 +175,7 @@ void MainComponent::timerCallback()
         engine_.pollDeviceStats();
     }
 
+    hideDeviceTestTone();
     refresh();
 }
 
@@ -114,8 +194,13 @@ void MainComponent::refresh()
         reading.hasInput = engine_.inputActive(channel);
     }
 
-    meterGrid_.setReadings(std::move(readings), showPeak_);
+    meterGrid_.setReadings(std::move(readings), showPeak_, rmsReferenceDb_);
     repaint();
+}
+
+void MainComponent::hideDeviceTestTone()
+{
+    hideTestButtons(deviceSelector_);
 }
 
 void MainComponent::paint(juce::Graphics& graphics)
@@ -165,8 +250,8 @@ void MainComponent::paint(juce::Graphics& graphics)
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
     const juce::String hint = engine_.openError().isNotEmpty()
                                   ? engine_.openError()
-                                  : (showPeak_ ? "Full-scale sample peak, hold 1.5 s. Click a red clip mark to clear it."
-                                               : "RMS, about 300 ms. Click a red clip mark to clear it.");
+                                  : (showPeak_ ? "Peak scale is dBFS, 0 at the top. Clip marks stay on until you clear them."
+                                               : "RMS scale is VU. 0 is line level. Clip marks stay on until you clear them.");
     graphics.drawFittedText(hint, hintArea_, juce::Justification::centredLeft, 2);
 }
 
@@ -195,14 +280,19 @@ void MainComponent::resized()
     area.removeFromTop(10);
 
     auto tools = area.removeFromTop(30);
-    rmsButton_.setBounds(tools.removeFromLeft(72));
+    rmsButton_.setBounds(tools.removeFromLeft(64));
     tools.removeFromLeft(6);
-    peakButton_.setBounds(tools.removeFromLeft(78));
-    tools.removeFromLeft(12);
+    peakButton_.setBounds(tools.removeFromLeft(70));
+    tools.removeFromLeft(14);
+    referenceLabel_.setBounds(tools.removeFromLeft(52));
+    tools.removeFromLeft(4);
+    referenceBox_.setBounds(tools.removeFromLeft(112).reduced(0, 2));
+    tools.removeFromLeft(8);
+    clearClipsButton_.setBounds(tools.removeFromLeft(108));
     setupButton_.setBounds(tools.removeFromRight(158));
-    tools.removeFromRight(8);
-    hintArea_ = tools;
-    area.removeFromTop(8);
+    area.removeFromTop(4);
+    hintArea_ = area.removeFromTop(32);
+    area.removeFromTop(6);
 
     if (setupVisible_)
     {
@@ -216,6 +306,7 @@ void MainComponent::resized()
         const int width = viewport_.getMaximumVisibleWidth();
         if (width > 0)
             deviceSelector_.setSize(width, juce::jmax(deviceSelector_.getHeight(), 220));
+        hideDeviceTestTone();
     }
     else
     {

@@ -1,5 +1,7 @@
+#include "engine/DropoutDetect.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterLayout.h"
+#include "engine/MeterScale.h"
 #include "engine/Passthrough.h"
 
 #include <cmath>
@@ -136,13 +138,37 @@ void testMetersSettleClipAndClear()
     CHECK(strips[0].meter.clipped.load() == true);
     CHECK(strips[0].meter.peak.load() > 0.95f);
 
+    // Four seconds of silence must leave the clip latched. It used to time out after two.
+    runBlocks(strips, config, { silence }, 300);
+    CHECK(strips[0].meter.clipped.load() == true);
+    CHECK(strips[0].meter.peak.load() < 0.5f);
+
     strips[0].meter.clearRequested.store(true);
     runBlocks(strips, config, { silence }, 1);
+    CHECK(strips[0].meter.clipped.load() == false);
+
+    runBlocks(strips, config, { silence }, 50);
     CHECK(strips[0].meter.clipped.load() == false);
 
     std::vector<float> almost(static_cast<std::size_t>(frames), 0.999f);
     runBlocks(strips, config, { almost }, 1);
     CHECK(strips[0].meter.clipped.load() == false);
+}
+
+void testClipClearWithoutAnOpenInput()
+{
+    youhost::Routing routing;
+    auto config = configAt(48000.0, routing);
+    std::array<youhost::ChannelStrip, youhost::kMaxChannels> strips {};
+    strips[2].meterState.clipped = true;
+    strips[2].meter.clipped.store(true);
+    strips[2].meter.clearRequested.store(true);
+
+    float frame[4] = {};
+    const float* inputs[] = { frame };
+    youhost::processPassthrough(inputs, 1, nullptr, 0, 4, config, strips.data(), youhost::kMaxChannels);
+    CHECK(strips[2].meter.clipped.load() == false);
+    CHECK(strips[2].meter.clearRequested.load() == false);
 }
 
 void testUnwrittenOutputsAreCleared()
@@ -201,6 +227,65 @@ void testMeterLayoutScales()
     CHECK(routing.inputPacked[127] == 127);
 }
 
+void testMeterScales()
+{
+    CHECK(youhost::normaliseRmsReferenceDb(-20) == -20);
+    CHECK(youhost::normaliseRmsReferenceDb(-19) == -20);
+    CHECK(youhost::normaliseRmsReferenceDb(-15) == -14);
+    CHECK(youhost::normaliseRmsReferenceDb(0) == -14);
+
+    youhost::MeterTick ticks[9];
+    CHECK(youhost::rmsTicks(-20, ticks, 9) == 9);
+    CHECK(ticks[0].label == 20);
+    CHECK(ticks[0].dbFs == 0.0f);
+    CHECK(ticks[3].label == 0);
+    CHECK(ticks[3].dbFs == -20.0f);
+    CHECK(ticks[8].label == -40);
+    CHECK(ticks[8].dbFs == -60.0f);
+
+    CHECK(youhost::rmsTicks(-18, ticks, 9) == 9);
+    CHECK(ticks[0].dbFs == 2.0f);
+    CHECK(ticks[3].dbFs == -18.0f);
+
+    CHECK(youhost::rmsTicks(-14, ticks, 9) == 9);
+    CHECK(ticks[0].dbFs == 6.0f);
+    CHECK(ticks[3].dbFs == -14.0f);
+    CHECK(ticks[8].dbFs == -54.0f);
+
+    CHECK(youhost::peakTicks(ticks, 9) == 8);
+    CHECK(ticks[0].label == 0);
+    CHECK(ticks[0].dbFs == 0.0f);
+    CHECK(ticks[2].label == -6);
+    CHECK(ticks[7].label == -60);
+    CHECK(ticks[7].dbFs == -60.0f);
+
+    const float fullScale = 1.0f;
+    const float line = 0.1f; // -20 dBFS
+    const float floor = 0.001f; // -60 dBFS
+    CHECK(near(youhost::meterNormal(fullScale, false, -20), 1.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(line, false, -20), 40.0f / 60.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(floor, false, -20), 0.0f, 0.001f));
+    // -14 dBFS reference: full scale is only +14 VU, short of the +20 tick.
+    CHECK(near(youhost::meterNormal(fullScale, false, -14), 54.0f / 60.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(fullScale, true, -14), 1.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(floor, true, -20), 0.0f, 0.001f));
+}
+
+void testDropoutDecisions()
+{
+    const int64_t period = youhost::expectedPeriodNs(48000.0, 128);
+    CHECK(period == 2666667);
+    CHECK(youhost::expectedPeriodNs(0.0, 128) == 0);
+    CHECK(youhost::dropoutGapCount(0, period, period, false) == 0);
+    CHECK(youhost::dropoutGapCount(1000, 1000 + period, period, true) == 0);
+    CHECK(youhost::dropoutGapCount(1000, 1000 + period, period, false) == 0);
+    CHECK(youhost::dropoutGapCount(1000, 1000 + period + 1000000, period, false) == 0);
+    CHECK(youhost::dropoutGapCount(1000, 1000 + period * 2, period, false) == 1);
+    CHECK(youhost::dropoutOverrunCount(period, period) == 0);
+    CHECK(youhost::dropoutOverrunCount(period + 1, period) == 1);
+    CHECK(youhost::dropoutOverrunCount(period, 0) == 0);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -215,6 +300,9 @@ int main()
     testRaiseUnit();
     testPassthroughCopiesMatchingChannels();
     testMetersSettleClipAndClear();
+    testClipClearWithoutAnOpenInput();
+    testMeterScales();
+    testDropoutDecisions();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
     testMeterLayoutScales();

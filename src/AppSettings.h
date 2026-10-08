@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/MeterScale.h"
+
 #include <juce_data_structures/juce_data_structures.h>
 
 #include <memory>
@@ -52,6 +54,22 @@ public:
         if (auto* settings = properties_.getUserSettings())
         {
             settings->setValue("peakMeter", peak);
+            settings->saveIfNeeded();
+        }
+    }
+
+    int loadRmsReferenceDb()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return normaliseRmsReferenceDb(settings->getIntValue("rmsReferenceDb", kDefaultRmsReferenceDb));
+        return kDefaultRmsReferenceDb;
+    }
+
+    void saveRmsReferenceDb(int db)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("rmsReferenceDb", normaliseRmsReferenceDb(db));
             settings->saveIfNeeded();
         }
     }

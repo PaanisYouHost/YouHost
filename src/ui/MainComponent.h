@@ -24,6 +24,8 @@ private:
     void timerCallback() override;
     void refresh();
     void setPeakMode(bool peak);
+    void setRmsReference(int db);
+    void hideDeviceTestTone();
 
     AudioEngine& engine_;
     AppSettings& settings_;
@@ -31,11 +33,15 @@ private:
     MeterGrid meterGrid_;
     juce::TextButton rmsButton_ { "RMS" };
     juce::TextButton peakButton_ { "Peak" };
+    juce::Label referenceLabel_ { {}, "RMS 0" };
+    juce::ComboBox referenceBox_;
+    juce::TextButton clearClipsButton_ { "Clear clips" };
     juce::TextButton setupButton_ { "Hide audio setup" };
     juce::TextButton retryButton_ { "Retry" };
     juce::Viewport viewport_;
     juce::AudioDeviceSelectorComponent deviceSelector_;
     bool showPeak_ = false;
+    int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     bool setupVisible_ = true;
     int pollDivider_ = 0;
 

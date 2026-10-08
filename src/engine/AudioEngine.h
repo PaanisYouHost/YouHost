@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DropoutDetect.h"
 #include "LatencyMath.h"
 #include "Passthrough.h"
 
@@ -7,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 
 namespace youhost
 {
@@ -50,6 +52,7 @@ public:
     bool inputActive(int channel) const;
     void requestClipClear(int channel);
     void requestClipClearAll();
+    void resetDropouts();
 
 private:
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -65,6 +68,9 @@ private:
 
     void publishConfig(juce::AudioIODevice& device);
     void saveSetupIfAllowed();
+    void installOverloadListener(const juce::String& deviceName);
+    void removeOverloadListener();
+    void noteDropout(int events);
     const AudioThreadConfig& currentConfig() const;
 
     AppSettings& settings_;
@@ -77,7 +83,10 @@ private:
     std::atomic<int> bufferSamples_ { 0 };
     std::atomic<int> inputLatencySamples_ { 0 };
     std::atomic<int> outputLatencySamples_ { 0 };
-    std::atomic<int> xrunCount_ { -1 };
+    std::atomic<std::uint32_t> dropoutCount_ { 0 };
+    std::atomic<std::int64_t> lastCallbackNs_ { 0 };
+    std::atomic<bool> skipNextGap_ { true };
+    std::uint32_t overloadDeviceId_ = 0;
     std::atomic<int> formulaValue_ { static_cast<int>(RoundTripFormula::driverSum) };
     std::atomic<double> sampleRate_ { 0.0 };
     std::atomic<bool> deviceOpen_ { false };

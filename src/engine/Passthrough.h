@@ -32,6 +32,7 @@ struct AudioThreadConfig
 {
     Routing routing {};
     MeterTiming meterTiming {};
+    int64_t expectedPeriodNs = 0;
 };
 
 inline Routing makeRouting(const std::array<bool, kMaxChannels>& inputs,
@@ -104,8 +105,16 @@ inline void processPassthrough(const float* const* inputs,
                 outputWritten[static_cast<std::size_t>(outputIndex)] = true;
         }
 
-        if (input != nullptr && strips != nullptr)
+        if (strips == nullptr)
+            continue;
+
+        if (input != nullptr)
             updateMeter(strips[channel], input, numSamples, gains);
+        else if (strips[channel].meter.clearRequested.exchange(false, std::memory_order_relaxed))
+        {
+            strips[channel].meterState.clipped = false;
+            strips[channel].meter.clipped.store(false, std::memory_order_relaxed);
+        }
     }
 
     if (outputs == nullptr)

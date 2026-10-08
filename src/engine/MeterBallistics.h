@@ -16,7 +16,6 @@ struct BlockMeterGains
     float rmsKeep = 0.0f;
     float peakKeep = 0.0f;
     int peakHoldSamples = 0;
-    int clipHoldSamples = 0;
 };
 
 // base is in (0, 1]. No libm call, so the audio thread does not depend on errno locks.
@@ -50,7 +49,6 @@ struct MeterTiming
     float perSampleRmsKeep = 0.0f;
     float perSamplePeakKeep = 0.0f;
     int peakHoldSamples = 0;
-    int clipHoldSamples = 0;
 };
 
 inline MeterTiming meterTimingFor(double sampleRate)
@@ -60,7 +58,6 @@ inline MeterTiming meterTimingFor(double sampleRate)
     timing.perSampleRmsKeep = perSampleKeep(rate, kRmsWindowSeconds);
     timing.perSamplePeakKeep = perSampleKeep(rate, kPeakDecaySeconds);
     timing.peakHoldSamples = static_cast<int>(std::lround(static_cast<double>(kPeakHoldSeconds) * rate));
-    timing.clipHoldSamples = static_cast<int>(std::lround(static_cast<double>(kClipHoldSeconds) * rate));
     return timing;
 }
 
@@ -70,15 +67,15 @@ inline BlockMeterGains blockMeterGains(const MeterTiming& timing, int numSamples
     gains.rmsKeep = raiseUnit(timing.perSampleRmsKeep, numSamples);
     gains.peakKeep = raiseUnit(timing.perSamplePeakKeep, numSamples);
     gains.peakHoldSamples = timing.peakHoldSamples;
-    gains.clipHoldSamples = timing.clipHoldSamples;
     return gains;
 }
 
 // Audio thread only. `samples` is non-null and numSamples > 0.
 inline void updateMeter(ChannelStrip& strip, const float* samples, int numSamples, const BlockMeterGains& gains)
 {
+    // The clip mark stays on until the UI asks for it to be cleared.
     if (strip.meter.clearRequested.exchange(false, std::memory_order_relaxed))
-        strip.meterState.clipHoldSamples = 0;
+        strip.meterState.clipped = false;
 
     float peak = 0.0f;
     double sumSquares = 0.0;
@@ -115,21 +112,11 @@ inline void updateMeter(ChannelStrip& strip, const float* samples, int numSample
     }
 
     if (clipped)
-    {
-        strip.meterState.clipHoldSamples = gains.clipHoldSamples;
-    }
-    else if (strip.meterState.clipHoldSamples > numSamples)
-    {
-        strip.meterState.clipHoldSamples -= numSamples;
-    }
-    else
-    {
-        strip.meterState.clipHoldSamples = 0;
-    }
+        strip.meterState.clipped = true;
 
     strip.meter.rms.store(std::sqrt(strip.meterState.meanSquare), std::memory_order_relaxed);
     strip.meter.peak.store(strip.meterState.heldPeak, std::memory_order_relaxed);
-    strip.meter.clipped.store(strip.meterState.clipHoldSamples > 0, std::memory_order_relaxed);
+    strip.meter.clipped.store(strip.meterState.clipped, std::memory_order_relaxed);
 }
 
 } // namespace youhost

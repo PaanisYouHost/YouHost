@@ -8,7 +8,7 @@ YouHost is [AGPLv3](LICENSE). It is built with [JUCE 9.0.3](https://github.com/j
 
 ## Suomeksi
 
-YouHost on ilmainen, avoimen lähdekoodin (AGPLv3) Macille tehty kevyt plugin-hosti livekäyttöön. P0-versio tekee läpivedon: sisääntulo *n* menee ulostuloon *n*. Ikkunassa on yksi mittari kanavaa kohti (oletuksena RMS noin 300 ms, vaihdettavissa näytehuippuun) ja iso latenssinäyttö: puskurin koko, ajurin tulo- ja lähtölatenssi, kompensointiviive (vielä 0) ja arvioitu kiertoviive millisekunteina ja näytteinä. Nauhoitus, pluginit ja erillisprosessit tulevat myöhemmin.
+YouHost on ilmainen, avoimen lähdekoodin (AGPLv3) Macille tehty kevyt plugin-hosti livekäyttöön. P0-versio tekee läpivedon: sisääntulo *n* menee ulostuloon *n*. Ikkunassa on yksi mittari kanavaa kohti. Oletuksena RMS (noin 300 ms) VU-asteikolla, jossa 0 on linjataso (oletus -20 dBFS, valittavissa -14 tai -18). Peak vaihtaa asteikon täyteen skaalaan, 0 dBFS ylhäällä. Klip-merkkivalo jää päälle, kunnes sen klikkaa pois tai painaa Clear clips. Latenssinäytössä on puskurin koko, ajurin tulo- ja lähtölatenssi, kompensointiviive (vielä 0), arvioitu kiertoviive ja YouHostin oma dropout-laskuri. Nauhoitus, pluginit ja erillisprosessit tulevat myöhemmin.
 
 Valmis `YouHost.app` ladataan GitHub Actionsin artefaktina tai version mukana Releasena. macOS Sequoia ei avaa allekirjoittamatonta sovellusta Control-klikkauksella. Avaa YouHost kerran, mene sitten kohtaan **Järjestelmäasetukset → Tietosuoja ja suojaus → Avaa silti** ja vahvista salasanalla. Tai poista karanteeni päätteessä: `xattr -dr com.apple.quarantine YouHost.app`. Mikrofonilupa tarvitaan myös USB-mikserille: **Järjestelmäasetukset → Tietosuoja ja suojaus → Mikrofoni**.
 
@@ -49,10 +49,10 @@ Quit with the window's close button, or YouHost → Quit.
 
 On launch YouHost asks for audio-input permission, then opens the audio device selector.
 
-- Choose the input and output device, sample rate, and buffer size. Up to 128 channels are requested, and the device clamps that to what it actually has, so an X32 should come up as 32 in and 32 out. The choice is saved and restored (on macOS, under `~/Library/Application Support/Ambient Audio/YouHost`).
+- Choose the input and output device, sample rate, and buffer size. Up to 128 channels are requested, and the device clamps that to what it actually has, so an X32 should come up as 32 in and 32 out. The choice is saved and restored (on macOS, under `~/Library/Application Support/Ambient Audio/YouHost`). The device panel's Test button is removed: JUCE's built-in tone is about -6 dBFS, which is far too loud on a live desk.
 - The audio callback copies input *n* to output *n*. It does not allocate, take a lock, or log.
-- The overview is a dark meter bridge. Channel numbers follow the device (channel 1 is the first device channel). The default ballistics are RMS with about a 300 ms window. **Peak** switches the bar to a full-scale sample peak with a 1.5 s hold. A sample at or above full scale lights the clip mark for about 2 s. Click a lit mark to clear it.
-- The latency card shows buffer size, the driver-reported input latency, the driver-reported output latency, compensation (always 0 in this build), and the round trip, each in samples and milliseconds. Xruns are shown when the driver reports them (`n/a` when it does not).
+- The overview is a dark meter bridge with a dB scale beside the bars. Channel numbers follow the device (channel 1 is the first device channel). The default ballistics are RMS with about a 300 ms window. On that scale, 0 is line level: the **RMS 0** menu chooses -14, -18, or -20 dBFS (default -20, so the top tick is 0 dBFS and the scale reads +20 down to -40). **Peak** switches the bar to a full-scale sample peak with a 1.5 s hold, and the scale becomes dBFS with 0 at the top (0, -3, -6, -10, -20, -30, -40, -60). A sample at or above full scale lights the clip mark and leaves it on. Click a lit mark to clear that channel, or press **Clear clips**.
+- The latency card shows buffer size, the driver-reported input latency, the driver-reported output latency, compensation (always 0 in this build), and the round trip, each in samples and milliseconds. **Dropouts** counts late callbacks, callbacks that outlast the buffer, and CoreAudio overload notifications. macOS does not report a usable xrun total through JUCE, so this counter replaces that `n/a`. **Reset** clears it. The count is kept across a buffer-size change; only the gap caused by reopening the device itself is ignored.
 
 **Round trip on macOS.** JUCE 9's CoreAudio backend includes the hardware buffer in *both* the input latency and the output latency. Adding those two figures double-counts one buffer. YouHost shows the raw driver numbers, and the large round-trip figure is input + output − one buffer + compensation. On ALSA the JUCE figure already omits one period, so the round trip adds the buffer back. This is still the driver's story, not a cable measurement. A loopback check is planned for a later phase. Treat the number as something to compare against a loop on the desk, not as a finished alignment delay.
 
@@ -112,6 +112,7 @@ A useful first pass on an X32, or any multichannel USB interface:
 - Confirm macOS shows the microphone prompt, and that all 32 inputs and 32 outputs appear.
 - Set 48 kHz and step the buffer through the sizes the interface offers, especially the smallest ones you would actually use (often 64 and 128).
 - Feed one channel at a time and check that the matching output, meter, and channel number follow it, and that the other outputs stay quiet.
-- Clip one channel on purpose and clear the red mark.
+- Clip one channel on purpose. The red mark stays lit through silence until you click it, or until you press Clear clips.
+- Switch RMS and Peak and check that the scale numbers change with the button. On RMS, 0 should line up with a -20 dBFS tone when RMS 0 is -20 dBFS.
 - Read the round-trip figure, then compare it with a short cable from one output back to one input if you have a way to measure that. Write down both numbers, the buffer, and the macOS version.
-- Watch the xrun count while the desk is running. If it climbs, try the next larger buffer.
+- Watch the dropout count while the desk is running. Reset it, then try the smallest buffer. If it climbs, try the next larger buffer.

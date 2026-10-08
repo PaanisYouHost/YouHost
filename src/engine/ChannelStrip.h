@@ -22,7 +22,7 @@ struct MeterState
     float meanSquare = 0.0f;
     float heldPeak = 0.0f;
     int peakHoldSamples = 0;
-    int clipHoldSamples = 0;
+    bool clipped = false;
 };
 
 // Written by the audio thread, read by the UI. clearRequested goes the other way.

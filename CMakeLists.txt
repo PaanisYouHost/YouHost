@@ -52,6 +52,10 @@ target_link_libraries(YouHost PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 
+if(APPLE)
+    target_link_libraries(YouHost PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+endif()
+
 add_executable(YouHostTests tests/engine_tests.cpp)
 target_include_directories(YouHostTests PRIVATE src)
 target_compile_features(YouHostTests PRIVATE cxx_std_20)
