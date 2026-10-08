@@ -1,6 +1,9 @@
+#include "engine/ChannelEnable.h"
+#include "engine/DisplayLayout.h"
 #include "engine/DropoutDetect.h"
 #include "engine/DropoutLog.h"
 #include "engine/LatencyCompensation.h"
+#include "engine/X32Colours.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterLayout.h"
 #include "engine/MeterScale.h"
@@ -230,19 +233,25 @@ void testMeterLayoutScales()
     const auto stereo = youhost::layoutMeters(2, 800.0f, 300.0f);
     CHECK(stereo.columns == 2);
     CHECK(stereo.rows == 1);
-    CHECK(stereo.cellWidth <= 42.0f);
+    CHECK(stereo.cellWidth <= 68.0f);
+    CHECK(stereo.contentWidth <= 800.0f);
 
     const auto desk = youhost::layoutMeters(32, 1100.0f, 400.0f);
     CHECK(desk.columns == 32);
     CHECK(desk.rows == 1);
 
     const auto full = youhost::layoutMeters(128, 1100.0f, 400.0f);
-    CHECK(full.columns * full.rows >= 128);
-    CHECK(full.rows >= 2);
-    CHECK(full.cellWidth >= 16.0f);
+    CHECK(full.columns == 128);
+    CHECK(full.rows == 1);
+    CHECK(full.cellWidth >= 36.0f);
+    CHECK(full.contentWidth > 1100.0f);
 
     const auto none = youhost::layoutMeters(0, 400.0f, 200.0f);
     CHECK(none.cellWidth == 0.0f);
+
+    const auto bridge = youhost::layoutBridge(32, 2, 1100.0f);
+    CHECK(bridge.channelWidth >= 36.0f);
+    CHECK(bridge.contentWidth > 1100.0f);
 
     std::array<bool, youhost::kMaxChannels> all {};
     all.fill(true);
@@ -344,6 +353,77 @@ void testLatencyCompensation()
     const bool occupied[] = { true, true, true, false };
     const bool bypassed[] = { false, true, false, false };
     CHECK(youhost::sumSlotLatency(latencies, occupied, bypassed, 4) == 40);
+}
+
+void testOffChannelStaysSilent()
+{
+    std::array<bool, youhost::kMaxChannels> inputs {};
+    std::array<bool, youhost::kMaxChannels> outputs {};
+    inputs[0] = true;
+    inputs[2] = true;
+    outputs[0] = true;
+    outputs[2] = true;
+    auto routing = youhost::makeRouting(inputs, outputs);
+
+    float in0[4] = { 0.5f, 0.0f, 0.0f, 0.0f };
+    float in2[4] = { -0.25f, 0.0f, 0.0f, 0.0f };
+    const float* inputPointers[2] = { in0, in2 };
+    float out0[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float out2[4] {};
+    float* outputsPacked[2] = { out0, out2 };
+    std::array<youhost::ChannelStrip, youhost::kMaxChannels> strips {};
+
+    std::uint64_t low = ~std::uint64_t { 0 };
+    std::uint64_t high = ~std::uint64_t { 0 };
+    youhost::setChannelOnBit(low, high, 0, false);
+    CHECK(! youhost::channelIsOn(low, high, 0));
+    CHECK(youhost::channelIsOn(low, high, 70));
+    youhost::setChannelOnBit(low, high, 70, false);
+    CHECK(! youhost::channelIsOn(low, high, 70));
+
+    youhost::processPassthrough(inputPointers,
+                                2,
+                                outputsPacked,
+                                2,
+                                4,
+                                configAt(48000.0, routing),
+                                strips.data(),
+                                youhost::kMaxChannels,
+                                low,
+                                high);
+    CHECK(out0[0] == 0.0f);
+    CHECK(near(out2[0], -0.25f, 0.0001f));
+    CHECK(strips[0].meter.rms.load() == 0.0f);
+    CHECK(strips[2].meter.rms.load() > 0.0f);
+}
+
+void testGroupsFoldAndPalette()
+{
+    CHECK(youhost::kX32ColourCount == 16);
+    CHECK(std::string(youhost::kX32Colours[1].code) == "RD");
+    CHECK(youhost::kX32Colours[9].inverted);
+    CHECK(! youhost::kX32Colours[0].inverted);
+    CHECK(youhost::normaliseX32Colour(40) == 0);
+
+    int membership[8] = { 0, 0, 0, 0, -1, -1, 1, 1 };
+    bool collapsed[youhost::kMaxDisplayGroups] = {};
+    collapsed[0] = true;
+    youhost::StripItem items[16];
+    const int folded = youhost::layoutChannelStrips(8, membership, collapsed, items, 16);
+    CHECK(folded == 6);
+    CHECK(items[0].kind == youhost::StripKind::groupHeader);
+    CHECK(items[0].group == 0);
+    CHECK(items[1].channel == 4);
+    CHECK(items[3].kind == youhost::StripKind::groupHeader);
+    CHECK(items[3].group == 1);
+    CHECK(items[4].channel == 6);
+
+    collapsed[0] = false;
+    const int open = youhost::layoutChannelStrips(8, membership, collapsed, items, 16);
+    CHECK(open == 10);
+    CHECK(items[1].channel == 0);
+    CHECK(items[4].channel == 3);
+    CHECK(items[5].channel == 4);
 }
 
 void testPlaybackCopiesDryChannels()
@@ -502,6 +582,8 @@ int main()
     testLatencyFormulas();
     testTakePlan();
     testMeterLayoutScales();
+    testOffChannelStaysSilent();
+    testGroupsFoldAndPalette();
 
     if (failures != 0)
     {

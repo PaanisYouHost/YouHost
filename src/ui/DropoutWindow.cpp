@@ -38,6 +38,16 @@ public:
         rangeBox_.setSelectedId(1, juce::dontSendNotification);
         rangeBox_.onChange = [this] { repaint(); };
         rangeBox_.setMouseClickGrabsKeyboardFocus(false);
+
+        addAndMakeVisible(resetButton_);
+        resetButton_.setButtonText("Reset");
+        resetButton_.setTooltip("Reset the dropout count and this graph. The CSV log is kept, with a reset line.");
+        resetButton_.setMouseClickGrabsKeyboardFocus(false);
+        resetButton_.onClick = [this]
+        {
+            engine_.resetDropouts();
+            refresh();
+        };
     }
 
     void refresh()
@@ -49,15 +59,17 @@ public:
 
     void resized() override
     {
-        rangeBox_.setBounds(getLocalBounds().reduced(16, 12).removeFromTop(28).removeFromRight(180));
+        auto row = getLocalBounds().reduced(16, 12).removeFromTop(28);
+        rangeBox_.setBounds(row.removeFromRight(180));
+        row.removeFromRight(8);
+        resetButton_.setBounds(row.removeFromRight(78));
     }
 
     void paint(juce::Graphics& graphics) override
     {
         graphics.fillAll(theme::background);
         auto area = getLocalBounds().reduced(16, 12).toFloat();
-        rangeBox_.setBounds(area.removeFromTop(28.0f).removeFromRight(180.0f).toNearestInt());
-        area.removeFromTop(8.0f);
+        area.removeFromTop(36.0f);
 
         const auto windowNs = selectedWindowNs();
         const int inWindow = countMarksInWindow(snapshot_.marks.data(),
@@ -155,6 +167,7 @@ private:
 
     AudioEngine& engine_;
     juce::ComboBox rangeBox_;
+    juce::TextButton resetButton_;
     DropoutSnapshot snapshot_;
 };
 

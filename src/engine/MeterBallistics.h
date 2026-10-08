@@ -119,4 +119,18 @@ inline void updateMeter(ChannelStrip& strip, const float* samples, int numSample
     strip.meter.clipped.store(strip.meterState.clipped, std::memory_order_relaxed);
 }
 
+// Audio thread only. A channel that is off holds a dark meter instead of coasting.
+inline void parkMeter(ChannelStrip& strip) noexcept
+{
+    if (strip.meter.clearRequested.exchange(false, std::memory_order_relaxed))
+        strip.meterState.clipped = false;
+
+    strip.meterState.meanSquare = 0.0f;
+    strip.meterState.heldPeak = 0.0f;
+    strip.meterState.peakHoldSamples = 0;
+    strip.meter.rms.store(0.0f, std::memory_order_relaxed);
+    strip.meter.peak.store(0.0f, std::memory_order_relaxed);
+    strip.meter.clipped.store(strip.meterState.clipped, std::memory_order_relaxed);
+}
+
 } // namespace youhost

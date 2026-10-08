@@ -1,5 +1,6 @@
 #include "SessionDocument.h"
 #include "MeterScale.h"
+#include "X32Colours.h"
 
 #include <algorithm>
 #include <cmath>
@@ -67,7 +68,7 @@ std::vector<WavePeak> decodePeaks(const juce::String& encoded)
 bool writeSessionFile(const juce::File& file, const SessionData& data)
 {
     juce::XmlElement root("YouHostSession");
-    root.setAttribute("version", 2);
+    root.setAttribute("version", 3);
     root.setAttribute("page", data.page == 2 ? 2 : 1);
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
@@ -87,13 +88,18 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
             anySlot = anySlot || slot.occupied;
         const bool named = source.name.isNotEmpty();
         const bool customArm = ! source.recordEnabled;
-        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm)
+        const bool coloured = source.color != 0;
+        const bool grouped = source.group >= 0;
+        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! coloured && ! grouped)
             continue;
 
         auto* element = root.createNewChildElement("Channel");
         element->setAttribute("index", channel);
         element->setAttribute("exclude", source.excludeFromCompensation);
         element->setAttribute("record", source.recordEnabled);
+        element->setAttribute("color", source.color);
+        if (grouped)
+            element->setAttribute("group", source.group);
         if (named)
             element->setAttribute("name", source.name);
 
@@ -113,6 +119,18 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
                 slotElement->createNewChildElement("State")
                     ->setAttribute("data", sourceSlot.state.toBase64Encoding());
         }
+    }
+
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+    {
+        const auto& source = data.groups[static_cast<std::size_t>(group)];
+        if (! source.used && source.name.isEmpty() && source.color == 0 && ! source.collapsed)
+            continue;
+        auto* element = root.createNewChildElement("Group");
+        element->setAttribute("index", group);
+        element->setAttribute("name", source.name);
+        element->setAttribute("color", source.color);
+        element->setAttribute("collapsed", source.collapsed);
     }
 
     for (const auto& take : data.takes)
@@ -167,6 +185,10 @@ bool readSessionFile(const juce::File& file, SessionData& data)
         auto& destination = data.channels[static_cast<std::size_t>(index)];
         destination.excludeFromCompensation = channel->getBoolAttribute("exclude", false);
         destination.recordEnabled = channel->getBoolAttribute("record", true);
+        destination.color = normaliseX32Colour(channel->getIntAttribute("color", 0));
+        destination.group = channel->getIntAttribute("group", -1);
+        if (destination.group < 0 || destination.group >= kMaxDisplayGroups)
+            destination.group = -1;
         destination.name = channel->getStringAttribute("name");
 
         for (auto* slot = channel->getChildByName("Slot"); slot != nullptr; slot = slot->getNextElementWithTagName("Slot"))
@@ -188,6 +210,18 @@ bool readSessionFile(const juce::File& file, SessionData& data)
             if (auto* state = slot->getChildByName("State"))
                 destinationSlot.state.fromBase64Encoding(state->getStringAttribute("data"));
         }
+    }
+
+    for (auto* group = root->getChildByName("Group"); group != nullptr; group = group->getNextElementWithTagName("Group"))
+    {
+        const int index = group->getIntAttribute("index", -1);
+        if (index < 0 || index >= kMaxDisplayGroups)
+            continue;
+        auto& destination = data.groups[static_cast<std::size_t>(index)];
+        destination.used = true;
+        destination.name = group->getStringAttribute("name");
+        destination.color = normaliseX32Colour(group->getIntAttribute("color", 0));
+        destination.collapsed = group->getBoolAttribute("collapsed", false);
     }
 
     for (auto* take = root->getChildByName("Take"); take != nullptr; take = take->getNextElementWithTagName("Take"))

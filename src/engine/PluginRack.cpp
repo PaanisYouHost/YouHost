@@ -95,6 +95,7 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
     : catalogue_(catalogue),
       compensationSamples_(compensationSamples)
 {
+    audible_.fill(true);
     startTimerHz(5);
 }
 
@@ -144,7 +145,12 @@ void PluginRack::audioProcessorChanged(juce::AudioProcessor*, const juce::AudioP
         stateDirty_.store(true, std::memory_order_relaxed);
 }
 
-void PluginRack::process(float* const* outputs, int numOutputs, int numSamples, const Routing& routing)
+void PluginRack::process(float* const* outputs,
+                         int numOutputs,
+                         int numSamples,
+                         const Routing& routing,
+                         std::uint64_t enabledLow,
+                         std::uint64_t enabledHigh)
 {
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
     auto* graph = published_.load(std::memory_order_acquire);
@@ -159,6 +165,11 @@ void PluginRack::process(float* const* outputs, int numOutputs, int numSamples, 
                 continue;
             float* output = outputs[packed];
             if (output == nullptr)
+                continue;
+
+            // Off: the passthrough already wrote silence. Skip the plugins and the
+            // delay line so a parked channel does not cost CPU or play stale audio.
+            if (! channelIsOn(enabledLow, enabledHigh, channel))
                 continue;
 
             bool anyPlugin = false;
@@ -432,6 +443,25 @@ void PluginRack::setExcluded(int channel, bool excluded)
     notifyDirty();
 }
 
+void PluginRack::setAudible(int channel, bool audible)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    if (audible_[static_cast<std::size_t>(channel)] == audible)
+        return;
+    audible_[static_cast<std::size_t>(channel)] = audible;
+    publishUnlocked();
+}
+
+void PluginRack::setAudibleAll(const std::array<bool, kMaxChannels>& audible)
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    audible_ = audible;
+    publishUnlocked();
+}
+
 void PluginRack::toggleEditor(int channel, int slot)
 {
     if (! validSlot(channel, slot))
@@ -651,7 +681,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
 
         chainSamples_[static_cast<std::size_t>(channel)] = chain;
         const bool outputOpen = routing_.outputPacked[static_cast<std::size_t>(channel)] >= 0;
-        inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { chain, outputOpen && ! excluded_[static_cast<std::size_t>(channel)] };
+        const bool counts = outputOpen && ! excluded_[static_cast<std::size_t>(channel)] && audible_[static_cast<std::size_t>(channel)];
+        inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { chain, counts };
     }
 
     const auto plan = planCompensation(inputs.data(), kMaxChannels);

@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "ChannelMenu.h"
 #include "Theme.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
@@ -13,14 +14,14 @@ constexpr const char* kShortcutHelp =
     "2  Plugins\n"
     "3  Open or close the plugin scanner\n"
     "4 or D  Open or close the dropout timeline\n"
-    "Space  Play, or Stop if YouHost is already playing or recording\n"
+    "Space  Play, or Stop when already playing or recording\n"
     "Shift+Space, R, or Cmd+Space  Record\n"
-    "Left / Right  Previous or next take marker\n"
+    "Left / Right  Previous or next take\n"
     "Shift+Left / Shift+Right  Move 5 seconds\n"
-    "Cmd+S  Save the session\n"
+    "Cmd+S  Save\n"
     "Cmd+Shift+S  Save a copy of the session folder\n\n"
-    "Cmd+Space only arrives if Spotlight is not using that shortcut. Shift+Space and R always work.\n"
-    "Shortcuts stay quiet while you are typing in a text field or a plugin window.";
+    "Cmd+Space works only when Spotlight is not using that shortcut. Shift+Space and R always work.\n"
+    "Shortcuts do nothing while a text field or a plugin window has focus.";
 
 void hideTestButtons(juce::Component& component)
 {
@@ -197,7 +198,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     engine_.setPageRestoreHandler([this](int page) { showPage(page); });
 
-    addAndMakeVisible(meterGrid_);
+    addAndMakeVisible(meterViewport_);
+    addAndMakeVisible(leftScale_);
+    addAndMakeVisible(rightScale_);
     addAndMakeVisible(timeline_);
     addAndMakeVisible(pluginPage_);
     addAndMakeVisible(recorderButton_);
@@ -224,8 +227,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
     addAndMakeVisible(retryButton_);
+    addAndMakeVisible(allButton_);
+    addAndMakeVisible(hideButton_);
     addAndMakeVisible(latencyLabel_);
     addAndMakeVisible(viewport_);
+    meterViewport_.setViewedComponent(&meterGrid_, false);
+    meterViewport_.setScrollBarsShown(false, true);
 
     latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, 440, 280);
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
@@ -238,8 +245,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
-                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_ })
+                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_, &allButton_, &hideButton_ })
         quiet(*button);
+
+    for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &latencyButton_,
+                          &allButton_, &hideButton_ })
+        button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
     pluginsButton_.onClick = [this] { showPage(2); };
@@ -255,9 +266,15 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     saveButton_.onClick = [this] { saveSession(); };
     fileButton_.onClick = [this] { showFileMenu(); };
     dropoutsButton_.onClick = [this] { toggleDropouts(); };
-    dropoutsButton_.setTooltip("Dropout timeline  (4 or D)");
-    saveButton_.setTooltip("Save session.youhost  (Cmd+S)");
-    fileButton_.setTooltip("New, Open Recent, Save As, Import, Clear timeline");
+    recorderButton_.setTooltip("Recorder page (1).");
+    pluginsButton_.setTooltip("Plugins page (2).");
+    dropoutsButton_.setTooltip("Dropout timeline (4 or D).");
+    latencyButton_.setTooltip("Open the latency card.");
+    fileButton_.setTooltip("New, Open, Open Recent, Save As, Import, and Clear timeline.");
+    helpButton_.setTooltip("Show keyboard shortcuts.");
+    allButton_.setTooltip("Show every channel. Opens every group.");
+    hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
+    saveButton_.setTooltip("Save session.youhost (Cmd+S).");
     latencyButton_.onClick = [this]
     {
         const bool show = latencyWindow_ == nullptr || ! latencyWindow_->isVisible();
@@ -269,13 +286,15 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         }
     };
 
-    prevButton_.setTooltip("Previous take marker  (Left)");
-    nextButton_.setTooltip("Next take marker  (Right)");
-    stopButton_.setTooltip("Stop  (Space)");
-    playButton_.setTooltip("Play the recorded takes through the plugins  (Space)");
-    recButton_.setTooltip("Record a new take  (Shift+Space, R, or Cmd+Space)");
+    prevButton_.setTooltip("Previous take (Left).");
+    nextButton_.setTooltip("Next take (Right).");
+    stopButton_.setTooltip("Stop (Space).");
+    playButton_.setTooltip("Play the recorded takes through the plugins (Space). Channels that are OFF stay silent.");
+    recButton_.setTooltip("Record a new take (Shift+Space, R, or Cmd+Space).");
     helpButton_.setTooltip(kShortcutHelp);
-    scannerButton_.setTooltip("Open or close the plugin scanner  (3)");
+    scannerButton_.setTooltip("Open or close the plugin scanner (3).");
+    allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
+    hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
     recButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff8d2430));
     playButton_.setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
@@ -313,11 +332,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     setupButton_.onClick = [this]
     {
         setupVisible_ = ! setupVisible_;
-        setupButton_.setButtonText(setupVisible_ ? "Hide audio setup" : "Audio setup");
+        setupButton_.setButtonText(setupVisible_ ? "Hide setup" : "Audio setup");
         resized();
     };
 
-    meterGrid_.setRecordMode(true);
     meterGrid_.setClearHandler([this](int channel)
     {
         if (engine_.clipFor(channel))
@@ -327,6 +345,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     {
         engine_.setRecordArmed(channel, ! engine_.isRecordArmed(channel));
     });
+    meterGrid_.setChannelMenuHandler([this](int channel) { showChannelMenu(engine_, meterGrid_, channel); });
+    meterGrid_.setGroupMenuHandler([this](int group) { showGroupMenu(engine_, meterGrid_, group); });
+    meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
+    meterGrid_.setSelectHandler([this](int channel, bool extend) { engine_.selectChannel(channel, extend); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
 
     retryButton_.onClick = [this]
@@ -689,26 +711,78 @@ void MainComponent::refresh()
     const bool playing = transport.mode == TransportMode::playing;
     timeLabel_.setColour(juce::Label::textColourId, recording ? juce::Colours::white : theme::text);
     timeLabel_.setColour(juce::Label::backgroundColourId, recording ? juce::Colour(0xff8d2430) : theme::panel);
-    modeLabel_.setText(playing ? "PLAYBACK" : recording ? "REC" : juce::String(), juce::dontSendNotification);
+    modeLabel_.setText(playing ? "PLAYBACK" : recording ? "RECORD" : juce::String(), juce::dontSendNotification);
     modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
     recButton_.setToggleState(recording, juce::dontSendNotification);
     playButton_.setToggleState(playing, juce::dontSendNotification);
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+    latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
+    allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
+    hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
+    leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
+    rightScale_.setScale(showPeak_, rmsReferenceDb_, true);
 
     const int channels = engine_.visibleChannels();
-    std::vector<MeterReading> readings(static_cast<std::size_t>(std::max(0, channels)));
-    for (int channel = 0; channel < channels; ++channel)
+    const auto strips = engine_.displayStrips(channels);
+    std::vector<BridgeCell> cells;
+    cells.reserve(strips.size());
+    for (const auto& item : strips)
     {
-        auto& reading = readings[static_cast<std::size_t>(channel)];
-        reading.rms = engine_.rmsFor(channel);
-        reading.peak = engine_.peakFor(channel);
-        reading.clipped = engine_.clipFor(channel);
-        reading.hasInput = engine_.inputActive(channel);
-        reading.recordArmed = engine_.isRecordArmed(channel);
-        reading.recordLive = recording && reading.recordArmed && reading.hasInput;
+        BridgeCell cell;
+        if (item.kind == StripKind::groupHeader)
+        {
+            cell.header = true;
+            cell.group = item.group;
+            cell.color = engine_.groupColor(item.group);
+            cell.collapsed = engine_.groupCollapsed(item.group);
+            cell.title = engine_.groupName(item.group);
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                if (engine_.channelGroup(channel) != item.group)
+                    continue;
+                ++cell.memberCount;
+                if (engine_.isRecordArmed(channel))
+                    ++cell.membersOn;
+                const float level = showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel);
+                if (showPeak_)
+                    cell.reading.peak = std::max(cell.reading.peak, level);
+                else
+                    cell.reading.rms = std::max(cell.reading.rms, level);
+                cell.reading.clipped = cell.reading.clipped || engine_.clipFor(channel);
+                if (! cell.anyPlugin)
+                {
+                    const auto snap = engine_.channelSnapshot(channel);
+                    for (const auto& slot : snap.slots)
+                        cell.anyPlugin = cell.anyPlugin || slot.occupied;
+                }
+            }
+        }
+        else
+        {
+            cell.channel = item.channel;
+            cell.color = engine_.channelColor(item.channel);
+            cell.selected = engine_.isChannelSelected(item.channel);
+            const auto name = engine_.channelName(item.channel);
+            cell.title = name.isNotEmpty() ? name : juce::String(item.channel + 1);
+            cell.reading.rms = engine_.rmsFor(item.channel);
+            cell.reading.peak = engine_.peakFor(item.channel);
+            cell.reading.clipped = engine_.clipFor(item.channel);
+            cell.reading.hasInput = engine_.inputActive(item.channel);
+            cell.reading.recordArmed = engine_.isRecordArmed(item.channel);
+            cell.reading.recordLive = recording && cell.reading.recordArmed && cell.reading.hasInput;
+        }
+        cells.push_back(std::move(cell));
     }
-    meterGrid_.setReadings(std::move(readings), showPeak_, rmsReferenceDb_);
+    meterGrid_.setCells(std::move(cells), showPeak_, rmsReferenceDb_);
+    if (page_ == 1 && meterViewport_.getWidth() > 0)
+    {
+        meterGrid_.setFitWidth(meterViewport_.getWidth());
+        const int width = std::max(meterViewport_.getWidth(), meterGrid_.preferredWidth(meterViewport_.getWidth()));
+        const int height = std::max(1, meterViewport_.getMaximumVisibleHeight());
+        if (meterGrid_.getWidth() != width || meterGrid_.getHeight() != height)
+            meterGrid_.setSize(width, height);
+    }
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
     repaint();
@@ -768,9 +842,9 @@ void MainComponent::paint(juce::Graphics& graphics)
 
     juce::String hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty() && page_ == 1)
-        hint = "Red dots are record-armed. Click the timeline to move the playhead. ? shows the keys.";
+        hint = "REC is on. OFF cuts the meter, plugins, and output immediately. This take's files stay as they were. Right-click a channel for color and groups.";
     if (hint.isEmpty())
-        hint = "Click an empty slot to load a plugin. Click it again to close its window. Right-click for bypass and remove.";
+        hint = "Click an empty slot to load a plugin. Click the slot again to close its window. Right-click a slot to bypass or remove it. Right-click the name for color and groups.";
 
     graphics.setColour(engine_.openError().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -785,22 +859,35 @@ void MainComponent::resized()
     statusArea_ = title;
     area.removeFromTop(6);
 
-    auto transport = area.removeFromTop(46);
-    recorderButton_.setBounds(transport.removeFromLeft(108).reduced(0, 6));
-    transport.removeFromLeft(4);
-    pluginsButton_.setBounds(transport.removeFromLeft(104).reduced(0, 6));
-    transport.removeFromLeft(4);
-    scannerButton_.setBounds(transport.removeFromLeft(104).reduced(0, 6));
-    transport.removeFromLeft(10);
-    prevButton_.setBounds(transport.removeFromLeft(58).reduced(0, 8));
-    nextButton_.setBounds(transport.removeFromLeft(58).reduced(0, 8));
-    stopButton_.setBounds(transport.removeFromLeft(64).reduced(0, 8));
-    playButton_.setBounds(transport.removeFromLeft(64).reduced(0, 8));
-    recButton_.setBounds(transport.removeFromLeft(64).reduced(0, 8));
+    auto views = area.removeFromTop(34);
+    recorderButton_.setBounds(views.removeFromLeft(112).reduced(0, 2));
+    views.removeFromLeft(4);
+    pluginsButton_.setBounds(views.removeFromLeft(100).reduced(0, 2));
+    views.removeFromLeft(4);
+    scannerButton_.setBounds(views.removeFromLeft(104).reduced(0, 2));
+    views.removeFromLeft(4);
+    dropoutsButton_.setBounds(views.removeFromLeft(112).reduced(0, 2));
+    views.removeFromLeft(4);
+    latencyButton_.setBounds(views.removeFromLeft(84).reduced(0, 2));
+    views.removeFromLeft(4);
+    fileButton_.setBounds(views.removeFromLeft(58).reduced(0, 2));
+    views.removeFromLeft(4);
+    helpButton_.setBounds(views.removeFromLeft(36).reduced(0, 2));
+    views.removeFromLeft(10);
+    allButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
+    views.removeFromLeft(4);
+    hideButton_.setBounds(views.removeFromLeft(58).reduced(0, 2));
+
+    area.removeFromTop(4);
+    auto transport = area.removeFromTop(40);
+    prevButton_.setBounds(transport.removeFromLeft(72).reduced(0, 4));
+    nextButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
+    stopButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
+    playButton_.setBounds(transport.removeFromLeft(64).reduced(0, 4));
+    recButton_.setBounds(transport.removeFromLeft(78).reduced(0, 4));
     transport.removeFromLeft(8);
-    timeLabel_.setBounds(transport.removeFromLeft(148).reduced(0, 4));
-    modeLabel_.setBounds(transport.removeFromLeft(92).reduced(4, 10));
-    helpButton_.setBounds(transport.removeFromLeft(36).reduced(0, 8));
+    timeLabel_.setBounds(transport.removeFromLeft(148).reduced(0, 2));
+    modeLabel_.setBounds(transport.removeFromLeft(96).reduced(4, 8));
 
     area.removeFromTop(4);
     auto tools = area.removeFromTop(32);
@@ -815,11 +902,8 @@ void MainComponent::resized()
     newButton_.setBounds(tools.removeFromLeft(52).reduced(0, 2));
     openButton_.setBounds(tools.removeFromLeft(58).reduced(0, 2));
     saveButton_.setBounds(tools.removeFromLeft(54).reduced(0, 2));
-    fileButton_.setBounds(tools.removeFromLeft(50).reduced(0, 2));
     tools.removeFromLeft(8);
     setupButton_.setBounds(tools.removeFromLeft(108).reduced(0, 2));
-    latencyButton_.setBounds(tools.removeFromLeft(76).reduced(0, 2));
-    dropoutsButton_.setBounds(tools.removeFromLeft(88).reduced(0, 2));
     latencyLabel_.setBounds(tools.reduced(8, 0));
 
     const bool showBanner = ! engine_.microphoneGranted();
@@ -855,15 +939,25 @@ void MainComponent::resized()
     }
 
     const bool recorder = page_ == 1;
-    timeline_.setVisible(recorder);
-    meterGrid_.setVisible(recorder);
+    timeline_.setVisible(true);
+    meterViewport_.setVisible(recorder);
+    leftScale_.setVisible(recorder);
+    rightScale_.setVisible(recorder);
     pluginPage_.setVisible(! recorder);
+
+    const int timelineHeight = recorder ? juce::jlimit(72, 160, getHeight() / 8)
+                                        : juce::jlimit(52, 72, getHeight() / 12);
+    timeline_.setBounds(area.removeFromTop(timelineHeight));
+    area.removeFromTop(8);
     if (recorder)
     {
-        const int timelineHeight = juce::jlimit(72, 160, getHeight() / 8);
-        timeline_.setBounds(area.removeFromTop(timelineHeight));
-        area.removeFromTop(8);
-        meterGrid_.setBounds(area);
+        auto bridge = area;
+        leftScale_.setBounds(bridge.removeFromLeft(44));
+        rightScale_.setBounds(bridge.removeFromRight(44));
+        meterViewport_.setBounds(bridge);
+        meterGrid_.setFitWidth(meterViewport_.getWidth());
+        const int width = std::max(meterViewport_.getWidth(), meterGrid_.preferredWidth(meterViewport_.getWidth()));
+        meterGrid_.setSize(width, std::max(1, meterViewport_.getMaximumVisibleHeight()));
     }
     else
     {

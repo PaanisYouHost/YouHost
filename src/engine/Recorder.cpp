@@ -417,7 +417,7 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     if (armedChannels == 0)
     {
         const std::lock_guard<std::mutex> lock(stateLock_);
-        status_ = "Arm a channel that has an input.";
+        status_ = "Turn on a channel that has an input.";
         return;
     }
 

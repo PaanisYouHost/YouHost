@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChannelEnable.h"
 #include "HostLimits.h"
 #include "MeterBallistics.h"
 
@@ -72,7 +73,9 @@ inline void processPassthrough(const float* const* inputs,
                                int numSamples,
                                const AudioThreadConfig& config,
                                ChannelStrip* strips,
-                               int stripCount)
+                               int stripCount,
+                               std::uint64_t enabledLow = ~std::uint64_t { 0 },
+                               std::uint64_t enabledHigh = ~std::uint64_t { 0 })
 {
     if (numSamples <= 0)
         return;
@@ -86,13 +89,27 @@ inline void processPassthrough(const float* const* inputs,
         const int inputIndex = config.routing.inputPacked[static_cast<std::size_t>(channel)];
         const int outputIndex = config.routing.outputPacked[static_cast<std::size_t>(channel)];
 
-        const float* input = nullptr;
-        if (inputs != nullptr && inputIndex >= 0 && inputIndex < numInputs)
-            input = inputs[inputIndex];
-
         float* output = nullptr;
         if (outputs != nullptr && outputIndex >= 0 && outputIndex < numOutputs)
             output = outputs[outputIndex];
+
+        // Off channels are silent and their meters stay parked. Plugins are skipped later.
+        if (! channelIsOn(enabledLow, enabledHigh, channel))
+        {
+            if (output != nullptr)
+            {
+                std::memset(output, 0, sizeof(float) * static_cast<std::size_t>(numSamples));
+                if (outputIndex >= 0 && outputIndex < kMaxChannels)
+                    outputWritten[static_cast<std::size_t>(outputIndex)] = true;
+            }
+            if (strips != nullptr)
+                parkMeter(strips[channel]);
+            continue;
+        }
+
+        const float* input = nullptr;
+        if (inputs != nullptr && inputIndex >= 0 && inputIndex < numInputs)
+            input = inputs[inputIndex];
 
         if (output != nullptr)
         {

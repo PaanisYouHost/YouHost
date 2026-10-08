@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/DisplayLayout.h"
 #include "engine/HostLimits.h"
 #include "engine/MeterLayout.h"
 
@@ -31,12 +32,40 @@ struct MeterReading
     std::array<SlotMark, kSlotsPerChannel> slots {};
 };
 
+struct BridgeCell
+{
+    bool header = false;
+    int channel = -1;
+    int group = -1;
+    int color = 0;
+    bool collapsed = false;
+    bool selected = false;
+    juce::String title;
+    MeterReading reading {};
+    bool anyPlugin = false;
+    int membersOn = 0;
+    int memberCount = 0;
+};
+
 struct MeterHit
 {
     int channel = -1;
+    int group = -1;
+    bool header = false;
     bool clip = false;
     bool record = false;
-    int slot = -1;
+};
+
+class MeterScaleRail : public juce::Component
+{
+public:
+    void setScale(bool peak, int referenceDb, bool alignRight);
+    void paint(juce::Graphics& graphics) override;
+
+private:
+    bool peak_ = false;
+    int referenceDb_ = -20;
+    bool alignRight_ = false;
 };
 
 class MeterGrid : public juce::Component
@@ -44,27 +73,35 @@ class MeterGrid : public juce::Component
 public:
     MeterGrid();
 
-    void setReadings(std::vector<MeterReading> readings, bool showPeak, int rmsReferenceDb);
-    void setRecordMode(bool enabled);
+    void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb);
+    void setFitWidth(int viewportWidth);
+    int preferredWidth(int viewportWidth) const;
+
     void setClearHandler(std::function<void(int channel)> handler);
-    void setSlotHandler(std::function<void(int channel, int slot)> handler);
     void setRecordHandler(std::function<void(int channel)> handler);
+    void setChannelMenuHandler(std::function<void(int channel)> handler);
+    void setGroupToggleHandler(std::function<void(int group)> handler);
+    void setGroupMenuHandler(std::function<void(int group)> handler);
+    void setSelectHandler(std::function<void(int channel, bool extend)> handler);
 
     void paint(juce::Graphics& graphics) override;
     void mouseDown(const juce::MouseEvent& event) override;
 
 private:
-    MeterLayout layoutFor(int count) const;
-    MeterHit meterAt(juce::Point<float> position) const;
+    BridgeMetrics metricsFor(int viewportWidth) const;
+    MeterHit hitAt(juce::Point<float> position) const;
 
-    std::vector<MeterReading> readings_;
+    std::vector<BridgeCell> cells_;
     bool showPeak_ = false;
-    bool showRecord_ = false;
     int rmsReferenceDb_ = -20;
+    int fitWidth_ = 0;
     std::function<void(int)> onClearClip_;
-    std::function<void(int, int)> onSlot_;
     std::function<void(int)> onRecord_;
-    MeterLayout layout_ {};
+    std::function<void(int)> onChannelMenu_;
+    std::function<void(int)> onGroupToggle_;
+    std::function<void(int)> onGroupMenu_;
+    std::function<void(int, bool)> onSelect_;
+    BridgeMetrics metrics_ {};
 };
 
 } // namespace youhost

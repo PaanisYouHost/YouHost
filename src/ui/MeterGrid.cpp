@@ -1,5 +1,6 @@
 #include "MeterGrid.h"
 #include "Theme.h"
+#include "X32Look.h"
 #include "engine/MeterScale.h"
 
 #include <cmath>
@@ -9,8 +10,6 @@ namespace youhost
 {
 namespace
 {
-
-constexpr float kScaleGutter = 44.0f;
 
 juce::Colour colourForLevel(float linearGain)
 {
@@ -26,23 +25,22 @@ struct BarParts
 {
     juce::Rectangle<float> bar;
     juce::Rectangle<float> clip;
-    juce::Rectangle<float> slotRow;
+    juce::Rectangle<float> button;
     juce::Rectangle<float> number;
 };
 
-BarParts splitCell(juce::Rectangle<float> cell, bool recordRow)
+BarParts splitCell(juce::Rectangle<float> cell)
 {
-    const float numberHeight = juce::jlimit(10.0f, 14.0f, cell.getHeight() * 0.12f);
-    const float slotHeight = recordRow ? juce::jlimit(14.0f, 18.0f, cell.getHeight() * 0.16f)
-                                       : juce::jlimit(9.0f, 12.0f, cell.getHeight() * 0.1f);
-    auto body = cell.reduced(3.0f, 2.0f);
+    const float numberHeight = juce::jlimit(12.0f, 16.0f, cell.getHeight() * 0.1f);
+    const float buttonHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.12f);
+    auto body = cell.reduced(2.0f, 2.0f);
     auto number = body.removeFromBottom(numberHeight);
-    body.removeFromBottom(1.0f);
-    auto slotRow = body.removeFromBottom(slotHeight);
+    body.removeFromBottom(2.0f);
+    auto button = body.removeFromBottom(buttonHeight);
     body.removeFromBottom(2.0f);
     const auto clip = body.removeFromTop(juce::jmin(7.0f, body.getHeight() * 0.08f));
     body.removeFromTop(2.0f);
-    return { body, clip, slotRow, number };
+    return { body, clip, button, number };
 }
 
 juce::String tickText(int label)
@@ -100,19 +98,6 @@ std::vector<PlacedTick> placeTicks(juce::Rectangle<float> bar, bool peak, int re
     return placed;
 }
 
-void drawScaleLabels(juce::Graphics& graphics, const std::vector<PlacedTick>& ticks, float barLeft, float barRight)
-{
-    graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-    for (const auto& tick : ticks)
-    {
-        graphics.setColour(tick.label == 0 ? theme::text : theme::dim);
-        const auto left = juce::Rectangle<float>(barLeft - kScaleGutter, tick.y - 6.0f, kScaleGutter - 6.0f, 12.0f);
-        const auto right = juce::Rectangle<float>(barRight + 6.0f, tick.y - 6.0f, kScaleGutter - 8.0f, 12.0f);
-        graphics.drawText(tickText(tick.label), left, juce::Justification::centredRight, false);
-        graphics.drawText(tickText(tick.label), right, juce::Justification::centredLeft, false);
-    }
-}
-
 void drawScaleLines(juce::Graphics& graphics, const std::vector<PlacedTick>& ticks, float barLeft, float barRight)
 {
     const float width = juce::jmax(0.0f, barRight - barLeft);
@@ -132,58 +117,59 @@ void drawScaleLines(juce::Graphics& graphics, const std::vector<PlacedTick>& tic
     }
 }
 
-void drawSlotChips(juce::Graphics& graphics, juce::Rectangle<float> row, const std::array<SlotMark, kSlotsPerChannel>& slots)
+juce::String channelButtonText(const MeterReading& reading)
 {
-    if (row.getWidth() < 4.0f || row.getHeight() < 4.0f)
-        return;
-
-    const float gap = 1.0f;
-    const float chipWidth = (row.getWidth() - gap * static_cast<float>(kSlotsPerChannel - 1)) / static_cast<float>(kSlotsPerChannel);
-    for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-    {
-        const auto chip = juce::Rectangle<float>(row.getX() + static_cast<float>(slot) * (chipWidth + gap),
-                                                 row.getY(),
-                                                 chipWidth,
-                                                 row.getHeight())
-                              .reduced(0.0f, 1.0f);
-        const auto& mark = slots[static_cast<std::size_t>(slot)];
-        if (mark.loading)
-            graphics.setColour(theme::amber);
-        else if (! mark.occupied)
-            graphics.setColour(theme::panelEdge);
-        else if (mark.bypassed)
-            graphics.setColour(theme::fainter);
-        else
-            graphics.setColour(theme::green);
-
-        graphics.fillRoundedRectangle(chip, 1.5f);
-        if (mark.selected)
-        {
-            graphics.setColour(theme::text);
-            graphics.drawRoundedRectangle(chip, 1.5f, 1.0f);
-        }
-    }
+    return reading.recordArmed ? "REC" : "OFF";
 }
 
 } // namespace
+
+void MeterScaleRail::setScale(bool peak, int referenceDb, bool alignRight)
+{
+    peak_ = peak;
+    referenceDb_ = normaliseRmsReferenceDb(referenceDb);
+    alignRight_ = alignRight;
+    repaint();
+}
+
+void MeterScaleRail::paint(juce::Graphics& graphics)
+{
+    auto area = getLocalBounds().toFloat();
+    const auto parts = splitCell(area);
+    const auto ticks = placeTicks(parts.bar, peak_, referenceDb_);
+    graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
+    for (const auto& tick : ticks)
+    {
+        graphics.setColour(tick.label == 0 ? theme::text : theme::dim);
+        graphics.drawText(tickText(tick.label),
+                          juce::Rectangle<float>(2.0f, tick.y - 6.0f, area.getWidth() - 4.0f, 12.0f),
+                          alignRight_ ? juce::Justification::centredLeft : juce::Justification::centredRight,
+                          false);
+    }
+}
 
 MeterGrid::MeterGrid()
 {
     setOpaque(false);
 }
 
-void MeterGrid::setReadings(std::vector<MeterReading> readings, bool showPeak, int rmsReferenceDb)
+void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb)
 {
-    readings_ = std::move(readings);
+    cells_ = std::move(cells);
     showPeak_ = showPeak;
     rmsReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
     repaint();
 }
 
-void MeterGrid::setRecordMode(bool enabled)
+void MeterGrid::setFitWidth(int viewportWidth)
 {
-    showRecord_ = enabled;
-    repaint();
+    fitWidth_ = std::max(0, viewportWidth);
+}
+
+int MeterGrid::preferredWidth(int viewportWidth) const
+{
+    const auto metrics = metricsFor(std::max(1, viewportWidth));
+    return std::max(viewportWidth, static_cast<int>(std::ceil(metrics.contentWidth)));
 }
 
 void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
@@ -191,112 +177,170 @@ void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
     onClearClip_ = std::move(handler);
 }
 
-void MeterGrid::setSlotHandler(std::function<void(int channel, int slot)> handler)
-{
-    onSlot_ = std::move(handler);
-}
-
 void MeterGrid::setRecordHandler(std::function<void(int channel)> handler)
 {
     onRecord_ = std::move(handler);
 }
 
-MeterLayout MeterGrid::layoutFor(int count) const
+void MeterGrid::setChannelMenuHandler(std::function<void(int channel)> handler)
 {
-    if (count <= 0)
-        return {};
-
-    const float bridgeWidth = std::max(1.0f, static_cast<float>(getWidth()) - kScaleGutter * 2.0f);
-    auto layout = layoutMeters(count, bridgeWidth, static_cast<float>(getHeight()));
-    layout.originX += kScaleGutter;
-    return layout;
+    onChannelMenu_ = std::move(handler);
 }
 
-MeterHit MeterGrid::meterAt(juce::Point<float> position) const
+void MeterGrid::setGroupToggleHandler(std::function<void(int group)> handler)
+{
+    onGroupToggle_ = std::move(handler);
+}
+
+void MeterGrid::setGroupMenuHandler(std::function<void(int group)> handler)
+{
+    onGroupMenu_ = std::move(handler);
+}
+
+void MeterGrid::setSelectHandler(std::function<void(int channel, bool extend)> handler)
+{
+    onSelect_ = std::move(handler);
+}
+
+BridgeMetrics MeterGrid::metricsFor(int viewportWidth) const
+{
+    int channels = 0;
+    int headers = 0;
+    for (const auto& cell : cells_)
+    {
+        if (cell.header)
+            ++headers;
+        else
+            ++channels;
+    }
+    return layoutBridge(channels, headers, static_cast<float>(std::max(1, viewportWidth)));
+}
+
+MeterHit MeterGrid::hitAt(juce::Point<float> position) const
 {
     MeterHit hit;
-    const int count = static_cast<int>(readings_.size());
-    if (count <= 0 || layout_.cellWidth <= 0.0f || layout_.cellHeight <= 0.0f)
-        return hit;
-
-    const float localX = position.x - layout_.originX;
-    const float localY = position.y;
-    if (localX < 0.0f || localY < 0.0f)
-        return hit;
-
-    const int column = static_cast<int>(localX / layout_.cellWidth);
-    const int row = static_cast<int>(localY / layout_.cellHeight);
-    if (column < 0 || column >= layout_.columns || row < 0 || row >= layout_.rows)
-        return hit;
-
-    const int index = row * layout_.columns + column;
-    if (index < 0 || index >= count)
-        return hit;
-
-    const auto cell = juce::Rectangle<float>(layout_.originX + static_cast<float>(column) * layout_.cellWidth,
-                                             static_cast<float>(row) * layout_.cellHeight,
-                                             layout_.cellWidth,
-                                             layout_.cellHeight);
-    const auto parts = splitCell(cell, showRecord_);
-    hit.channel = index;
-    if (parts.clip.contains(position))
+    float x = metrics_.originX;
+    for (const auto& cell : cells_)
     {
-        hit.clip = true;
-        return hit;
-    }
+        const float width = cell.header ? metrics_.headerWidth : metrics_.channelWidth;
+        const auto bounds = juce::Rectangle<float>(x, 0.0f, width, static_cast<float>(getHeight()));
+        x += width;
+        if (! bounds.contains(position))
+            continue;
 
-    if (showRecord_ && parts.slotRow.contains(position))
-    {
-        hit.record = true;
-        return hit;
-    }
-
-    if (parts.slotRow.contains(position))
-    {
-        const float width = parts.slotRow.getWidth() / static_cast<float>(kSlotsPerChannel);
-        if (width > 0.0f)
+        if (cell.header)
         {
-            const int slot = juce::jlimit(0, kSlotsPerChannel - 1, static_cast<int>((position.x - parts.slotRow.getX()) / width));
-            hit.slot = slot;
+            hit.header = true;
+            hit.group = cell.group;
+            return hit;
         }
+
+        hit.channel = cell.channel;
+        const auto parts = splitCell(bounds);
+        if (parts.clip.contains(position))
+            hit.clip = true;
+        else if (parts.button.contains(position))
+            hit.record = true;
+        return hit;
     }
     return hit;
 }
 
 void MeterGrid::paint(juce::Graphics& graphics)
 {
-    const int count = static_cast<int>(readings_.size());
-    if (count <= 0)
+    const int fit = fitWidth_ > 0 ? fitWidth_ : getWidth();
+    metrics_ = metricsFor(fit);
+    if (metrics_.contentWidth > static_cast<float>(fit))
+        metrics_.originX = 0.0f;
+
+    if (cells_.empty())
     {
         graphics.setColour(theme::dim);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
-        graphics.drawFittedText("No input channels open. Open Audio setup and enable the inputs.",
+        graphics.drawFittedText("No input channels are open. Open Audio setup and enable the inputs.",
                                 getLocalBounds().reduced(8),
                                 juce::Justification::centred,
                                 3);
         return;
     }
 
-    layout_ = layoutFor(count);
-    const float fontSize = juce::jlimit(8.0f, 12.0f, layout_.cellWidth * 0.42f);
     const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(rmsReferenceDb_);
+    float x = metrics_.originX;
+    juce::Rectangle<float> firstBar;
+    juce::Rectangle<float> lastBar;
+    bool haveBar = false;
 
-    for (int index = 0; index < count; ++index)
+    for (const auto& cell : cells_)
     {
-        const int column = index % layout_.columns;
-        const int row = index / layout_.columns;
-        const auto cell = juce::Rectangle<float>(layout_.originX + static_cast<float>(column) * layout_.cellWidth,
-                                                 static_cast<float>(row) * layout_.cellHeight,
-                                                 layout_.cellWidth,
-                                                 layout_.cellHeight);
-        const auto parts = splitCell(cell, showRecord_);
-        const auto& reading = readings_[static_cast<std::size_t>(index)];
-        const float level = showPeak_ ? reading.peak : reading.rms;
+        const float width = cell.header ? metrics_.headerWidth : metrics_.channelWidth;
+        const auto bounds = juce::Rectangle<float>(x, 0.0f, width, static_cast<float>(getHeight()));
+        x += width;
 
-        graphics.setColour(theme::meterTrack);
+        if (cell.header)
+        {
+            graphics.setColour(x32Fill(cell.color));
+            graphics.fillRoundedRectangle(bounds.reduced(1.0f), 4.0f);
+            if (kX32Colours[normaliseX32Colour(cell.color)].inverted)
+            {
+                graphics.setColour(x32Ink(cell.color));
+                graphics.fillRect(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 3.0f, bounds.getHeight() - 4.0f);
+            }
+            auto body = bounds.reduced(4.0f, 8.0f);
+            graphics.setColour(x32Ink(cell.color));
+            graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
+            graphics.drawFittedText(cell.title, body.removeFromTop(32.0f).toNearestInt(), juce::Justification::centred, 2);
+
+            const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
+            auto meter = body.removeFromTop(std::min(80.0f, body.getHeight() * 0.45f)).reduced(10.0f, 4.0f);
+            graphics.setColour(theme::meterTrack);
+            graphics.fillRoundedRectangle(meter, 2.0f);
+            if (level > 0.0f && meter.getHeight() > 1.0f)
+            {
+                const float filled = normaliseDb(gainToDb(level), span) * meter.getHeight();
+                auto levelArea = meter.withTop(meter.getBottom() - filled);
+                graphics.setColour(colourForLevel(level));
+                graphics.fillRoundedRectangle(levelArea, 2.0f);
+            }
+
+            juce::String state = "OFF";
+            if (cell.memberCount > 0 && cell.membersOn == cell.memberCount)
+                state = "REC";
+            else if (cell.membersOn > 0)
+                state = juce::String(cell.membersOn) + " on";
+            if (cell.reading.clipped)
+                state << "  CLIP";
+            if (cell.anyPlugin)
+                state << "  FX";
+            if (cell.collapsed)
+                state << "  folded";
+
+            graphics.setColour(x32Ink(cell.color));
+            graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
+            graphics.drawFittedText(state, body.toNearestInt(), juce::Justification::centred, 3);
+            continue;
+        }
+
+        graphics.setColour(x32Fill(cell.color));
+        graphics.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 4.0f);
+        if (kX32Colours[normaliseX32Colour(cell.color)].inverted)
+        {
+            graphics.setColour(x32Ink(cell.color));
+            graphics.fillRect(bounds.getX(), bounds.getY(), 3.0f, bounds.getHeight());
+        }
+
+        const auto parts = splitCell(bounds);
+        if (! haveBar)
+        {
+            firstBar = parts.bar;
+            haveBar = true;
+        }
+        lastBar = parts.bar;
+
+        const bool on = cell.reading.recordArmed;
+        const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
+        graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
         graphics.fillRoundedRectangle(parts.bar, 2.0f);
-
-        if (reading.hasInput && level > 0.0f && parts.bar.getHeight() > 1.0f)
+        if (on && cell.reading.hasInput && level > 0.0f && parts.bar.getHeight() > 1.0f)
         {
             const float filled = normaliseDb(gainToDb(level), span) * parts.bar.getHeight();
             auto levelArea = parts.bar.withTop(parts.bar.getBottom() - filled);
@@ -304,66 +348,67 @@ void MeterGrid::paint(juce::Graphics& graphics)
             graphics.fillRoundedRectangle(levelArea, 2.0f);
         }
 
-        graphics.setColour(reading.clipped ? theme::red : theme::panelEdge);
+        graphics.setColour(! on ? theme::panelEdge : cell.reading.clipped ? theme::red : theme::panelEdge);
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
 
-        if (showRecord_)
-        {
-            const auto button = parts.slotRow.withSizeKeepingCentre(std::min(parts.slotRow.getWidth(), 14.0f),
-                                                                    std::min(parts.slotRow.getHeight(), 14.0f));
-            graphics.setColour(reading.recordLive ? theme::red : reading.recordArmed ? juce::Colour(0xff8d2430) : theme::panelEdge);
-            graphics.fillEllipse(button);
-            if (reading.recordArmed)
-            {
-                graphics.setColour(reading.recordLive ? theme::text : theme::red);
-                graphics.drawEllipse(button, 1.0f);
-            }
-        }
-        else
-        {
-            drawSlotChips(graphics, parts.slotRow, reading.slots);
-        }
+        auto button = parts.button.reduced(1.0f, 0.0f);
+        graphics.setColour(on ? (cell.reading.recordLive ? theme::red : juce::Colour(0xff8d2430)) : theme::button);
+        graphics.fillRoundedRectangle(button, 3.0f);
+        graphics.setColour(on ? juce::Colours::white : theme::fainter);
+        const float fontSize = juce::jlimit(8.0f, 11.0f, button.getWidth() * 0.34f);
+        graphics.setFont(juce::Font(juce::FontOptions(fontSize).withStyle("Bold")));
+        graphics.drawText(channelButtonText(cell.reading), button, juce::Justification::centred, false);
 
-        graphics.setColour(reading.hasInput ? theme::dim : theme::fainter);
-        graphics.setFont(juce::Font(juce::FontOptions(fontSize)));
-        graphics.drawText(juce::String(index + 1), parts.number, juce::Justification::centred, false);
+        graphics.setColour(on ? theme::text : theme::fainter);
+        graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 12.0f, width * 0.28f))));
+        auto number = cell.title.isNotEmpty() ? cell.title : juce::String(cell.channel + 1);
+        graphics.drawText(number, parts.number, juce::Justification::centred, true);
+
+        if (cell.selected)
+        {
+            graphics.setColour(theme::text);
+            graphics.drawRoundedRectangle(bounds.reduced(1.0f), 3.0f, 1.5f);
+        }
     }
 
-    for (int row = 0; row < layout_.rows; ++row)
+    if (haveBar)
     {
-        const int rowStart = row * layout_.columns;
-        const int rowCount = std::min(layout_.columns, count - rowStart);
-        if (rowCount <= 0)
-            continue;
-
-        const auto first = juce::Rectangle<float>(layout_.originX,
-                                                  static_cast<float>(row) * layout_.cellHeight,
-                                                  layout_.cellWidth,
-                                                  layout_.cellHeight);
-        const auto last = juce::Rectangle<float>(layout_.originX + static_cast<float>(rowCount - 1) * layout_.cellWidth,
-                                                 static_cast<float>(row) * layout_.cellHeight,
-                                                 layout_.cellWidth,
-                                                 layout_.cellHeight);
-        const auto firstBar = splitCell(first, showRecord_).bar;
-        const auto lastBar = splitCell(last, showRecord_).bar;
         const auto ticks = placeTicks(firstBar, showPeak_, rmsReferenceDb_);
         drawScaleLines(graphics, ticks, firstBar.getX(), lastBar.getRight());
-        drawScaleLabels(graphics, ticks, firstBar.getX(), lastBar.getRight());
     }
 }
 
 void MeterGrid::mouseDown(const juce::MouseEvent& event)
 {
-    layout_ = layoutFor(static_cast<int>(readings_.size()));
-    const auto hit = meterAt(event.position);
-    if (hit.channel < 0)
+    const int fit = fitWidth_ > 0 ? fitWidth_ : getWidth();
+    metrics_ = metricsFor(fit);
+    if (metrics_.contentWidth > static_cast<float>(fit))
+        metrics_.originX = 0.0f;
+
+    const auto hit = hitAt(event.position);
+    if (event.mods.isPopupMenu())
+    {
+        if (hit.header && onGroupMenu_ != nullptr)
+            onGroupMenu_(hit.group);
+        else if (hit.channel >= 0 && onChannelMenu_ != nullptr)
+            onChannelMenu_(hit.channel);
         return;
-    if (hit.record && onRecord_ != nullptr)
+    }
+
+    if (event.mods.isShiftDown() && hit.channel >= 0 && onSelect_ != nullptr)
+    {
+        onSelect_(hit.channel, true);
+        return;
+    }
+
+    if (hit.header && onGroupToggle_ != nullptr)
+        onGroupToggle_(hit.group);
+    else if (hit.record && onRecord_ != nullptr)
         onRecord_(hit.channel);
-    else if (hit.slot >= 0 && onSlot_ != nullptr)
-        onSlot_(hit.channel, hit.slot);
     else if (hit.clip && onClearClip_ != nullptr)
         onClearClip_(hit.channel);
+    else if (hit.channel >= 0 && onSelect_ != nullptr)
+        onSelect_(hit.channel, false);
 }
 
 } // namespace youhost

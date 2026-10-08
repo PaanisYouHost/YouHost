@@ -1,9 +1,12 @@
 #pragma once
 
+#include "ChannelEnable.h"
+#include "DisplayLayout.h"
 #include "DropoutDetect.h"
 #include "DropoutLog.h"
 #include "LatencyMath.h"
 #include "Passthrough.h"
+#include "X32Colours.h"
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
 #include "Recorder.h"
@@ -78,6 +81,29 @@ public:
     bool isRecordArmed(int channel) const;
     void setChannelName(int channel, const juce::String& name);
     juce::String channelName(int channel) const;
+
+    int channelColor(int channel) const;
+    void setChannelColor(int channel, int color);
+    int channelGroup(int channel) const;
+    void assignChannelsToGroup(const std::vector<int>& channels, int group);
+    void clearGroup(int group);
+    void setGroupName(int group, const juce::String& name);
+    void setGroupColor(int group, int color);
+    juce::String groupName(int group) const;
+    int groupColor(int group) const;
+    bool groupCollapsed(int group) const;
+    bool groupHasMembers(int group) const;
+    void toggleGroupCollapsed(int group);
+    void expandAllGroups();
+    void hideGroupedChannels();
+    bool groupsAreExpanded() const;
+    bool groupsAreHidden() const;
+    int displayRevision() const noexcept { return displayRevision_; }
+    std::vector<StripItem> displayStrips(int channelCount) const;
+
+    void selectChannel(int channel, bool extend);
+    bool isChannelSelected(int channel) const;
+    std::vector<int> selectedChannels() const;
     void transportRecord();
     void transportStop();
     void transportPlay();
@@ -128,6 +154,10 @@ private:
     void installOverloadListener(const juce::String& deviceName);
     void removeOverloadListener();
     const AudioThreadConfig& currentConfig() const;
+    void captureDisplay(SessionData& data) const;
+    void applyDisplay(const SessionData& data);
+    void storeChannelOn(int channel, bool on);
+    void bumpDisplay();
 
     AppSettings& settings_;
     juce::AudioDeviceManager deviceManager_;
@@ -171,6 +201,14 @@ private:
     juce::uint32 sessionDirtyAtMs_ = 0;
     std::function<void(bool, int)> meterRestoreHandler_;
     std::function<void(int)> pageRestoreHandler_;
+    std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
+    std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
+    std::array<int, kMaxChannels> channelColor_ {};
+    std::array<int, kMaxChannels> channelGroup_ {};
+    std::array<SessionGroup, kMaxDisplayGroups> groups_ {};
+    std::vector<int> selection_;
+    int selectionAnchor_ = 0;
+    int displayRevision_ = 0;
 
     juce::String deviceName_ { "No device" };
     juce::String openError_;

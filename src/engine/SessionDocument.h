@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DisplayLayout.h"
 #include "HostLimits.h"
 #include "TakePlan.h"
 
@@ -21,10 +22,20 @@ struct SessionSlot
     juce::MemoryBlock state;
 };
 
+struct SessionGroup
+{
+    bool used = false;
+    juce::String name;
+    int color = 0;
+    bool collapsed = false;
+};
+
 struct SessionChannel
 {
     bool excludeFromCompensation = false;
     bool recordEnabled = true;
+    int color = 0;
+    int group = -1;
     juce::String name;
     std::array<SessionSlot, kSlotsPerChannel> slots {};
 };
@@ -45,6 +56,7 @@ struct SessionData
     double sampleRate = 0.0;
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};
+    std::array<SessionGroup, kMaxDisplayGroups> groups {};
     std::vector<SessionTake> takes;
 };
 

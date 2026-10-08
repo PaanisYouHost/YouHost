@@ -89,6 +89,7 @@ AudioDeviceID findCoreAudioDevice(const juce::String& name)
 AudioEngine::AudioEngine(AppSettings& settings)
     : settings_(settings)
 {
+    channelGroup_.fill(-1);
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
@@ -264,6 +265,18 @@ void AudioEngine::resetDropouts()
     cpuSamples_.clear();
     dropoutOriginNs_ = steadyNowNs();
     lastCpuSampleNs_ = 0;
+
+    if (sessionFolder_ == juce::File())
+        return;
+
+    auto file = sessionFolder_.getChildFile("dropouts.csv");
+    if (! dropoutHeaderWritten_ || ! file.existsAsFile())
+    {
+        if (! file.existsAsFile())
+            file.appendText("wall_ms,steady_ns,timeline_sample,recording\n");
+        dropoutHeaderWritten_ = true;
+    }
+    file.appendText(juce::String(juce::Time::currentTimeMillis()) + ",reset,0,0\n");
 }
 
 void AudioEngine::noteDropout(int events)
@@ -362,6 +375,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                  kMaxChannels,
                                  numSamples);
 
+    const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
+    const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
+
     const bool playing = recorder_ != nullptr && numSamples > 0 && numSamples <= playbackMax_
                          && recorder_->processPlayback(playbackPtrs_.data(), numSamples);
     if (playing)
@@ -369,9 +385,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         AudioThreadConfig playConfig = config;
         for (int channel = 0; channel < kMaxChannels; ++channel)
             playConfig.routing.inputPacked[static_cast<std::size_t>(channel)] = channel;
-        // Every recorded channel, including ones with no plugin, is copied onto
-        // its matching USB output here. The rack then runs plugins and the
-        // alignment delay, so a dry channel is delayed up to the slowest chain.
+        // Every channel that is on, including ones with no plugin, is copied onto
+        // its matching USB output here. Off channels are silenced. The rack then
+        // runs plugins and the alignment delay, so a dry channel stays in time.
         processPassthrough(playbackPtrs_.data(),
                            kMaxChannels,
                            outputChannelData,
@@ -379,7 +395,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            numSamples,
                            playConfig,
                            strips_.data(),
-                           kMaxChannels);
+                           kMaxChannels,
+                           enabledLow,
+                           enabledHigh);
     }
     else
     {
@@ -390,12 +408,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            numSamples,
                            config,
                            strips_.data(),
-                           kMaxChannels);
+                           kMaxChannels,
+                           enabledLow,
+                           enabledHigh);
     }
 
-    // Plugins and the alignment delay run on the dry copy. No lock and no allocation.
+    // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
     if (rack_ != nullptr)
-        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing);
+        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh);
 
     if (recorder_ != nullptr)
         recorder_->noteCallback();
@@ -619,8 +639,13 @@ bool AudioEngine::isPluginEditorOpen(int channel, int slot) const
 
 void AudioEngine::setRecordArmed(int channel, bool armed)
 {
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
     if (recorder_ != nullptr)
         recorder_->setArmed(channel, armed);
+    storeChannelOn(channel, armed);
+    if (rack_ != nullptr)
+        rack_->setAudible(channel, armed);
 }
 
 bool AudioEngine::isRecordArmed(int channel) const
@@ -828,6 +853,7 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
         rack_->captureSession(data);
     if (recorder_ != nullptr)
         recorder_->captureSession(data);
+    captureDisplay(data);
     data.page = sessionPage_;
 
     const juce::File file(layout.sessionFile);
@@ -882,6 +908,8 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     for (int channel = 0; channel < kMaxChannels; ++channel)
         strips_[static_cast<std::size_t>(channel)].excludeFromCompensation =
             data.channels[static_cast<std::size_t>(channel)].excludeFromCompensation;
+
+    applyDisplay(data);
 
     if (microphoneGranted_ && data.device != nullptr)
     {
@@ -1055,6 +1083,258 @@ void AudioEngine::clearTimeline()
 juce::StringArray AudioEngine::recentSessions() const
 {
     return settings_.loadRecentSessions();
+}
+
+void AudioEngine::storeChannelOn(int channel, bool on)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    auto& word = channel < 64 ? channelOnLo_ : channelOnHi_;
+    const auto bit = 1ull << (channel & 63);
+    if (on)
+        word.fetch_or(bit, std::memory_order_relaxed);
+    else
+        word.fetch_and(~bit, std::memory_order_relaxed);
+}
+
+void AudioEngine::bumpDisplay()
+{
+    ++displayRevision_;
+    noteSessionEdit();
+}
+
+void AudioEngine::captureDisplay(SessionData& data) const
+{
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        data.channels[static_cast<std::size_t>(channel)].color = channelColor_[static_cast<std::size_t>(channel)];
+        data.channels[static_cast<std::size_t>(channel)].group = channelGroup_[static_cast<std::size_t>(channel)];
+    }
+    data.groups = groups_;
+}
+
+void AudioEngine::applyDisplay(const SessionData& data)
+{
+    std::array<bool, kMaxChannels> audible {};
+    std::uint64_t low = 0;
+    std::uint64_t high = 0;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto& source = data.channels[static_cast<std::size_t>(channel)];
+        channelColor_[static_cast<std::size_t>(channel)] = normaliseX32Colour(source.color);
+        const int group = source.group;
+        channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
+        audible[static_cast<std::size_t>(channel)] = source.recordEnabled;
+        setChannelOnBit(low, high, channel, source.recordEnabled);
+    }
+    channelOnLo_.store(low, std::memory_order_relaxed);
+    channelOnHi_.store(high, std::memory_order_relaxed);
+    groups_ = data.groups;
+    selection_.clear();
+    selectionAnchor_ = 0;
+    if (rack_ != nullptr)
+        rack_->setAudibleAll(audible);
+    ++displayRevision_;
+}
+
+int AudioEngine::channelColor(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return 0;
+    return channelColor_[static_cast<std::size_t>(channel)];
+}
+
+void AudioEngine::setChannelColor(int channel, int color)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    channelColor_[static_cast<std::size_t>(channel)] = normaliseX32Colour(color);
+    bumpDisplay();
+}
+
+int AudioEngine::channelGroup(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return -1;
+    return channelGroup_[static_cast<std::size_t>(channel)];
+}
+
+void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int group)
+{
+    if (group >= kMaxDisplayGroups)
+        return;
+    if (group >= 0)
+    {
+        auto& stored = groups_[static_cast<std::size_t>(group)];
+        stored.used = true;
+        if (stored.name.isEmpty())
+            stored.name = "Group " + juce::String(group + 1);
+    }
+
+    for (int channel : channels)
+    {
+        if (channel < 0 || channel >= kMaxChannels)
+            continue;
+        channelGroup_[static_cast<std::size_t>(channel)] = group;
+    }
+    bumpDisplay();
+}
+
+void AudioEngine::clearGroup(int group)
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        if (channelGroup_[static_cast<std::size_t>(channel)] == group)
+            channelGroup_[static_cast<std::size_t>(channel)] = -1;
+    groups_[static_cast<std::size_t>(group)] = {};
+    bumpDisplay();
+}
+
+void AudioEngine::setGroupName(int group, const juce::String& name)
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return;
+    auto& stored = groups_[static_cast<std::size_t>(group)];
+    stored.used = true;
+    const auto trimmed = name.trim().substring(0, 40);
+    stored.name = trimmed.isEmpty() ? "Group " + juce::String(group + 1) : trimmed;
+    bumpDisplay();
+}
+
+void AudioEngine::setGroupColor(int group, int color)
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return;
+    groups_[static_cast<std::size_t>(group)].used = true;
+    groups_[static_cast<std::size_t>(group)].color = normaliseX32Colour(color);
+    bumpDisplay();
+}
+
+juce::String AudioEngine::groupName(int group) const
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return {};
+    const auto& stored = groups_[static_cast<std::size_t>(group)];
+    if (stored.name.isNotEmpty())
+        return stored.name;
+    return "Group " + juce::String(group + 1);
+}
+
+int AudioEngine::groupColor(int group) const
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return 0;
+    return groups_[static_cast<std::size_t>(group)].color;
+}
+
+bool AudioEngine::groupCollapsed(int group) const
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return false;
+    return groups_[static_cast<std::size_t>(group)].collapsed;
+}
+
+bool AudioEngine::groupHasMembers(int group) const
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return false;
+    for (int channel : channelGroup_)
+        if (channel == group)
+            return true;
+    return false;
+}
+
+void AudioEngine::toggleGroupCollapsed(int group)
+{
+    if (group < 0 || group >= kMaxDisplayGroups)
+        return;
+    groups_[static_cast<std::size_t>(group)].collapsed = ! groups_[static_cast<std::size_t>(group)].collapsed;
+    bumpDisplay();
+}
+
+void AudioEngine::expandAllGroups()
+{
+    for (auto& group : groups_)
+        group.collapsed = false;
+    bumpDisplay();
+}
+
+void AudioEngine::hideGroupedChannels()
+{
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+        if (groupHasMembers(group))
+            groups_[static_cast<std::size_t>(group)].collapsed = true;
+    bumpDisplay();
+}
+
+bool AudioEngine::groupsAreExpanded() const
+{
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+        if (groupHasMembers(group) && groups_[static_cast<std::size_t>(group)].collapsed)
+            return false;
+    return true;
+}
+
+bool AudioEngine::groupsAreHidden() const
+{
+    bool any = false;
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+    {
+        if (! groupHasMembers(group))
+            continue;
+        any = true;
+        if (! groups_[static_cast<std::size_t>(group)].collapsed)
+            return false;
+    }
+    return any;
+}
+
+std::vector<StripItem> AudioEngine::displayStrips(int channelCount) const
+{
+    std::array<int, kMaxChannels> membership {};
+    std::array<bool, kMaxDisplayGroups> collapsed {};
+    membership.fill(-1);
+    const int count = std::clamp(channelCount, 0, kMaxChannels);
+    for (int channel = 0; channel < count; ++channel)
+        membership[static_cast<std::size_t>(channel)] = channelGroup_[static_cast<std::size_t>(channel)];
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+        collapsed[static_cast<std::size_t>(group)] = groups_[static_cast<std::size_t>(group)].collapsed;
+
+    std::vector<StripItem> items(static_cast<std::size_t>(count + kMaxDisplayGroups));
+    const int written = layoutChannelStrips(count, membership.data(), collapsed.data(), items.data(), static_cast<int>(items.size()));
+    if (written < static_cast<int>(items.size()))
+        items.resize(static_cast<std::size_t>(written));
+    return items;
+}
+
+void AudioEngine::selectChannel(int channel, bool extend)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    if (! extend)
+    {
+        selection_.clear();
+        selection_.push_back(channel);
+        selectionAnchor_ = channel;
+        return;
+    }
+
+    selection_.clear();
+    const int first = std::min(selectionAnchor_, channel);
+    const int last = std::max(selectionAnchor_, channel);
+    for (int index = first; index <= last; ++index)
+        selection_.push_back(index);
+}
+
+bool AudioEngine::isChannelSelected(int channel) const
+{
+    return std::find(selection_.begin(), selection_.end(), channel) != selection_.end();
+}
+
+std::vector<int> AudioEngine::selectedChannels() const
+{
+    return selection_;
 }
 
 } // namespace youhost

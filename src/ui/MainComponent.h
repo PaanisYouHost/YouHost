@@ -66,7 +66,7 @@ private:
     juce::TextButton nextButton_ { "Next" };
     juce::TextButton stopButton_ { "Stop" };
     juce::TextButton playButton_ { "Play" };
-    juce::TextButton recButton_ { "Rec" };
+    juce::TextButton recButton_ { "Record" };
     juce::Label timeLabel_;
     juce::Label modeLabel_;
     juce::TextButton helpButton_ { "?" };
@@ -79,12 +79,17 @@ private:
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
     juce::TextButton fileButton_ { "File" };
-    juce::TextButton dropoutsButton_ { "Dropouts" };
+    juce::TextButton dropoutsButton_ { "4  Dropouts" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "Latency" };
     juce::TextButton retryButton_ { "Retry" };
+    juce::TextButton allButton_ { "All" };
+    juce::TextButton hideButton_ { "Hide" };
     juce::Label latencyLabel_;
     juce::Viewport viewport_;
+    juce::Viewport meterViewport_;
+    MeterScaleRail leftScale_;
+    MeterScaleRail rightScale_;
     juce::AudioDeviceSelectorComponent deviceSelector_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
     std::unique_ptr<juce::FileChooser> fileChooser_;

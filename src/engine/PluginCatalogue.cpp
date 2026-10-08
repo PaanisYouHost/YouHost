@@ -187,7 +187,7 @@ void ScanWorker::run()
                 catch (...)
                 {
                     ok = false;
-                    reason = "The plugin threw while being scanned";
+                    reason = "The plugin failed while being scanned";
                 }
 
                 reply.setAttribute("ok", ok ? 1 : 0);

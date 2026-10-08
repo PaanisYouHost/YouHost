@@ -76,8 +76,8 @@ LatencyReadout::LatencyReadout()
     setOpaque(false);
     addAndMakeVisible(graphButton_);
     addAndMakeVisible(resetButton_);
-    graphButton_.setTooltip("Open the dropout timeline  (4 or D)");
-    resetButton_.setTooltip("Reset the dropout counter");
+    graphButton_.setTooltip("Open the dropout timeline (4 or D).");
+    resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
     graphButton_.setMouseClickGrabsKeyboardFocus(false);
     resetButton_.setMouseClickGrabsKeyboardFocus(false);
 }
@@ -104,7 +104,7 @@ void LatencyReadout::resized()
     auto row = layout.dropoutRow.toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
     row.removeFromRight(6);
-    graphButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
+    graphButton_.setBounds(row.removeFromRight(86).withSizeKeepingCentre(86, 22));
 }
 
 void LatencyReadout::paint(juce::Graphics& graphics)

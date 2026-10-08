@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChannelEnable.h"
 #include "Passthrough.h"
 #include "SessionDocument.h"
 
@@ -49,7 +50,12 @@ public:
     PluginRack(const PluginRack&) = delete;
     PluginRack& operator=(const PluginRack&) = delete;
 
-    void process(float* const* outputs, int numOutputs, int numSamples, const Routing& routing);
+    void process(float* const* outputs,
+                 int numOutputs,
+                 int numSamples,
+                 const Routing& routing,
+                 std::uint64_t enabledLow,
+                 std::uint64_t enabledHigh);
     void prepare(double sampleRate, int blockSize, const Routing& routing);
     void deviceStopped();
     void updateRouting(const Routing& routing);
@@ -65,6 +71,8 @@ public:
     void removePlugin(int channel, int slot);
     void setBypassed(int channel, int slot, bool bypassed);
     void setExcluded(int channel, bool excluded);
+    void setAudible(int channel, bool audible);
+    void setAudibleAll(const std::array<bool, kMaxChannels>& audible);
     void openEditor(int channel, int slot);
     void toggleEditor(int channel, int slot);
     bool isEditorOpen(int channel, int slot) const;
@@ -128,6 +136,7 @@ private:
     mutable std::mutex lifeLock_;
     std::array<std::array<SlotModel, kSlotsPerChannel>, kMaxChannels> model_ {};
     std::array<bool, kMaxChannels> excluded_ {};
+    std::array<bool, kMaxChannels> audible_ {};
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
     int alignmentSamples_ = 0;

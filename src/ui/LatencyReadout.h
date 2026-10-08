@@ -36,7 +36,7 @@ private:
     static CardLayout layoutCard(juce::Rectangle<float> bounds);
 
     LatencyNumbers numbers_;
-    juce::TextButton graphButton_ { "Graph" };
+    juce::TextButton graphButton_ { "Timeline" };
     juce::TextButton resetButton_ { "Reset" };
 };
 
