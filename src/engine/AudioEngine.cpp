@@ -1,5 +1,7 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "DeviceWatch.h"
+#include "HostLog.h"
 #include "MeterScale.h"
 #include "SessionDocument.h"
 #include "SessionFiles.h"
@@ -93,20 +95,27 @@ AudioEngine::AudioEngine(AppSettings& settings)
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
+    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)
+    {
+        notePluginTrace(channel, slot, phase, name, identifier);
+    });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
     wavBitDepth_ = settings_.loadWavBitDepth();
     recorder_->setWavBitDepth(wavBitDepth_);
     dropoutOriginNs_ = steadyNowNs();
+    playbackMax_ = 32768;
+    playbackScratch_.assign(static_cast<std::size_t>(kMaxChannels) * static_cast<std::size_t>(playbackMax_), 0.0f);
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        playbackPtrs_[static_cast<std::size_t>(channel)] = playbackScratch_.data()
+                                                           + static_cast<std::size_t>(channel * playbackMax_);
 }
 
 AudioEngine::~AudioEngine()
 {
-    deviceManager_.removeAudioCallback(this);
-    deviceManager_.removeChangeListener(this);
-    deviceManager_.closeAudioDevice();
+    prepareForQuit();
     recorder_.reset();
-    removeOverloadListener();
+    rack_.reset();
 }
 
 void AudioEngine::start(bool allowInput)
@@ -124,45 +133,99 @@ void AudioEngine::start(bool allowInput)
     std::unique_ptr<juce::XmlElement> saved;
     if (allowInput)
         saved = settings_.loadAudioSetup();
+    rememberSavedSetup(saved.get());
 
     const int inputs = allowInput ? kMaxChannels : 0;
     openError_ = deviceManager_.initialise(inputs, kMaxChannels, saved.get(), true);
+
+    if (allowInput && wantedName_.isNotEmpty())
+    {
+        auto* device = deviceManager_.getCurrentAudioDevice();
+        const auto opened = device != nullptr ? device->getName() : juce::String();
+        if (opened != wantedName_)
+        {
+            awaitingSavedDevice_ = true;
+            startupFallbackName_ = opened;
+            startupDeviceNote_ = "Saved device \"" + wantedName_ + "\" is not available. YouHost will open it when it appears.";
+        }
+    }
 
     deviceManager_.addChangeListener(this);
     deviceManager_.addAudioCallback(this);
     started_ = true;
     pollDeviceStats();
-    saveSetupIfAllowed();
+    if (! awaitingSavedDevice_)
+        saveSetupIfAllowed();
 }
 
 void AudioEngine::pollDeviceStats()
 {
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        if (! messages->isThisTheMessageThread())
+            return;
+
     if (deviceError_.exchange(false, std::memory_order_relaxed))
         openError_ = "The audio device reported an error.";
 
     auto* device = deviceManager_.getCurrentAudioDevice();
-    if (device == nullptr || ! device->isOpen())
+    const bool open = device != nullptr && device->isOpen();
+    if (reopenInProgress_)
     {
-        deviceOpen_.store(false, std::memory_order_relaxed);
-        cpuUsage_.store(0.0f, std::memory_order_relaxed);
-        deviceName_ = "No device";
+        if (open)
+            applyOpenDevice(*device, device->getName() == wantedName_);
         return;
     }
 
-    deviceName_ = device->getName();
-    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
-    const double rate = device->getCurrentSampleRate();
-    const int buffer = device->getCurrentBufferSizeSamples();
-    const int inputLatency = device->getInputLatencyInSamples();
-    const int outputLatency = device->getOutputLatencyInSamples();
-    const auto formula = formulaForDeviceType(device->getTypeName().toRawUTF8());
+    if (! open)
+    {
+        handleDeviceDown();
+        return;
+    }
 
-    sampleRate_.store(rate, std::memory_order_relaxed);
-    bufferSamples_.store(buffer, std::memory_order_relaxed);
-    inputLatencySamples_.store(inputLatency, std::memory_order_relaxed);
-    outputLatencySamples_.store(outputLatency, std::memory_order_relaxed);
-    formulaValue_.store(static_cast<int>(formula), std::memory_order_relaxed);
-    deviceOpen_.store(true, std::memory_order_relaxed);
+    juce::AudioDeviceManager::AudioDeviceSetup current;
+    deviceManager_.getAudioDeviceSetup(current);
+    const bool namedBySetup = device->getName() == current.outputDeviceName || device->getName() == current.inputDeviceName;
+    const bool userChoseThis = namedBySetup && wantedName_.isNotEmpty() && device->getName() != wantedName_ && ! awaitingSavedDevice_;
+    if (userChoseThis)
+    {
+        deviceLostBanner_ = false;
+        lossFinalized_ = false;
+        downSinceMs_ = 0;
+        deviceDown_.store(false, std::memory_order_relaxed);
+        wantedName_ = device->getName();
+        applyOpenDevice(*device, true);
+        return;
+    }
+
+    if (awaitingSavedDevice_ && device->getName() != wantedName_ && device->getName() != startupFallbackName_)
+    {
+        awaitingSavedDevice_ = false;
+        startupDeviceNote_.clear();
+        startupFallbackName_.clear();
+        deviceLostBanner_ = false;
+        lossFinalized_ = false;
+        downSinceMs_ = 0;
+        deviceDown_.store(false, std::memory_order_relaxed);
+        wantedName_ = device->getName();
+        applyOpenDevice(*device, true);
+        return;
+    }
+
+    if ((awaitingSavedDevice_ || deviceLostBanner_) && device->getName() != wantedName_)
+    {
+        applyOpenDevice(*device, false);
+        tryReopenWanted();
+        return;
+    }
+
+    deviceLostBanner_ = false;
+    lossFinalized_ = false;
+    awaitingSavedDevice_ = false;
+    startupDeviceNote_.clear();
+    startupFallbackName_.clear();
+    downSinceMs_ = 0;
+    deviceDown_.store(false, std::memory_order_relaxed);
+    applyOpenDevice(*device, true);
 }
 
 LatencyNumbers AudioEngine::latencyNumbers() const
@@ -423,7 +486,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     noteDropout(dropoutOverrunCount(steadyNowNs() - startedNs, config.expectedPeriodNs));
 }
 
-void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
+void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
 {
     for (auto& strip : strips_)
     {
@@ -433,26 +496,14 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         strip.meter.clipped.store(false, std::memory_order_relaxed);
     }
 
-    // The gap between the old stream and this one is not a dropout.
+    // The device thread only raises flags. Sample rate, plugin prepare, and the
+    // CoreAudio listener run on the message thread in pollDeviceStats.
     lastCallbackNs_.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
-
-    if (device != nullptr)
-    {
-        publishConfig(*device);
-        playbackMax_ = std::max(8192, device->getCurrentBufferSizeSamples());
-        playbackScratch_.assign(static_cast<std::size_t>(kMaxChannels * playbackMax_), 0.0f);
-        for (int channel = 0; channel < kMaxChannels; ++channel)
-            playbackPtrs_[static_cast<std::size_t>(channel)] = playbackScratch_.data()
-                                                               + static_cast<std::size_t>(channel * playbackMax_);
-        if (recorder_ != nullptr)
-            recorder_->setDevice(device->getCurrentSampleRate(), true);
-        if (rack_ != nullptr)
-            rack_->prepare(device->getCurrentSampleRate(),
-                           device->getCurrentBufferSizeSamples(),
-                           currentConfig().routing);
-        installOverloadListener(device->getName());
-    }
+    deviceStarting_.store(true, std::memory_order_release);
+    deviceDown_.store(false, std::memory_order_release);
+    if (recorder_ != nullptr)
+        recorder_->setCallbacksLive(true);
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -460,13 +511,11 @@ void AudioEngine::audioDeviceStopped()
     deviceOpen_.store(false, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
     if (recorder_ != nullptr)
-    {
-        recorder_->setDevice(0.0, false);
-        recorder_->stop();
-    }
+        recorder_->setCallbacksLive(false);
     if (rack_ != nullptr)
         rack_->deviceStopped();
-    removeOverloadListener();
+    if (! closingDevice_.load(std::memory_order_acquire))
+        deviceDown_.store(true, std::memory_order_release);
 }
 
 void AudioEngine::audioDeviceError(const juce::String& errorMessage)
@@ -546,24 +595,402 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     juce::ignoreUnused(source);
     pollDeviceStats();
-    saveSetupIfAllowed();
-    if (auto* device = deviceManager_.getCurrentAudioDevice())
+}
+
+void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
+{
+    deviceName_ = device.getName();
+    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
+
+    const double rate = device.getCurrentSampleRate();
+    const int buffer = device.getCurrentBufferSizeSamples();
+    const bool starting = deviceStarting_.exchange(false, std::memory_order_acq_rel);
+    const bool rateChanged = preparedRate_ <= 0.0 || std::abs(rate - preparedRate_) >= 1.0;
+    const bool bufferChanged = buffer != preparedBuffer_;
+    const auto inputMask = device.getActiveInputChannels();
+    const auto outputMask = device.getActiveOutputChannels();
+    const bool masksChanged = inputMask != lastInputMask_ || outputMask != lastOutputMask_;
+    const bool needPrepare = starting || rateChanged || bufferChanged;
+
+    if (needPrepare || masksChanged)
+        publishConfig(device);
+    else
     {
-        if (device->isOpen())
-        {
-            if (rack_ != nullptr)
-                rack_->updateRouting(routingFromDevice(*device));
-        }
+        sampleRate_.store(rate, std::memory_order_relaxed);
+        bufferSamples_.store(buffer, std::memory_order_relaxed);
+        inputLatencySamples_.store(device.getInputLatencyInSamples(), std::memory_order_relaxed);
+        outputLatencySamples_.store(device.getOutputLatencyInSamples(), std::memory_order_relaxed);
+        formulaValue_.store(static_cast<int>(formulaForDeviceType(device.getTypeName().toRawUTF8())),
+                            std::memory_order_relaxed);
+        deviceOpen_.store(true, std::memory_order_relaxed);
     }
+
+    if (needPrepare)
+    {
+        if (recorder_ != nullptr)
+            recorder_->setDevice(rate, true);
+        if (rack_ != nullptr)
+            rack_->prepare(rate, buffer > 0 ? buffer : 512, currentConfig().routing);
+        preparedRate_ = rate;
+        preparedBuffer_ = buffer;
+        installOverloadListener(device.getName());
+    }
+    else if (masksChanged && rack_ != nullptr)
+    {
+        rack_->updateRouting(currentConfig().routing);
+    }
+
+    lastInputMask_ = inputMask;
+    lastOutputMask_ = outputMask;
+    if (remember && device.getName() == wantedName_)
+    {
+        deviceLostBanner_ = false;
+        lossFinalized_ = false;
+        awaitingSavedDevice_ = false;
+        startupDeviceNote_.clear();
+        startupFallbackName_.clear();
+        downSinceMs_ = 0;
+    }
+    const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
+    rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
+
+    if (remember && (needPrepare || masksChanged || wantedName_ != device.getName()))
+    {
+        deviceManager_.getAudioDeviceSetup(wantedSetup_);
+        wantedName_ = device.getName();
+        saveSetupIfAllowed();
+    }
+}
+
+void AudioEngine::handleDeviceDown()
+{
+    deviceOpen_.store(false, std::memory_order_relaxed);
+    cpuUsage_.store(0.0f, std::memory_order_relaxed);
+    deviceName_ = "No device";
+    if (closingDevice_.load(std::memory_order_acquire) || ! started_)
+        return;
+
+    if (! deviceDown_.load(std::memory_order_acquire) && ! awaitingSavedDevice_)
+        return;
+
+    if (downSinceMs_ == 0)
+        downSinceMs_ = juce::Time::getMillisecondCounter();
+
+    const auto elapsed = juce::Time::getMillisecondCounter() - downSinceMs_;
+    if (deviceDown_.load(std::memory_order_acquire) && elapsed >= 400 && ! lossFinalized_)
+    {
+        lossFinalized_ = true;
+        deviceLostBanner_ = true;
+        removeOverloadListener();
+        if (recorder_ != nullptr)
+            recorder_->stop();
+    }
+
+    if (deviceLostBanner_ || awaitingSavedDevice_)
+        tryReopenWanted();
+}
+
+void AudioEngine::tryReopenWanted()
+{
+    if (reopenInProgress_ || closingDevice_.load(std::memory_order_acquire) || wantedName_.isEmpty())
+        return;
+
+    const auto now = juce::Time::getMillisecondCounter();
+    if (now - lastDeviceScanMs_ < 500)
+        return;
+    lastDeviceScanMs_ = now;
+    if (! deviceNameListed(wantedName_))
+        return;
+
+    reopenInProgress_ = true;
+    auto setup = wantedSetup_;
+    if (setup.outputDeviceName.isEmpty())
+        setup.outputDeviceName = wantedName_;
+    if (setup.inputDeviceName.isEmpty())
+        setup.inputDeviceName = wantedName_;
+    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+    reopenInProgress_ = false;
+    if (error.isNotEmpty())
+        openError_ = error;
+}
+
+bool AudioEngine::deviceNameListed(const juce::String& name)
+{
+    if (name.isEmpty())
+        return false;
+
+    for (auto* type : deviceManager_.getAvailableDeviceTypes())
+    {
+        if (type == nullptr)
+            continue;
+        type->scanForDevices();
+        if (type->getDeviceNames(false).contains(name) || type->getDeviceNames(true).contains(name))
+            return true;
+    }
+    return false;
+}
+
+void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
+{
+    if (saved == nullptr)
+        return;
+
+    const auto legacy = saved->getStringAttribute("audioDeviceName");
+    wantedSetup_.outputDeviceName = saved->getStringAttribute("audioOutputDeviceName");
+    wantedSetup_.inputDeviceName = saved->getStringAttribute("audioInputDeviceName");
+    if (wantedSetup_.outputDeviceName.isEmpty() && legacy.isNotEmpty())
+    {
+        wantedSetup_.outputDeviceName = legacy;
+        wantedSetup_.inputDeviceName = legacy;
+    }
+    wantedSetup_.bufferSize = saved->getIntAttribute("audioDeviceBufferSize", wantedSetup_.bufferSize);
+    wantedSetup_.sampleRate = saved->getDoubleAttribute("audioDeviceRate", wantedSetup_.sampleRate);
+    if (saved->hasAttribute("audioDeviceInChans"))
+    {
+        wantedSetup_.inputChannels.parseString(saved->getStringAttribute("audioDeviceInChans"), 2);
+        wantedSetup_.useDefaultInputChannels = false;
+    }
+    if (saved->hasAttribute("audioDeviceOutChans"))
+    {
+        wantedSetup_.outputChannels.parseString(saved->getStringAttribute("audioDeviceOutChans"), 2);
+        wantedSetup_.useDefaultOutputChannels = false;
+    }
+    wantedName_ = wantedSetup_.outputDeviceName.isNotEmpty() ? wantedSetup_.outputDeviceName
+                                                             : wantedSetup_.inputDeviceName;
 }
 
 void AudioEngine::saveSetupIfAllowed()
 {
-    if (! persistSetup_ || deviceManager_.getCurrentAudioDevice() == nullptr)
+    if (! persistSetup_ || awaitingSavedDevice_ || deviceLostBanner_ || deviceManager_.getCurrentAudioDevice() == nullptr)
         return;
 
     if (auto xml = deviceManager_.createStateXml())
         settings_.saveAudioSetup(xml.get());
+}
+
+bool AudioEngine::takeUncleanShutdown()
+{
+    journal_ = loadCrashJournal(settings_);
+    const bool dirty = ! journal_.clean && ! journal_.marks.empty();
+    if (! dirty)
+    {
+        journal_.clean = false;
+        journal_.marks.clear();
+        storeCrashJournal(settings_, journal_);
+        appendHostLog(settings_, "start");
+        return false;
+    }
+
+    crashChoicePending_ = true;
+    appendHostLog(settings_, "unclean start");
+    return true;
+}
+
+juce::String AudioEngine::uncleanPluginMessage() const
+{
+    juce::String text;
+    for (const auto& mark : journal_.marks)
+    {
+        const auto name = mark.name.empty() ? std::string("A plugin") : mark.name;
+        text << juce::String::fromUTF8(name.c_str()) << " may have crashed YouHost.\n";
+    }
+    text << "\nLeave them off, or load them anyway. Suspicious plugins are listed in the scanner.\n";
+    text << "Crash notes are in youhost.log and crash-journal.txt in the YouHost support folder.";
+    return text;
+}
+
+void AudioEngine::acceptCrashChoice(bool leaveOff)
+{
+    juce::StringArray blocked;
+    for (const auto& mark : journal_.marks)
+    {
+        if (mark.identifier.empty())
+            continue;
+        const auto identifier = juce::String::fromUTF8(mark.identifier.c_str());
+        blocked.addIfNotAlreadyThere(identifier);
+        settings_.addSuspiciousPlugin(identifier);
+    }
+
+    if (leaveOff && rack_ != nullptr)
+        rack_->setBlockedIdentifiers(blocked);
+
+    journal_.marks.clear();
+    journal_.clean = false;
+    crashChoicePending_ = false;
+    storeCrashJournal(settings_, journal_);
+    appendHostLog(settings_, leaveOff ? "left crashed plugins off" : "load crashed plugins anyway");
+}
+
+void AudioEngine::prepareForQuit()
+{
+    if (quitPrepared_)
+        return;
+    quitPrepared_ = true;
+    closingDevice_.store(true, std::memory_order_release);
+    deviceManager_.removeAudioCallback(this);
+    deviceManager_.removeChangeListener(this);
+    deviceManager_.closeAudioDevice();
+    removeOverloadListener();
+    if (recorder_ != nullptr)
+        recorder_->stop();
+    if (rack_ != nullptr)
+        rack_->releaseForQuit();
+
+    if (! crashChoicePending_)
+    {
+        journal_.clean = true;
+        journal_.marks.clear();
+        storeCrashJournal(settings_, journal_);
+    }
+    appendHostLog(settings_, "quit");
+}
+
+void AudioEngine::notePluginTrace(int channel,
+                                  int slot,
+                                  const juce::String& phase,
+                                  const juce::String& name,
+                                  const juce::String& identifier)
+{
+    if (quitPrepared_)
+        return;
+
+    if (phase == "unload")
+        eraseCrashMark(journal_, channel, slot);
+    else
+    {
+        CrashMark mark;
+        mark.phase = phase.toStdString();
+        mark.channel = channel;
+        mark.slot = slot;
+        mark.name = name.toStdString();
+        mark.identifier = identifier.toStdString();
+        upsertCrashMark(journal_, mark);
+    }
+
+    journal_.clean = false;
+    storeCrashJournal(settings_, journal_);
+    appendHostLog(settings_,
+                  phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name);
+}
+
+void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const
+{
+    if (fn == nullptr || recorder_ == nullptr)
+        return;
+
+    recorder_->visitRecordedTakes([this, &fn](const RecordedTakeView* takes, int count, const RecordedTakeView* live)
+    {
+        std::array<bool, kMaxChannels> heard {};
+        auto markHeard = [&heard](const RecordedTakeView* view)
+        {
+            if (view == nullptr)
+                return;
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                const auto* peaks = view->peaks[index];
+                if (view->recorded[index] || (peaks != nullptr && ! peaks->empty()))
+                    heard[index] = true;
+            }
+        };
+        for (int index = 0; index < count; ++index)
+            markHeard(takes + index);
+        markHeard(live);
+
+        struct LaneDesc
+        {
+            bool group = false;
+            int number = 0;
+            int color = 0;
+            std::string title;
+            std::vector<int> members;
+        };
+
+        std::vector<LaneDesc> descriptions;
+        std::array<bool, kMaxDisplayGroups> groupDone {};
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            if (! heard[static_cast<std::size_t>(channel)])
+                continue;
+            const int group = channelGroup_[static_cast<std::size_t>(channel)];
+            if (group >= 0 && group < kMaxDisplayGroups && groups_[static_cast<std::size_t>(group)].collapsed)
+            {
+                if (groupDone[static_cast<std::size_t>(group)])
+                    continue;
+                groupDone[static_cast<std::size_t>(group)] = true;
+                LaneDesc description;
+                description.group = true;
+                description.color = groups_[static_cast<std::size_t>(group)].color;
+                const auto name = groups_[static_cast<std::size_t>(group)].name;
+                description.title = name.isNotEmpty() ? name.toStdString() : "Group " + std::to_string(group + 1);
+                for (int member = 0; member < kMaxChannels; ++member)
+                    if (channelGroup_[static_cast<std::size_t>(member)] == group && heard[static_cast<std::size_t>(member)])
+                        description.members.push_back(member);
+                descriptions.push_back(std::move(description));
+                continue;
+            }
+
+            LaneDesc description;
+            description.number = channel + 1;
+            description.color = channelColor_[static_cast<std::size_t>(channel)];
+            description.title = std::to_string(channel + 1);
+            description.members.push_back(channel);
+            descriptions.push_back(std::move(description));
+        }
+
+        std::vector<std::vector<WavePeak>> ownedMerges;
+        ownedMerges.reserve(descriptions.size() * static_cast<std::size_t>(count + 1));
+        std::vector<TimelineLaneView> lanes;
+        lanes.reserve(descriptions.size());
+
+        auto addRegion = [&](TimelineLaneView& lane, const LaneDesc& description, const RecordedTakeView& take)
+        {
+            bool any = false;
+            for (const int member : description.members)
+            {
+                const auto index = static_cast<std::size_t>(member);
+                const auto* peaks = take.peaks[index];
+                if (take.recorded[index] || (peaks != nullptr && ! peaks->empty()))
+                    any = true;
+            }
+            if (! any)
+                return;
+
+            TimelineRegionView region;
+            region.start = take.start;
+            region.length = take.length;
+            if (description.members.size() == 1)
+            {
+                region.peaks = take.peaks[static_cast<std::size_t>(description.members.front())];
+            }
+            else
+            {
+                std::vector<const std::vector<WavePeak>*> layers;
+                for (const int member : description.members)
+                    if (take.peaks[static_cast<std::size_t>(member)] != nullptr)
+                        layers.push_back(take.peaks[static_cast<std::size_t>(member)]);
+                ownedMerges.push_back(mergePeakLayers(layers));
+                region.peaks = &ownedMerges.back();
+            }
+            lane.regions.push_back(region);
+        };
+
+        for (const auto& description : descriptions)
+        {
+            TimelineLaneView lane;
+            lane.number = description.number;
+            lane.color = description.color;
+            lane.group = description.group;
+            lane.title = description.title;
+            for (int index = 0; index < count; ++index)
+                addRegion(lane, description, takes[index]);
+            if (live != nullptr)
+                addRegion(lane, description, *live);
+            lanes.push_back(std::move(lane));
+        }
+
+        fn(lanes);
+    });
 }
 
 Routing AudioEngine::routingFromDevice(const juce::AudioIODevice& device) const

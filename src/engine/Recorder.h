@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace youhost
@@ -28,6 +29,14 @@ struct TakeDraw
     TakeSpan span;
     std::vector<WavePeak> peaks;
     std::array<juce::String, kMaxChannels> files {};
+};
+
+struct RecordedTakeView
+{
+    std::int64_t start = 0;
+    std::int64_t length = 0;
+    std::array<const std::vector<WavePeak>*, kMaxChannels> peaks {};
+    std::array<bool, kMaxChannels> recorded {};
 };
 
 struct TransportView
@@ -90,6 +99,9 @@ public:
     void clearTakes();
 
     TransportView view() const;
+    void visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const;
+    double timelineSampleRate() const noexcept;
+    void setCallbacksLive(bool live) noexcept;
     void captureSession(SessionData& data) const;
     void restoreSession(const SessionData& data, const juce::File& audioFolder);
 
@@ -109,6 +121,7 @@ private:
         std::int64_t length = 0;
         std::array<juce::String, kMaxChannels> files {};
         std::vector<WavePeak> peaks;
+        std::array<std::vector<WavePeak>, kMaxChannels> channelPeaks;
     };
 
     struct OpenWriter
@@ -153,6 +166,10 @@ private:
     std::array<bool, kMaxChannels> armed_ {};
     std::array<juce::String, kMaxChannels> names_ {};
     std::vector<WavePeak> livePeaks_;
+    std::array<std::vector<WavePeak>, kMaxChannels> liveChannelPeaks_;
+    std::array<float, kMaxChannels> channelBucketLow_ {};
+    std::array<float, kMaxChannels> channelBucketHigh_ {};
+    std::array<int, kMaxChannels> channelBucketCount_ {};
     juce::String status_;
     std::function<void()> dirty_;
 

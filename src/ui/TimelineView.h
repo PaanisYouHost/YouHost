@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/Recorder.h"
+#include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -23,34 +24,59 @@ public:
     TimelineView();
     ~TimelineView() override;
 
+    using LaneProvider = std::function<void(const std::function<void(const std::vector<TimelineLaneView>&)>&)>;
+
     void setTransport(const TransportView& view);
+    void setLaneProvider(LaneProvider provider);
     void setLocateHandler(std::function<void(std::int64_t)> handler);
+    void setHeightHandler(std::function<void(int)> handler);
     void zoomIn();
     void zoomOut();
+    void fitAll();
+    void verticalZoomIn();
+    void verticalZoomOut();
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
 
 private:
     void scrollBarMoved(juce::ScrollBar* bar, double newRangeStart) override;
     std::int64_t fullSpan() const;
     std::int64_t visibleSamples() const;
     void zoomBy(int delta);
+    void verticalZoomBy(int delta);
     void syncScroll();
     juce::Rectangle<float> waveformArea() const;
     std::int64_t sampleAt(float x) const;
     void locateAt(float x);
+    int laneCount() const;
+    int lanesShown() const;
+    void clampLaneScroll();
 
     TransportView view_;
+    LaneProvider laneProvider_;
     std::function<void(std::int64_t)> onLocate_;
+    std::function<void(int)> onHeight_;
+    int knownLanes_ = 0;
     int zoomStep_ = 0;
+    int verticalStep_ = 0;
+    int laneScroll_ = 0;
     std::int64_t viewStart_ = 0;
     bool updatingScroll_ = false;
+    bool draggingHeight_ = false;
+    int dragStartY_ = 0;
+    int dragStartHeight_ = 0;
     juce::ScrollBar scroll_ { false };
+    juce::ScrollBar laneScrollBar_ { true };
     juce::TextButton zoomOutButton_ { "-" };
     juce::TextButton zoomInButton_ { "+" };
+    juce::TextButton verticalOutButton_ { "v-" };
+    juce::TextButton verticalInButton_ { "v+" };
+    juce::TextButton fitButton_ { "Fit" };
 };
 
 } // namespace youhost

@@ -4,6 +4,7 @@
 
 #include <juce_data_structures/juce_data_structures.h>
 
+#include <algorithm>
 #include <memory>
 
 namespace youhost
@@ -272,6 +273,45 @@ public:
         if (auto* settings = properties_.getUserSettings())
         {
             settings->setValue("sessionParentFolder", folder);
+            settings->saveIfNeeded();
+        }
+    }
+
+    int loadTimelineHeight()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return std::max(0, settings->getIntValue("timelineHeight", 0));
+        return 0;
+    }
+
+    void saveTimelineHeight(int height)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("timelineHeight", std::max(0, height));
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::StringArray loadSuspiciousPlugins()
+    {
+        juce::StringArray lines;
+        if (auto* settings = properties_.getUserSettings())
+            lines.addLines(settings->getValue("suspiciousPlugins"));
+        lines.removeEmptyStrings();
+        return lines;
+    }
+
+    void addSuspiciousPlugin(const juce::String& identifier)
+    {
+        if (identifier.isEmpty())
+            return;
+        auto lines = loadSuspiciousPlugins();
+        if (! lines.contains(identifier))
+            lines.add(identifier);
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("suspiciousPlugins", lines.joinIntoString("\n"));
             settings->saveIfNeeded();
         }
     }

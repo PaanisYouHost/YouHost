@@ -17,6 +17,8 @@
 namespace youhost
 {
 
+class BitDepthSlot;
+
 class MainComponent : public juce::Component,
                       private juce::Timer,
                       private juce::ApplicationCommandTarget
@@ -97,8 +99,6 @@ private:
     juce::TextButton peakButton_ { "Peak" };
     juce::Label referenceLabel_ { {}, "RMS 0" };
     juce::ComboBox referenceBox_;
-    juce::Label bitDepthLabel_ { {}, "WAV" };
-    juce::ComboBox bitDepthBox_;
     juce::TextButton clearClipsButton_ { "Clear clips" };
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
@@ -116,6 +116,7 @@ private:
     MeterScaleRail leftScale_;
     MeterScaleRail rightScale_;
     juce::AudioDeviceSelectorComponent deviceSelector_;
+    std::unique_ptr<BitDepthSlot> bitDepthSlot_;
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
@@ -134,6 +135,8 @@ private:
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> bannerArea_;
+    juce::Rectangle<int> deviceLostArea_;
+    int timelineHeight_ = 0;
     juce::Rectangle<int> hintArea_;
     juce::Rectangle<int> bridgeArea_;
     juce::Rectangle<int> laidOutBridge_;

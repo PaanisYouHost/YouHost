@@ -12,6 +12,9 @@
 #include "engine/SessionFiles.h"
 #include "engine/TakeImport.h"
 #include "engine/TakePlan.h"
+#include "engine/CrashJournal.h"
+#include "engine/DeviceWatch.h"
+#include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
 #include <cmath>
@@ -587,7 +590,15 @@ void testTimelineZoom()
 {
     CHECK(youhost::zoomVisibleSamples(48000, 0) == 48000);
     CHECK(youhost::zoomVisibleSamples(48000, 1) == 24000);
-    CHECK(youhost::clampZoomStep(99) == youhost::kMaxTimelineZoomStep);
+    const auto hour = static_cast<std::int64_t>(48000) * 3600;
+    CHECK(youhost::clampZoomStep(99, hour) == youhost::maxZoomStepForSpan(hour));
+    CHECK(youhost::maxZoomStepForSpan(hour) > 10);
+    CHECK(youhost::zoomVisibleSamples(hour, 0) == hour);
+    CHECK(youhost::zoomVisibleSamples(hour, youhost::maxZoomStepForSpan(hour)) == youhost::kMinTimelineZoomSamples);
+    CHECK(youhost::lanesShownForVerticalStep(128, 0) == 128);
+    CHECK(youhost::lanesShownForVerticalStep(128, 100) == 1);
+    CHECK(youhost::laneNumberVisible(12.0f));
+    CHECK(! youhost::laneNumberVisible(11.0f));
     const auto start = youhost::viewStartKeepingPlayhead(1000, 0, 1000, 100, 400);
     CHECK(start <= 400);
     CHECK(start + 100 > 400);
@@ -596,6 +607,55 @@ void testTimelineZoom()
     CHECK(followed > 0);
     CHECK(5000 >= followed);
     CHECK(5000 < followed + 1000);
+}
+
+void testCrashJournal()
+{
+    youhost::CrashJournal journal;
+    CHECK(youhost::readCrashJournal("").clean);
+    youhost::CrashMark mark;
+    mark.phase = "loading";
+    mark.channel = 3;
+    mark.slot = 1;
+    mark.name = "VM Transient Shaper";
+    mark.identifier = "au.vm";
+    youhost::upsertCrashMark(journal, mark);
+    CHECK(! journal.clean);
+    const auto text = youhost::writeCrashJournal(journal);
+    const auto back = youhost::readCrashJournal(text);
+    CHECK(! back.clean);
+    CHECK(back.marks.size() == 1);
+    CHECK(back.marks[0].name == "VM Transient Shaper");
+    CHECK(back.marks[0].channel == 3);
+    auto cleared = back;
+    youhost::eraseCrashMark(cleared, 3, 1);
+    CHECK(cleared.marks.empty());
+    const auto dirty = youhost::readCrashJournal("mark\tactive\t1\t0\tName\tid\n");
+    CHECK(! dirty.clean);
+    CHECK(dirty.marks.size() == 1);
+}
+
+void testDeviceWatch()
+{
+    CHECK(! youhost::sampleRatesDiffer(48000.0, 48000.0));
+    CHECK(youhost::sampleRatesDiffer(48000.0, 44100.0));
+    CHECK(! youhost::sampleRatesDiffer(0.0, 48000.0));
+    CHECK(youhost::sampleRateWarningText(44100.0, 48000.0).find("44100") != std::string::npos);
+    CHECK(youhost::usableChannelCount(256) == 128);
+    CHECK(youhost::usableChannelCount(48) == 48);
+    CHECK(youhost::usableChannelCount(-1) == 0);
+}
+
+void testMergePeaks()
+{
+    std::vector<youhost::WavePeak> first { { -0.2f, 0.2f }, { -0.1f, 0.4f } };
+    std::vector<youhost::WavePeak> second { { -0.5f, 0.1f } };
+    std::vector<const std::vector<youhost::WavePeak>*> layers { &first, &second };
+    const auto merged = youhost::mergePeakLayers(layers);
+    CHECK(merged.size() == 2);
+    CHECK(near(merged[0].low, -0.5f, 0.0001f));
+    CHECK(near(merged[0].high, 0.2f, 0.0001f));
+    CHECK(near(merged[1].high, 0.4f, 0.0001f));
 }
 
 void testRaiseUnit()
@@ -623,6 +683,9 @@ int main()
     testDropoutWindow();
     testSessionLayout();
     testTimelineZoom();
+    testCrashJournal();
+    testDeviceWatch();
+    testMergePeaks();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
     testTakePlan();

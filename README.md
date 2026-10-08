@@ -77,11 +77,22 @@ These work from the recorder and plugin pages. They do not fire while a text fie
 | Cmd+S | Save the session |
 | Cmd+Shift+S | Save a copy of the session folder |
 | T | Zoom the timeline in |
-| R | Zoom the timeline out |
+| R | Zoom the timeline out until the whole session fits |
+| Option+R | Fit every take in the timeline |
+| Cmd+[ | Taller timeline lanes |
+| Cmd+] | Shorter timeline lanes |
 | Left / Right | Previous or next take marker |
 | Shift+Left / Shift+Right | Move the playhead 5 seconds |
 
-Cmd+Space only reaches YouHost if macOS Spotlight is not using that shortcut. Shift+Space does the same as Space. R zooms the timeline out.
+Cmd+Space only reaches YouHost if macOS Spotlight is not using that shortcut. Shift+Space does the same as Space. R zooms the timeline out until every take fits. Option+R, or the Fit button, jumps straight there. v+ and v- (or Cmd+[ and Cmd+]) zoom the lanes taller and shorter. The plain scroll wheel moves through the lanes. Drag the bottom edge of the timeline to change its height.
+
+The timeline draws one lane per recorded channel. A folded group is one lane. Lane numbers show only when the lane is tall enough to read. The channel color stays on the waveform at every height, including a one-pixel line. Peaks are built on the disk thread.
+
+Bit depth sits between Sample rate and Audio buffer size, in Audio setup and in the startup window. The choice applies to the next take.
+
+Network interfaces (AVB, Waves SoundGrid, Dante Virtual Soundcard or a Dante card, Behringer WING USB) use the same CoreAudio path. YouHost asks for up to 128 inputs and 128 outputs; channels past 128 are ignored, and input and output counts can differ. The device is remembered by name. If it is missing at startup, the startup window says it is not available and YouHost opens it when it appears. If it disappears during a session, recording stops cleanly, the WAV headers are flushed, a red **Audio device lost** banner is shown, and the same device is opened again when it comes back. REC/OFF and loaded plugins stay as they were. A sample-rate or buffer-size change re-prepares the plugins on the message thread and warns when the device rate does not match the session. Playback is not resampled.
+
+If a plugin takes YouHost down, the next launch names it and offers **Leave them off** or **Load them anyway**. Those plugins are listed under Suspicious in the scanner. The notes are `youhost.log` and `crash-journal.txt` in `~/Library/Application Support/Ambient Audio/YouHost`. A plugin that needs a sidechain, or a layout that is not mono or stereo, is not loaded.
 
 **Round trip on macOS.** JUCE 9's CoreAudio backend includes the hardware buffer in *both* the input latency and the output latency. Adding those two figures double-counts one buffer. YouHost shows the raw driver numbers, and the large round-trip figure is input + output − one buffer + compensation. Compensation here is the slowest included plugin chain, because that is how much later the desk hears the outputs. On ALSA the JUCE figure already omits one period, so the round trip adds the buffer back. This is still the driver's story plus the plugin delay, not a cable measurement.
 

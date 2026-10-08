@@ -46,6 +46,7 @@ struct SessionTake
     std::int64_t lengthSamples = 0;
     std::array<juce::String, kMaxChannels> files {};
     std::vector<WavePeak> peaks;
+    std::array<std::vector<WavePeak>, kMaxChannels> channelPeaks {};
 };
 
 struct SessionData

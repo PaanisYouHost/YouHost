@@ -6,31 +6,88 @@
 namespace youhost
 {
 
-inline constexpr int kMaxTimelineZoomStep = 10;
+// Safety cap. The real limit is the span: zoom out always reaches the whole session,
+// and zoom in stops at kMinTimelineZoomSamples.
+inline constexpr int kMaxTimelineZoomStep = 40;
+inline constexpr std::int64_t kMinTimelineZoomSamples = 2048;
+inline constexpr float kLaneLabelMinPx = 12.0f;
 
-inline int clampZoomStep(int step) noexcept
+inline int maxZoomStepForSpan(std::int64_t span) noexcept
 {
-    if (step < 0)
-        return 0;
-    if (step > kMaxTimelineZoomStep)
-        return kMaxTimelineZoomStep;
+    if (span < 1)
+        span = 1;
+    int step = 0;
+    std::int64_t visible = span;
+    while (visible > kMinTimelineZoomSamples && step < kMaxTimelineZoomStep)
+    {
+        visible /= 2;
+        ++step;
+    }
     return step;
 }
 
-// Step 0 shows the whole span. Each step halves it, Pro Tools style.
+inline int clampZoomStep(int step, std::int64_t span) noexcept
+{
+    if (step < 0)
+        return 0;
+    const int maxStep = maxZoomStepForSpan(span);
+    if (step > maxStep)
+        return maxStep;
+    return step;
+}
+
+// Step 0 shows the whole span. Each step halves it, down to a short detail view.
 inline std::int64_t zoomVisibleSamples(std::int64_t span, int step) noexcept
 {
     if (span < 1)
         span = 1;
-    step = clampZoomStep(step);
+    step = clampZoomStep(step, span);
     std::int64_t visible = span;
     for (int index = 0; index < step; ++index)
     {
-        if (visible <= 1)
-            return 1;
+        if (visible <= kMinTimelineZoomSamples)
+            break;
         visible /= 2;
     }
+    const auto floor = std::min(span, kMinTimelineZoomSamples);
+    if (visible < floor)
+        visible = floor;
     return std::max<std::int64_t>(visible, 1);
+}
+
+// Vertical zoom. Step 0 fits every lane. Each step shows fewer, taller lanes.
+inline int lanesShownForVerticalStep(int totalLanes, int step) noexcept
+{
+    if (totalLanes < 1)
+        totalLanes = 1;
+    if (step < 0)
+        step = 0;
+    int shown = totalLanes;
+    while (step > 0 && shown > 1)
+    {
+        shown = std::max(1, (shown + 1) / 2);
+        --step;
+    }
+    return shown;
+}
+
+inline int maxVerticalZoomStep(int totalLanes) noexcept
+{
+    if (totalLanes < 1)
+        return 0;
+    int step = 0;
+    int shown = totalLanes;
+    while (shown > 1 && step < 16)
+    {
+        shown = std::max(1, (shown + 1) / 2);
+        ++step;
+    }
+    return step;
+}
+
+inline bool laneNumberVisible(float heightPx) noexcept
+{
+    return heightPx >= kLaneLabelMinPx;
 }
 
 // Keep the playhead at the same fraction of the view, then clamp so it stays on screen.

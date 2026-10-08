@@ -98,8 +98,29 @@ void YouHostApplication::initialise(const juce::String& commandLine)
 
 void YouHostApplication::openWindow()
 {
-    if (mainWindow_ == nullptr && engine_ != nullptr && settings_ != nullptr)
-        mainWindow_ = std::make_unique<MainWindow>(*engine_, *settings_);
+    if (mainWindow_ != nullptr || engine_ == nullptr || settings_ == nullptr)
+        return;
+
+    if (engine_->takeUncleanShutdown())
+    {
+        juce::AlertWindow::showOkCancelBox(
+            juce::AlertWindow::WarningIcon,
+            "A plugin may have crashed YouHost",
+            engine_->uncleanPluginMessage(),
+            "Leave them off",
+            "Load them anyway",
+            nullptr,
+            juce::ModalCallbackFunction::create([this](int result)
+            {
+                if (engine_ != nullptr)
+                    engine_->acceptCrashChoice(result == 1);
+                if (mainWindow_ == nullptr && engine_ != nullptr && settings_ != nullptr)
+                    mainWindow_ = std::make_unique<MainWindow>(*engine_, *settings_);
+            }));
+        return;
+    }
+
+    mainWindow_ = std::make_unique<MainWindow>(*engine_, *settings_);
 }
 
 void YouHostApplication::shutdown()
@@ -110,6 +131,8 @@ void YouHostApplication::shutdown()
         return;
     }
 
+    if (engine_ != nullptr)
+        engine_->prepareForQuit();
     mainWindow_.reset();
     engine_.reset();
     settings_.reset();
@@ -119,6 +142,9 @@ void YouHostApplication::shutdown()
 
 void YouHostApplication::systemRequestedQuit()
 {
+    if (engine_ != nullptr)
+        engine_->prepareForQuit();
+    mainWindow_.reset();
     quit();
 }
 

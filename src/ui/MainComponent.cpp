@@ -11,6 +11,58 @@
 
 namespace youhost
 {
+
+class BitDepthSlot : public juce::Component
+{
+public:
+    BitDepthSlot()
+    {
+        setComponentID("youhost-bit-depth");
+        addAndMakeVisible(label_);
+        addAndMakeVisible(box_);
+        label_.setText("Bit depth", juce::dontSendNotification);
+        label_.setJustificationType(juce::Justification::centredLeft);
+        label_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        box_.addItem("16-bit", 16);
+        box_.addItem("24-bit", 24);
+        box_.addItem("32-bit float", 32);
+        box_.setTooltip("Bit depth for the next take. 24-bit is the default. 32-bit is float. A take that is already recording keeps its depth.");
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(4, 2);
+        label_.setBounds(area.removeFromLeft(juce::jmin(120, area.getWidth() / 3)));
+        box_.setBounds(area);
+    }
+
+    int selectedId() const { return box_.getSelectedId(); }
+
+    void setSelectedId(int id)
+    {
+        if (box_.getSelectedId() != id)
+            box_.setSelectedId(id, juce::dontSendNotification);
+    }
+
+    std::function<void(int)> onChange;
+
+private:
+    void changeCallback()
+    {
+        if (onChange != nullptr && box_.getSelectedId() > 0)
+            onChange(box_.getSelectedId());
+    }
+
+    juce::Label label_;
+    juce::ComboBox box_;
+
+public:
+    void bind()
+    {
+        box_.onChange = [this] { changeCallback(); };
+    }
+};
+
 namespace
 {
 
@@ -24,7 +76,10 @@ constexpr const char* kShortcutHelp =
     "Left / Right  Previous or next take\n"
     "Shift+Left / Shift+Right  Move 5 seconds\n"
     "T  Zoom the timeline in\n"
-    "R  Zoom the timeline out\n"
+    "R  Zoom the timeline out until the whole session fits\n"
+    "Option+R  Fit the whole session\n"
+    "Cmd+[  Taller timeline lanes\n"
+    "Cmd+]  Shorter timeline lanes\n"
     "Cmd+S  Save\n"
     "Cmd+Shift+S  Save a copy of the session folder\n"
     "Option-drag  Copy a plugin and its settings\n\n"
@@ -32,7 +87,10 @@ constexpr const char* kShortcutHelp =
     "Play while not armed is the virtual soundcheck. Stop turns record arm off.\n"
     "Cmd+Space records immediately. Cmd+S also works from the File menu and while a plugin window is in front.\n"
     "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
-    "The + and - buttons at the bottom right of the timeline zoom the same way as T and R.\n"
+    "The + and - buttons zoom the same way as T and R. Fit and Option+R show the whole session.\n"
+    "v+ and v- zoom the lanes taller or shorter, the same as Cmd+[ and Cmd+]. Option or Cmd plus the scroll wheel does that too.\n"
+    "The plain wheel scrolls the lanes when they are zoomed. Drag the timeline's bottom edge to change its height.\n"
+    "If YouHost quits unexpectedly, the next launch names the plugin that was loading. Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"
     "Other shortcuts do nothing while a text field has focus.";
 
 void hideTestButtons(juce::Component& component)
@@ -121,16 +179,42 @@ private:
     juce::String key_;
 };
 
+void attachBitDepthSlot(juce::AudioDeviceSelectorComponent& selector, BitDepthSlot& slot)
+{
+    juce::Component* panel = nullptr;
+    std::function<void(juce::Component&)> walk;
+    walk = [&](juce::Component& node)
+    {
+        for (auto* child : node.getChildren())
+        {
+            if (child == nullptr || child == &slot)
+                continue;
+            if (auto* label = dynamic_cast<juce::Label*>(child))
+                if (label->getText() == "Sample rate:")
+                    panel = label->getParentComponent();
+            if (panel == nullptr)
+                walk(*child);
+        }
+    };
+    walk(selector);
+    if (panel == nullptr)
+        return;
+    if (slot.getParentComponent() != panel)
+    {
+        if (auto* old = slot.getParentComponent())
+            old->removeChildComponent(&slot);
+        panel->addAndMakeVisible(&slot);
+        panel->resized();
+    }
+}
+
 class SetupWindow : public juce::DocumentWindow
 {
 public:
-    SetupWindow(juce::AudioDeviceSelectorComponent& selector,
-                juce::Label& bitLabel,
-                juce::ComboBox& bitBox,
-                AppSettings& settings)
+    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AppSettings& settings)
         : juce::DocumentWindow("Audio setup", theme::background, juce::DocumentWindow::closeButton),
           settings_(settings),
-          content_(selector, bitLabel, bitBox)
+          content_(selector)
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
@@ -153,13 +237,9 @@ private:
     class Content : public juce::Component
     {
     public:
-        Content(juce::AudioDeviceSelectorComponent& selector, juce::Label& bitLabel, juce::ComboBox& bitBox)
-            : selector_(selector),
-              bitLabel_(bitLabel),
-              bitBox_(bitBox)
+        explicit Content(juce::AudioDeviceSelectorComponent& selector)
+            : selector_(selector)
         {
-            addAndMakeVisible(bitLabel_);
-            addAndMakeVisible(bitBox_);
             addAndMakeVisible(viewport_);
             viewport_.setViewedComponent(&selector_, false);
             viewport_.setScrollBarsShown(true, true);
@@ -173,10 +253,6 @@ private:
         void resized() override
         {
             auto area = getLocalBounds().reduced(12, 8);
-            auto row = area.removeFromTop(32);
-            bitLabel_.setBounds(row.removeFromLeft(84));
-            bitBox_.setBounds(row.removeFromLeft(180).reduced(4, 2));
-            area.removeFromTop(8);
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), std::max(640, viewport_.getMaximumVisibleHeight())));
@@ -184,8 +260,6 @@ private:
 
     private:
         juce::AudioDeviceSelectorComponent& selector_;
-        juce::Label& bitLabel_;
-        juce::ComboBox& bitBox_;
         juce::Viewport viewport_;
     };
 
@@ -391,9 +465,9 @@ private:
         juce::Label locationLabel_;
         juce::Label location_;
         juce::Label note_;
-        juce::TextButton browse_ { "Browse…" };
+        juce::TextButton browse_ { "Browse..." };
         juce::TextButton create_ { "Create session" };
-        juce::TextButton internal_ { "Internal disk…" };
+        juce::TextButton internal_ { "Internal disk..." };
         juce::TextButton cancel_ { "Cancel" };
     };
 
@@ -483,6 +557,10 @@ private:
             internal_.onClick = [this] { confirmInternal(); };
             rebuildRecent();
             hideTestButtons(selector_);
+            bitSlot_.bind();
+            bitSlot_.setSelectedId(engine_.wavBitDepth());
+            bitSlot_.onChange = [this](int bits) { engine_.setWavBitDepth(bits, true); };
+            attachBitDepthSlot(selector_, bitSlot_);
             startTimerHz(4);
         }
 
@@ -528,6 +606,18 @@ private:
         void timerCallback() override
         {
             hideTestButtons(selector_);
+            attachBitDepthSlot(selector_, bitSlot_);
+            bitSlot_.setSelectedId(engine_.wavBitDepth());
+            auto note = engine_.missingSessionParentNote();
+            const auto deviceNote = engine_.startupDeviceNote();
+            if (deviceNote.isNotEmpty())
+            {
+                if (note.isNotEmpty())
+                    note << " " << deviceNote;
+                else
+                    note = deviceNote;
+            }
+            note_.setText(note, juce::dontSendNotification);
         }
 
         void refreshLocation()
@@ -688,6 +778,7 @@ private:
         AudioEngine& engine_;
         std::function<void()> onDone_;
         juce::AudioDeviceSelectorComponent selector_;
+        BitDepthSlot bitSlot_;
         juce::File parent_;
         std::unique_ptr<juce::FileChooser> chooser_;
         juce::Label intro_;
@@ -697,10 +788,10 @@ private:
         juce::Label locationLabel_;
         juce::Label location_;
         juce::Label note_;
-        juce::TextButton browse_ { "Browse…" };
+        juce::TextButton browse_ { "Browse..." };
         juce::TextButton create_ { "Create session" };
-        juce::TextButton open_ { "Open existing…" };
-        juce::TextButton internal_ { "Internal disk…" };
+        juce::TextButton open_ { "Open existing..." };
+        juce::TextButton internal_ { "Internal disk..." };
         juce::Label recentLabel_;
         juce::Viewport recentViewport_;
         juce::Component recent_;
@@ -747,7 +838,7 @@ public:
     {
         juce::PopupMenu menu;
         menu.addItem(1, "New");
-        menu.addItem(2, "Open…");
+        menu.addItem(2, "Open...");
 
         juce::PopupMenu recent;
         const auto sessions = owner.engine_.recentSessions();
@@ -759,12 +850,12 @@ public:
             recent.addItem(item);
         }
         menu.addSubMenu("Open Recent", recent, ! sessions.isEmpty());
-        menu.addItem(5, "Import Recording Folder…");
+        menu.addItem(5, "Import Recording Folder...");
         menu.addSeparator();
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveCommand);
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveAsCommand);
         menu.addSeparator();
-        menu.addItem(6, "Clear Timeline…");
+        menu.addItem(6, "Clear Timeline...");
         return menu;
     }
 
@@ -848,7 +939,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterViewport_.setScrollBarsShown(false, true);
 
     latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, settings_, "windowLatency", 480, 360, 420, 280);
-    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, bitDepthLabel_, bitDepthBox_, settings_);
+    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
     commandManager_.registerAllCommandsForTarget(this);
     commandManager_.setFirstCommandTarget(this);
     engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
@@ -955,20 +1046,16 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     referenceBox_.addItem("-20 dBFS", 3);
     referenceBox_.setSelectedId(referenceIdFor(rmsReferenceDb_), juce::dontSendNotification);
     referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS. Meters are green below this point and yellow above it.");
-    bitDepthLabel_.setText("Bit depth", juce::dontSendNotification);
-    bitDepthLabel_.setJustificationType(juce::Justification::centredRight);
-    bitDepthLabel_.setFont(juce::Font(juce::FontOptions(13.0f)));
-    bitDepthBox_.addItem("16-bit", 16);
-    bitDepthBox_.addItem("24-bit", 24);
-    bitDepthBox_.addItem("32-bit float", 32);
-    bitDepthBox_.setSelectedId(engine_.wavBitDepth(), juce::dontSendNotification);
-    bitDepthBox_.setTooltip("Bit depth for the next take. 24-bit is the default. 32-bit is float. A take that is already recording keeps its depth.");
-    bitDepthBox_.onChange = [this]
+    bitDepthSlot_ = std::make_unique<BitDepthSlot>();
+    bitDepthSlot_->bind();
+    bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
+    bitDepthSlot_->onChange = [this](int chosen)
     {
-        const int chosen = bitDepthBox_.getSelectedId();
         if (chosen > 0)
             engine_.setWavBitDepth(chosen, true);
     };
+    attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
+    timelineHeight_ = settings_.loadTimelineHeight();
 
     rmsButton_.onClick = [this] { setPeakMode(false, true); };
     peakButton_.onClick = [this] { setPeakMode(true, true); };
@@ -993,6 +1080,19 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
     meterGrid_.setSelectHandler([this](int channel, bool extend) { engine_.selectChannel(channel, extend); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
+    timeline_.setLaneProvider([this](const std::function<void(const std::vector<TimelineLaneView>&)>& paint)
+    {
+        engine_.visitTimelineLanes(paint);
+    });
+    timeline_.setHeightHandler([this](int height)
+    {
+        const int clamped = juce::jlimit(72, std::max(160, getHeight() / 2), height);
+        if (clamped == timelineHeight_)
+            return;
+        timelineHeight_ = clamped;
+        settings_.saveTimelineHeight(clamped);
+        resized();
+    });
 
     retryButton_.onClick = [this]
     {
@@ -1113,6 +1213,24 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         toggleDropouts();
         return true;
     }
+    const auto code = key.getKeyCode();
+    const bool alt = key.getModifiers().isAltDown();
+    if (alt && ! shift && ! command && (code == 'R' || code == 'r'))
+    {
+        timeline_.fitAll();
+        return true;
+    }
+    if (command && ! shift && code == static_cast<int>('['))
+    {
+        timeline_.verticalZoomIn();
+        return true;
+    }
+    if (command && ! shift && code == static_cast<int>(']'))
+    {
+        timeline_.verticalZoomOut();
+        return true;
+    }
+
     if ((character == 't' || character == 'r') && ! shift && ! command)
     {
         if (character == 't')
@@ -1179,7 +1297,7 @@ void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationC
     }
     else if (commandID == saveAsCommand)
     {
-        result.setInfo("Save As…", "Save a copy of this session", "File", 0);
+        result.setInfo("Save As...", "Save a copy of this session", "File", 0);
         result.addDefaultKeypress('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier);
     }
 }
@@ -1556,6 +1674,9 @@ void MainComponent::timerCallback()
         engine_.maintainSession();
     }
 
+    if (bitDepthSlot_ != nullptr)
+        attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
+
     if (setupWindow_ != nullptr && setupWindow_->isVisible())
     {
         hideDeviceTestTone();
@@ -1603,8 +1724,8 @@ void MainComponent::refresh()
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
-    if (bitDepthBox_.getSelectedId() != engine_.wavBitDepth())
-        bitDepthBox_.setSelectedId(engine_.wavBitDepth(), juce::dontSendNotification);
+    if (bitDepthSlot_ != nullptr)
+        bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
     allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
     hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
     leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
@@ -1758,13 +1879,27 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
+    if (engine_.deviceLost())
+    {
+        graphics.setColour(juce::Colour(0xff5a1e28));
+        graphics.fillRoundedRectangle(deviceLostArea_.toFloat(), 8.0f);
+        graphics.setColour(theme::red);
+        graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
+        graphics.drawFittedText("Audio device lost. YouHost will reopen it when it comes back. The take was saved.",
+                                deviceLostArea_.reduced(12, 4),
+                                juce::Justification::centredLeft,
+                                2);
+    }
+
     juce::String hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
+    if (hint.isEmpty())
+        hint = engine_.rateWarning();
     if (hint.isEmpty() && page_ == 1)
         hint = "The channel number stays visible. Record blinks when armed. Play starts the take. Cmd+Space records immediately. T and R zoom the timeline. Live sound still passes through.";
     if (hint.isEmpty())
         hint = "The channel number stays visible. Drag a slot to move it. Option-drag to copy the plugin and its settings. Right-click or double-click a group bar to rename it.";
 
-    graphics.setColour(engine_.openError().isNotEmpty() ? theme::red : theme::fainter);
+    graphics.setColour(engine_.openError().isNotEmpty() || engine_.rateWarning().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
     graphics.drawFittedText(hint, hintArea_, juce::Justification::centredLeft, 2);
 }
@@ -1840,6 +1975,16 @@ void MainComponent::resized()
         bannerArea_ = {};
     }
 
+    if (engine_.deviceLost())
+    {
+        area.removeFromTop(8);
+        deviceLostArea_ = area.removeFromTop(44);
+    }
+    else
+    {
+        deviceLostArea_ = {};
+    }
+
     area.removeFromTop(8);
     hintArea_ = area.removeFromBottom(32);
     helpButton_.setBounds(getWidth() - 40, getHeight() - 36, 28, 28);
@@ -1853,8 +1998,10 @@ void MainComponent::resized()
     rightScale_.setVisible(recorder);
     pluginPage_.setVisible(! recorder);
 
-    const int timelineHeight = recorder ? juce::jlimit(96, 180, getHeight() / 7)
-                                        : juce::jlimit(88, 120, getHeight() / 10);
+    const int automatic = recorder ? juce::jlimit(96, 180, getHeight() / 7)
+                                   : juce::jlimit(88, 120, getHeight() / 10);
+    const int timelineHeight = timelineHeight_ > 0 ? juce::jlimit(72, std::max(160, getHeight() / 2), timelineHeight_)
+                                                   : automatic;
     timeline_.setBounds(area.removeFromTop(timelineHeight));
     area.removeFromTop(8);
     if (recorder)

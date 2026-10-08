@@ -4,6 +4,9 @@
 #include "PluginCatalogue.h"
 #include "ui/Theme.h"
 
+#include <algorithm>
+#include <tuple>
+
 namespace youhost
 {
 namespace
@@ -19,37 +22,57 @@ struct InstanceDeleter
     }
 };
 
-bool configureBuses(juce::AudioPluginInstance& instance, bool& stereo)
+juce::String pluginIdentifier(const juce::PluginDescription& description)
+{
+    if (description.fileOrIdentifier.isNotEmpty())
+        return description.fileOrIdentifier;
+    return description.createIdentifierString();
+}
+
+bool layoutStaysSafe(const juce::AudioPluginInstance& instance, int& processChannels)
+{
+    for (int bus = 1; bus < instance.getBusCount(true); ++bus)
+        if (instance.getChannelCountOfBus(true, bus) != 0)
+            return false;
+    for (int bus = 1; bus < instance.getBusCount(false); ++bus)
+        if (instance.getChannelCountOfBus(false, bus) != 0)
+            return false;
+
+    const int totalIn = instance.getTotalNumInputChannels();
+    const int totalOut = instance.getTotalNumOutputChannels();
+    if (totalOut < 1)
+        return false;
+    const int width = std::max(totalIn, totalOut);
+    if (width < 1 || width > 2)
+        return false;
+    processChannels = width;
+    return true;
+}
+
+bool configureBuses(juce::AudioPluginInstance& instance, int& processChannels)
 {
     auto tryLayout = [&instance](bool wantStereo)
     {
-        auto layout = instance.getBusesLayout();
+        juce::AudioProcessor::BusesLayout layout;
+        const int inputs = instance.getBusCount(true);
+        const int outputs = instance.getBusCount(false);
+        layout.inputBuses.resize(inputs);
+        layout.outputBuses.resize(outputs);
         const auto set = wantStereo ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
-        if (! layout.inputBuses.isEmpty())
-            layout.inputBuses.getReference(0) = set;
-        if (! layout.outputBuses.isEmpty())
-            layout.outputBuses.getReference(0) = set;
-        for (int bus = 1; bus < layout.inputBuses.size(); ++bus)
-            layout.inputBuses.getReference(bus) = juce::AudioChannelSet::disabled();
-        for (int bus = 1; bus < layout.outputBuses.size(); ++bus)
-            layout.outputBuses.getReference(bus) = juce::AudioChannelSet::disabled();
+        for (int bus = 0; bus < inputs; ++bus)
+            layout.inputBuses.getReference(bus) = bus == 0 ? set : juce::AudioChannelSet::disabled();
+        for (int bus = 0; bus < outputs; ++bus)
+            layout.outputBuses.getReference(bus) = bus == 0 ? set : juce::AudioChannelSet::disabled();
         return instance.checkBusesLayoutSupported(layout) && instance.setBusesLayout(layout);
     };
 
-    if (tryLayout(false) && instance.getTotalNumOutputChannels() > 0)
-    {
-        stereo = false;
+    processChannels = 0;
+    if (tryLayout(false) && layoutStaysSafe(instance, processChannels))
         return true;
-    }
-    if (tryLayout(true) && instance.getTotalNumOutputChannels() > 0)
-    {
-        stereo = true;
+    if (tryLayout(true) && layoutStaysSafe(instance, processChannels))
         return true;
-    }
-
-    instance.enableAllBuses();
-    stereo = instance.getTotalNumInputChannels() > 1 || instance.getTotalNumOutputChannels() > 1;
-    return instance.getTotalNumOutputChannels() > 0;
+    processChannels = 0;
+    return false;
 }
 
 } // namespace
@@ -59,15 +82,19 @@ struct PluginRack::LiveGraph
     struct Slot
     {
         juce::AudioPluginInstance* instance = nullptr;
-        bool stereo = false;
+        int processChannels = 1;
+        bool prepared = false;
     };
+
+    static constexpr int kScratchCap = 8;
 
     Slot slots[kMaxChannels][kSlotsPerChannel] {};
     std::array<int, kMaxChannels> delayLength {};
     std::array<int, kMaxChannels> delayWrite {};
     std::array<std::vector<float>, kMaxChannels> delay {};
-    std::vector<float> scratchLeft;
-    std::vector<float> scratchRight;
+    std::vector<float> scratch;
+    std::array<float*, kScratchCap> scratchPtrs {};
+    int scratchChannels = 1;
     juce::MidiBuffer midi;
     int maxBlock = 0;
     std::vector<std::shared_ptr<HostedPlugin>> keepAlive;
@@ -124,21 +151,7 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
 
 PluginRack::~PluginRack()
 {
-    alive_->store(false, std::memory_order_release);
-    stopTimer();
-
-    for (auto& row : editors_)
-        for (auto& editor : row)
-            editor.reset();
-
-    std::lock_guard<std::mutex> lock(lifeLock_);
-    for (auto& row : model_)
-        for (auto& slot : row)
-            slot.plugin.reset();
-
-    published_.store(nullptr, std::memory_order_release);
-    current_.reset();
-    retired_.clear();
+    releaseForQuit();
 }
 
 void PluginRack::timerCallback()
@@ -179,7 +192,8 @@ void PluginRack::process(float* const* outputs,
     auto* graph = published_.load(std::memory_order_acquire);
     inUse_.store(graph, std::memory_order_release);
 
-    if (graph != nullptr && outputs != nullptr && numSamples > 0)
+    const bool blocked = blockProcessing_.load(std::memory_order_acquire);
+    if (graph != nullptr && ! blocked && outputs != nullptr && numSamples > 0)
     {
         for (int channel = 0; channel < kMaxChannels; ++channel)
         {
@@ -201,26 +215,35 @@ void PluginRack::process(float* const* outputs,
 
             // No plugin: the passthrough copy stays. That is the dry virtual-soundcheck
             // path, and the delay below still lines it up with the processed channels.
-            if (anyPlugin && numSamples <= graph->maxBlock && graph->scratchLeft.size() >= static_cast<std::size_t>(numSamples))
+            if (anyPlugin && numSamples <= graph->maxBlock && graph->scratchChannels > 0)
             {
-                juce::FloatVectorOperations::copy(graph->scratchLeft.data(), output, numSamples);
                 for (int slot = 0; slot < kSlotsPerChannel; ++slot)
                 {
-                    auto* instance = graph->slots[channel][slot].instance;
-                    if (instance == nullptr)
+                    const auto& live = graph->slots[channel][slot];
+                    auto* instance = live.instance;
+                    const int width = live.processChannels;
+                    if (instance == nullptr || ! live.prepared || width < 1 || width > graph->scratchChannels)
                         continue;
 
-                    const bool stereo = graph->slots[channel][slot].stereo
-                                        && graph->scratchRight.size() >= static_cast<std::size_t>(numSamples);
-                    if (stereo)
-                        juce::FloatVectorOperations::copy(graph->scratchRight.data(), graph->scratchLeft.data(), numSamples);
+                    float* pointers[LiveGraph::kScratchCap];
+                    for (int index = 0; index < width; ++index)
+                    {
+                        pointers[index] = graph->scratchPtrs[static_cast<std::size_t>(index)];
+                        if (pointers[index] == nullptr)
+                            continue;
+                        juce::FloatVectorOperations::copy(pointers[index], output, numSamples);
+                    }
+                    bool pointersReady = true;
+                    for (int index = 0; index < width; ++index)
+                        pointersReady = pointersReady && pointers[index] != nullptr;
+                    if (! pointersReady)
+                        continue;
 
-                    float* pointers[2] = { graph->scratchLeft.data(), graph->scratchRight.data() };
-                    juce::AudioBuffer<float> view(pointers, stereo ? 2 : 1, numSamples);
+                    juce::AudioBuffer<float> view(pointers, width, numSamples);
                     graph->midi.clear();
                     instance->processBlock(view, graph->midi);
+                    juce::FloatVectorOperations::copy(output, pointers[0], numSamples);
                 }
-                juce::FloatVectorOperations::copy(output, graph->scratchLeft.data(), numSamples);
             }
 
             auto& line = graph->delay[static_cast<std::size_t>(channel)];
@@ -242,22 +265,34 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
 {
     const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
     const int block = blockSize > 0 ? blockSize : 512;
-    std::vector<std::shared_ptr<juce::AudioPluginInstance>> instances;
+    blockProcessing_.store(true, std::memory_order_release);
+    waitUntilOutsideCallback();
+
+    std::vector<std::shared_ptr<HostedPlugin>> hosted;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         sampleRate_ = rate;
         blockSize_ = block;
         routing_ = routing;
         callbacksRunning_.store(true, std::memory_order_release);
-        instances = collectInstances();
+        for (auto& row : model_)
+            for (auto& slot : row)
+                if (slot.plugin != nullptr && slot.plugin->instance != nullptr)
+                    hosted.push_back(slot.plugin);
     }
 
-    for (auto& instance : instances)
-        if (instance != nullptr)
-            instance->prepareToPlay(rate, block);
+    for (auto& plugin : hosted)
+        if (plugin != nullptr && plugin->instance != nullptr)
+            plugin->instance->prepareToPlay(rate, block);
 
-    std::lock_guard<std::mutex> lock(lifeLock_);
-    publishUnlocked();
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (auto& plugin : hosted)
+            if (plugin != nullptr)
+                plugin->prepared = plugin->instance != nullptr;
+        publishUnlocked();
+    }
+    blockProcessing_.store(false, std::memory_order_release);
 }
 
 void PluginRack::deviceStopped()
@@ -286,6 +321,20 @@ void PluginRack::loadPlugin(int channel,
 
     closeEditor(channel, slot);
 
+    if (isBlocked(description))
+    {
+        const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
+        {
+            std::lock_guard<std::mutex> lock(lifeLock_);
+            auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+            model.ticket = ++ticketSource_;
+            model.loading = false;
+            model.error = name + " may have crashed YouHost. It is turned off.";
+            model.plugin.reset();
+        }
+        return;
+    }
+
     std::uint64_t ticket = 0;
     double rate = 48000.0;
     int block = 512;
@@ -298,6 +347,8 @@ void PluginRack::loadPlugin(int channel,
         rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
+
+    tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
 
     auto alive = alive_;
     catalogue_.createInstanceAsync(
@@ -334,12 +385,12 @@ void PluginRack::finishLoad(int channel,
             return;
     }
 
-    bool stereo = false;
+    int processChannels = 0;
     juce::String problem = error;
-    if (instance != nullptr && ! configureBuses(*instance, stereo))
+    if (instance != nullptr && ! configureBuses(*instance, processChannels))
     {
         if (problem.isEmpty())
-            problem = "This plugin has no usable output for a mono channel.";
+            problem = "This plugin needs a sidechain or a channel layout YouHost cannot host safely.";
         instance.reset();
     }
 
@@ -364,7 +415,8 @@ void PluginRack::finishLoad(int channel,
         hosted->description = std::move(description);
         hosted->state = std::move(state);
         hosted->bypassed = bypassed;
-        hosted->stereo = stereo;
+        hosted->processChannels = processChannels;
+        hosted->prepared = true;
         hosted->latencySamples = clampLatencySamples(hosted->instance->getLatencySamples());
     }
     else if (problem.isEmpty())
@@ -374,6 +426,9 @@ void PluginRack::finishLoad(int channel,
 
     bool notify = false;
     bool openIt = false;
+    bool loaded = false;
+    juce::String loadedName = description.name;
+    juce::String loadedId = pluginIdentifier(description);
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -386,7 +441,15 @@ void PluginRack::finishLoad(int channel,
         publishUnlocked();
         notify = markDirty;
         openIt = openWhenReady && model.plugin != nullptr;
+        loaded = model.plugin != nullptr;
+        if (loaded)
+        {
+            loadedName = model.plugin->description.name;
+            loadedId = pluginIdentifier(model.plugin->description);
+        }
     }
+
+    tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId);
 
     if (notify)
         notifyDirty();
@@ -396,24 +459,29 @@ void PluginRack::finishLoad(int channel,
 
 void PluginRack::clearAll(bool markDirty)
 {
-    for (auto& row : editors_)
-        for (auto& editor : row)
-            editor.reset();
+    closeAllEditors();
 
+    std::vector<std::tuple<int, int, juce::String, juce::String>> unloaded;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
-        for (auto& row : model_)
+        for (int channel = 0; channel < kMaxChannels; ++channel)
         {
-            for (auto& slot : row)
+            for (int slot = 0; slot < kSlotsPerChannel; ++slot)
             {
-                slot.ticket = ++ticketSource_;
-                slot.loading = false;
-                slot.error.clear();
-                slot.plugin.reset();
+                auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+                if (model.plugin != nullptr)
+                    unloaded.emplace_back(channel, slot, model.plugin->description.name, pluginIdentifier(model.plugin->description));
+                model.ticket = ++ticketSource_;
+                model.loading = false;
+                model.error.clear();
+                model.plugin.reset();
             }
         }
         publishUnlocked();
     }
+
+    for (const auto& item : unloaded)
+        tracePlugin(std::get<0>(item), std::get<1>(item), "unload", std::get<2>(item), std::get<3>(item));
 
     if (markDirty)
         notifyDirty();
@@ -425,15 +493,24 @@ void PluginRack::removePlugin(int channel, int slot)
         return;
 
     closeEditor(channel, slot);
+    juce::String name;
+    juce::String identifier;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin != nullptr)
+        {
+            name = model.plugin->description.name;
+            identifier = pluginIdentifier(model.plugin->description);
+        }
         model.ticket = ++ticketSource_;
         model.loading = false;
         model.error.clear();
         model.plugin.reset();
         publishUnlocked();
     }
+    if (identifier.isNotEmpty() || name.isNotEmpty())
+        tracePlugin(channel, slot, "unload", name, identifier);
     notifyDirty();
 }
 
@@ -561,7 +638,7 @@ void PluginRack::openEditor(int channel, int slot)
             {
                 if (! alive->load(std::memory_order_acquire))
                     return;
-                editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].reset();
+                closeEditor(channel, slot);
             });
         },
         settings_,
@@ -598,7 +675,18 @@ void PluginRack::closeEditor(int channel, int slot)
 {
     if (! validSlot(channel, slot))
         return;
-    editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].reset();
+    auto& window = editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+    if (window == nullptr)
+        return;
+    window->clearContentComponent();
+    window.reset();
+}
+
+void PluginRack::closeAllEditors()
+{
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            closeEditor(channel, slot);
 }
 
 ChannelSnapshot PluginRack::snapshot(int channel) const
@@ -728,8 +816,6 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
     auto graph = std::make_unique<LiveGraph>();
     const int block = blockSize_ > 0 ? blockSize_ : 512;
     graph->maxBlock = block;
-    graph->scratchLeft.assign(static_cast<std::size_t>(block), 0.0f);
-    graph->scratchRight.assign(static_cast<std::size_t>(block), 0.0f);
     graph->midi.ensureSize(1024);
 
     std::array<ChannelLatencyInput, kMaxChannels> inputs {};
@@ -749,7 +835,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             chain += model.plugin->latencySamples;
             auto& live = graph->slots[channel][slot];
             live.instance = model.plugin->instance.get();
-            live.stereo = model.plugin->stereo;
+            live.processChannels = std::max(1, model.plugin->processChannels);
+            live.prepared = model.plugin->prepared;
             graph->keepAlive.push_back(model.plugin);
         }
 
@@ -771,6 +858,17 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         if (delay > 0)
             graph->delay[static_cast<std::size_t>(channel)].assign(static_cast<std::size_t>(delay), 0.0f);
     }
+
+    int width = 1;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            if (graph->slots[channel][slot].instance != nullptr)
+                width = std::max(width, graph->slots[channel][slot].processChannels);
+    graph->scratchChannels = std::clamp(width, 1, LiveGraph::kScratchCap);
+    graph->scratch.assign(static_cast<std::size_t>(graph->scratchChannels * block), 0.0f);
+    for (int index = 0; index < graph->scratchChannels; ++index)
+        graph->scratchPtrs[static_cast<std::size_t>(index)] = graph->scratch.data()
+                                                              + static_cast<std::size_t>(index * block);
 
     return graph;
 }
@@ -796,10 +894,80 @@ bool PluginRack::validSlot(int channel, int slot) const noexcept
     return channel >= 0 && channel < kMaxChannels && slot >= 0 && slot < kSlotsPerChannel;
 }
 
+void PluginRack::setBlockedIdentifiers(const juce::StringArray& identifiers)
+{
+    blocked_ = identifiers;
+}
+
+void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&)> trace)
+{
+    trace_ = std::move(trace);
+}
+
+void PluginRack::releaseForQuit()
+{
+    alive_->store(false, std::memory_order_release);
+    stopTimer();
+    blockProcessing_.store(true, std::memory_order_release);
+    closeAllEditors();
+
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    for (auto& row : model_)
+    {
+        for (auto& slot : row)
+        {
+            slot.ticket = ++ticketSource_;
+            slot.loading = false;
+            slot.plugin.reset();
+        }
+    }
+    published_.store(nullptr, std::memory_order_release);
+    current_.reset();
+    retired_.clear();
+}
+
+void PluginRack::waitUntilOutsideCallback()
+{
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        const auto epoch = callbackEpoch_.load(std::memory_order_acquire);
+        if ((epoch & 1u) == 0u)
+            return;
+        juce::Thread::sleep(1);
+    }
+}
+
+bool PluginRack::isBlocked(const juce::PluginDescription& description) const
+{
+    if (description.fileOrIdentifier.isNotEmpty() && blocked_.contains(description.fileOrIdentifier))
+        return true;
+    const auto created = description.createIdentifierString();
+    return created.isNotEmpty() && blocked_.contains(created);
+}
+
+void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)
+{
+    if (trace_ != nullptr)
+        trace_(channel, slot, phase, name, identifier);
+}
+
 void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance)
 {
     if (instance == nullptr)
         return;
+
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (! messages->isThisTheMessageThread())
+        {
+            juce::MessageManager::callAsync([rack, instance]
+            {
+                destroyInstance(rack, instance);
+            });
+            return;
+        }
+    }
+
     if (rack != nullptr)
         instance->removeListener(rack);
     instance->releaseResources();

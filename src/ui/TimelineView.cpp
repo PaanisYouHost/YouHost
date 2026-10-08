@@ -1,5 +1,6 @@
 #include "TimelineView.h"
 #include "Theme.h"
+#include "X32Look.h"
 
 namespace youhost
 {
@@ -13,26 +14,55 @@ void quietButton(juce::Button& button)
     button.setWantsKeyboardFocus(false);
 }
 
+juce::Colour laneWaveColour(int colorIndex)
+{
+    const auto hue = x32Hue(colorIndex);
+    if (hue.isTransparent())
+        return theme::green;
+    return hue;
+}
+
+juce::Colour laneWashColour(int colorIndex)
+{
+    const auto hue = x32Hue(colorIndex);
+    if (hue.isTransparent())
+        return juce::Colour(0xff243044);
+    return hue.withAlpha(0.45f);
+}
+
 } // namespace
 
 TimelineView::TimelineView()
 {
     addAndMakeVisible(scroll_);
+    addAndMakeVisible(laneScrollBar_);
     addAndMakeVisible(zoomOutButton_);
     addAndMakeVisible(zoomInButton_);
+    addAndMakeVisible(verticalOutButton_);
+    addAndMakeVisible(verticalInButton_);
+    addAndMakeVisible(fitButton_);
     scroll_.addListener(this);
+    laneScrollBar_.addListener(this);
     scroll_.setAutoHide(false);
-    quietButton(zoomOutButton_);
-    quietButton(zoomInButton_);
-    zoomOutButton_.setTooltip("Zoom out (R).");
+    laneScrollBar_.setAutoHide(true);
+    for (auto* button : { &zoomOutButton_, &zoomInButton_, &verticalOutButton_, &verticalInButton_, &fitButton_ })
+        quietButton(*button);
+    zoomOutButton_.setTooltip("Zoom out (R). Keeps going until the whole session fits.");
     zoomInButton_.setTooltip("Zoom in (T).");
+    verticalOutButton_.setTooltip("Shorter lanes (Cmd+]).");
+    verticalInButton_.setTooltip("Taller lanes (Cmd+[).");
+    fitButton_.setTooltip("Fit the whole session (Option+R).");
     zoomOutButton_.onClick = [this] { zoomOut(); };
     zoomInButton_.onClick = [this] { zoomIn(); };
+    verticalOutButton_.onClick = [this] { verticalZoomOut(); };
+    verticalInButton_.onClick = [this] { verticalZoomIn(); };
+    fitButton_.onClick = [this] { fitAll(); };
 }
 
 TimelineView::~TimelineView()
 {
     scroll_.removeListener(this);
+    laneScrollBar_.removeListener(this);
 }
 
 void TimelineView::setTransport(const TransportView& view)
@@ -48,13 +78,25 @@ void TimelineView::setTransport(const TransportView& view)
         viewStart_ = 0;
     if (viewStart_ > maxStart)
         viewStart_ = maxStart;
+    if (zoomStep_ == 0)
+        viewStart_ = 0;
     syncScroll();
     repaint();
+}
+
+void TimelineView::setLaneProvider(LaneProvider provider)
+{
+    laneProvider_ = std::move(provider);
 }
 
 void TimelineView::setLocateHandler(std::function<void(std::int64_t)> handler)
 {
     onLocate_ = std::move(handler);
+}
+
+void TimelineView::setHeightHandler(std::function<void(int)> handler)
+{
+    onHeight_ = std::move(handler);
 }
 
 void TimelineView::zoomIn()
@@ -67,14 +109,44 @@ void TimelineView::zoomOut()
     zoomBy(-1);
 }
 
+void TimelineView::fitAll()
+{
+    zoomStep_ = 0;
+    viewStart_ = 0;
+    syncScroll();
+    repaint();
+}
+
+void TimelineView::verticalZoomIn()
+{
+    verticalZoomBy(1);
+}
+
+void TimelineView::verticalZoomOut()
+{
+    verticalZoomBy(-1);
+}
+
 void TimelineView::zoomBy(int delta)
 {
     const auto span = fullSpan();
     const auto oldVisible = visibleSamples();
-    const int next = clampZoomStep(zoomStep_ + delta);
+    const int next = clampZoomStep(zoomStep_ + delta, span);
     const auto newVisible = zoomVisibleSamples(span, next);
-    viewStart_ = viewStartKeepingPlayhead(span, viewStart_, oldVisible, newVisible, view_.position);
+    if (next == 0)
+        viewStart_ = 0;
+    else
+        viewStart_ = viewStartKeepingPlayhead(span, viewStart_, oldVisible, newVisible, view_.position);
     zoomStep_ = next;
+    syncScroll();
+    repaint();
+}
+
+void TimelineView::verticalZoomBy(int delta)
+{
+    const int maxStep = maxVerticalZoomStep(laneCount());
+    verticalStep_ = std::clamp(verticalStep_ + delta, 0, maxStep);
+    clampLaneScroll();
     syncScroll();
     repaint();
 }
@@ -89,14 +161,23 @@ void TimelineView::syncScroll()
     scroll_.setRangeLimits(0.0, static_cast<double>(span), juce::dontSendNotification);
     scroll_.setCurrentRange(static_cast<double>(viewStart_), static_cast<double>(visible), juce::dontSendNotification);
     scroll_.setVisible(zoomStep_ > 0 && visible < span);
+
+    const int total = std::max(1, laneCount());
+    const int shown = std::max(1, lanesShown());
+    laneScrollBar_.setRangeLimits(0.0, static_cast<double>(total), juce::dontSendNotification);
+    laneScrollBar_.setCurrentRange(static_cast<double>(laneScroll_), static_cast<double>(shown), juce::dontSendNotification);
+    laneScrollBar_.setVisible(shown < total);
     updatingScroll_ = false;
 }
 
-void TimelineView::scrollBarMoved(juce::ScrollBar*, double newRangeStart)
+void TimelineView::scrollBarMoved(juce::ScrollBar* bar, double newRangeStart)
 {
     if (updatingScroll_)
         return;
-    viewStart_ = static_cast<std::int64_t>(newRangeStart);
+    if (bar == &laneScrollBar_)
+        laneScroll_ = static_cast<int>(newRangeStart);
+    else
+        viewStart_ = static_cast<std::int64_t>(newRangeStart);
     repaint();
 }
 
@@ -112,11 +193,32 @@ std::int64_t TimelineView::visibleSamples() const
     return zoomVisibleSamples(fullSpan(), zoomStep_);
 }
 
+int TimelineView::laneCount() const
+{
+    return knownLanes_;
+}
+
+int TimelineView::lanesShown() const
+{
+    return lanesShownForVerticalStep(std::max(1, laneCount()), verticalStep_);
+}
+
+void TimelineView::clampLaneScroll()
+{
+    const int maxStart = std::max(0, laneCount() - lanesShown());
+    if (laneScroll_ < 0)
+        laneScroll_ = 0;
+    if (laneScroll_ > maxStart)
+        laneScroll_ = maxStart;
+}
+
 juce::Rectangle<float> TimelineView::waveformArea() const
 {
     auto bounds = getLocalBounds().toFloat().reduced(8.0f, 6.0f);
-    bounds.removeFromBottom(22.0f);
+    bounds.removeFromBottom(28.0f);
     bounds.removeFromTop(14.0f);
+    if (laneScrollBar_.isVisible())
+        bounds.removeFromRight(12.0f);
     return bounds;
 }
 
@@ -139,26 +241,86 @@ void TimelineView::locateAt(float x)
 
 void TimelineView::resized()
 {
-    auto bottom = getLocalBounds().removeFromBottom(24).reduced(8, 2);
-    zoomInButton_.setBounds(bottom.removeFromRight(28));
-    bottom.removeFromRight(4);
-    zoomOutButton_.setBounds(bottom.removeFromRight(28));
+    auto bottom = getLocalBounds().removeFromBottom(28).reduced(8, 4);
+    zoomInButton_.setBounds(bottom.removeFromRight(26));
+    bottom.removeFromRight(3);
+    zoomOutButton_.setBounds(bottom.removeFromRight(26));
+    bottom.removeFromRight(3);
+    verticalInButton_.setBounds(bottom.removeFromRight(28));
+    bottom.removeFromRight(3);
+    verticalOutButton_.setBounds(bottom.removeFromRight(28));
+    bottom.removeFromRight(3);
+    fitButton_.setBounds(bottom.removeFromRight(40));
     bottom.removeFromRight(6);
+    if (laneCount() > lanesShown())
+        laneScrollBar_.setBounds(getLocalBounds().reduced(8, 6).removeFromRight(12).withTrimmedTop(14).withTrimmedBottom(28));
     scroll_.setBounds(bottom);
+    clampLaneScroll();
 }
 
 void TimelineView::mouseDown(const juce::MouseEvent& event)
 {
-    if (event.position.y >= static_cast<float>(getHeight() - 24))
+    if (event.position.y >= static_cast<float>(getHeight() - 8))
+    {
+        draggingHeight_ = true;
+        dragStartY_ = event.getScreenY();
+        dragStartHeight_ = getHeight();
+        return;
+    }
+    if (event.position.y >= static_cast<float>(getHeight() - 28))
         return;
     locateAt(event.position.x);
 }
 
 void TimelineView::mouseDrag(const juce::MouseEvent& event)
 {
-    if (event.position.y >= static_cast<float>(getHeight() - 24))
+    if (draggingHeight_)
+    {
+        if (onHeight_ != nullptr)
+            onHeight_(dragStartHeight_ + (event.getScreenY() - dragStartY_));
+        return;
+    }
+    if (event.position.y >= static_cast<float>(getHeight() - 28))
         return;
     locateAt(event.position.x);
+}
+
+void TimelineView::mouseUp(const juce::MouseEvent&)
+{
+    draggingHeight_ = false;
+}
+
+void TimelineView::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+{
+    if (event.mods.isAltDown() || event.mods.isCommandDown())
+    {
+        if (wheel.deltaY > 0.0f)
+            verticalZoomIn();
+        else if (wheel.deltaY < 0.0f)
+            verticalZoomOut();
+        return;
+    }
+
+    if (event.mods.isShiftDown())
+    {
+        const auto span = fullSpan();
+        const auto visible = visibleSamples();
+        const auto nudge = static_cast<std::int64_t>(static_cast<double>(-wheel.deltaY) * static_cast<double>(visible) * 0.25);
+        const auto maxStart = std::max<std::int64_t>(0, span - visible);
+        viewStart_ = std::clamp(viewStart_ + nudge, static_cast<std::int64_t>(0), maxStart);
+        syncScroll();
+        repaint();
+        return;
+    }
+
+    if (laneCount() > lanesShown())
+    {
+        const int steps = wheel.deltaY > 0.0f ? -1 : wheel.deltaY < 0.0f ? 1 : 0;
+        laneScroll_ += steps * std::max(1, lanesShown() / 8);
+        clampLaneScroll();
+        syncScroll();
+        repaint();
+    }
 }
 
 void TimelineView::paint(juce::Graphics& graphics)
@@ -186,66 +348,107 @@ void TimelineView::paint(juce::Graphics& graphics)
     graphics.saveState();
     graphics.reduceClipRegion(inner.toNearestInt());
 
-    auto drawTake = [&](const TakeDraw& take, juce::Colour fill)
+    const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes)
     {
-        if (take.span.length <= 0 && take.span.start <= 0 && take.peaks.empty())
+    const int total = static_cast<int>(lanes.size());
+    knownLanes_ = total;
+    const int shown = std::max(1, lanesShownForVerticalStep(std::max(1, total), verticalStep_));
+    const float laneHeight = inner.getHeight() / static_cast<float>(shown);
+    const bool showNumbers = laneNumberVisible(laneHeight);
+    const int maxStart = std::max(0, total - shown);
+    const int first = std::clamp(laneScroll_, 0, maxStart);
+
+    auto drawRegion = [&](const TimelineRegionView& region, juce::Rectangle<float> lane, juce::Colour wave)
+    {
+        if (region.length <= 0 && (region.peaks == nullptr || region.peaks->empty()))
             return;
-        const float x1 = sampleToX(take.span.start);
-        const float x2 = std::max(x1 + 2.0f, sampleToX(take.span.start + std::max<std::int64_t>(take.span.length, 1)));
+        const float x1 = sampleToX(region.start);
+        const float x2 = std::max(x1 + 1.0f, sampleToX(region.start + std::max<std::int64_t>(region.length, 1)));
         if (x2 < inner.getX() || x1 > inner.getRight())
             return;
-        auto block = juce::Rectangle<float>(x1, inner.getY(), x2 - x1, inner.getHeight());
-        graphics.setColour(fill);
-        graphics.fillRoundedRectangle(block, 3.0f);
-
-        if (! take.peaks.empty() && block.getWidth() > 2.0f)
+        auto block = juce::Rectangle<float>(x1, lane.getY(), x2 - x1, lane.getHeight()).getIntersection(lane);
+        if (block.isEmpty())
+            return;
+        const auto* peaks = region.peaks;
+        if (peaks != nullptr && ! peaks->empty() && block.getWidth() > 1.0f && block.getHeight() >= 2.0f)
         {
-            graphics.setColour(theme::green.withAlpha(0.9f));
+            graphics.setColour(wave);
             const float mid = block.getCentreY();
-            const float half = block.getHeight() * 0.45f;
-            const int left = std::max(0, static_cast<int>(std::floor(inner.getX() - block.getX())));
-            const int right = std::min(static_cast<int>(block.getWidth()),
-                                       static_cast<int>(std::ceil(inner.getRight() - block.getX())));
+            const float half = std::max(0.5f, block.getHeight() * 0.45f);
+            const int left = std::max(0, static_cast<int>(std::floor(block.getX())));
+            const int right = std::min(static_cast<int>(std::ceil(block.getRight())), static_cast<int>(inner.getRight()));
             for (int pixel = left; pixel < right; ++pixel)
             {
-                const auto first = static_cast<std::size_t>((static_cast<float>(pixel) / block.getWidth()) * static_cast<float>(take.peaks.size()));
-                const auto last = static_cast<std::size_t>((static_cast<float>(pixel + 1) / block.getWidth()) * static_cast<float>(take.peaks.size()));
+                const float local = static_cast<float>(pixel) - block.getX();
+                const auto index = static_cast<std::size_t>((local / std::max(1.0f, block.getWidth()))
+                                                            * static_cast<float>(peaks->size()));
+                const auto last = static_cast<std::size_t>(((local + 1.0f) / std::max(1.0f, block.getWidth()))
+                                                           * static_cast<float>(peaks->size()));
                 float low = 0.0f;
                 float high = 0.0f;
-                for (std::size_t index = first; index < std::max(first + 1, last) && index < take.peaks.size(); ++index)
+                for (std::size_t peak = index; peak < std::max(index + 1, last) && peak < peaks->size(); ++peak)
                 {
-                    low = std::min(low, take.peaks[index].low);
-                    high = std::max(high, take.peaks[index].high);
+                    low = std::min(low, (*peaks)[peak].low);
+                    high = std::max(high, (*peaks)[peak].high);
                 }
                 const float y1 = mid - juce::jlimit(-1.0f, 1.0f, high) * half;
                 const float y2 = mid - juce::jlimit(-1.0f, 1.0f, low) * half;
-                graphics.drawVerticalLine(static_cast<int>(block.getX()) + pixel, std::min(y1, y2), std::max(y1, y2));
+                graphics.drawVerticalLine(pixel, std::min(y1, y2), std::max(y1, y2) + 0.5f);
             }
         }
-
-        graphics.setColour(theme::text.withAlpha(0.8f));
-        graphics.drawVerticalLine(juce::roundToInt(x1), inner.getY(), inner.getBottom());
-        graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-        graphics.drawText(juce::String(take.number),
-                          juce::Rectangle<float>(x1 + 3.0f, inner.getY(), 24.0f, 14.0f),
-                          juce::Justification::centredLeft,
-                          false);
+        else
+        {
+            graphics.setColour(wave);
+            graphics.fillRect(block.withSizeKeepingCentre(block.getWidth(), std::max(1.0f, block.getHeight())));
+        }
     };
 
-    int index = 0;
-    for (const auto& take : view_.takes)
-        drawTake(take, index++ % 2 == 0 ? juce::Colour(0xff243044) : juce::Colour(0xff2a3142));
-    if (view_.liveValid)
-        drawTake(view_.live, juce::Colour(0xff4a2430));
-
-    if (view_.position >= viewStart_ && view_.position <= viewStart_ + visible)
+    if (total == 0)
     {
-        const float playX = sampleToX(view_.position);
+        graphics.setColour(theme::dim);
+        graphics.drawText("No recorded tracks yet", inner, juce::Justification::centred, false);
+    }
+
+    for (int index = 0; index < shown; ++index)
+    {
+        const int laneIndex = first + index;
+        if (laneIndex < 0 || laneIndex >= total)
+            break;
+        const auto& lane = lanes[static_cast<std::size_t>(laneIndex)];
+        auto row = juce::Rectangle<float>(inner.getX(), inner.getY() + laneHeight * static_cast<float>(index),
+                                          inner.getWidth(), std::max(1.0f, laneHeight - 1.0f));
+        const auto wave = laneWaveColour(lane.color);
+        graphics.setColour(laneWashColour(lane.color));
+        graphics.fillRect(row);
+        for (const auto& region : lane.regions)
+            drawRegion(region, row, wave);
+        if (showNumbers)
+        {
+            graphics.setColour(theme::text);
+            graphics.setFont(juce::Font(juce::FontOptions(std::min(12.0f, laneHeight - 1.0f))));
+            const auto label = lane.title.empty() ? juce::String(lane.number) : juce::String::fromUTF8(lane.title.c_str());
+            graphics.drawText(label, row.reduced(3.0f, 0.0f), juce::Justification::centredLeft, false);
+        }
+    }
+    };
+
+    if (laneProvider_ != nullptr)
+        laneProvider_(paintLanes);
+    else
+        paintLanes({});
+
+    const auto playhead = view_.position;
+    if (playhead >= viewStart_ && playhead <= viewStart_ + visible)
+    {
+        const float playX = sampleToX(playhead);
         graphics.setColour(view_.mode == TransportMode::recording ? theme::red : theme::text);
         graphics.drawLine(playX, inner.getY(), playX, inner.getBottom(), 2.0f);
     }
 
     graphics.restoreState();
+
+    graphics.setColour(theme::panelEdge);
+    graphics.fillRect(0, getHeight() - 4, getWidth(), 4);
 }
 
 } // namespace youhost

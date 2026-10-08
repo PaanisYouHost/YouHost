@@ -48,8 +48,9 @@ private:
 class ScannerWindow::Content : public juce::Component
 {
 public:
-    explicit Content(AudioEngine& engine)
-        : engine_(engine)
+    Content(AudioEngine& engine, AppSettings& settings)
+        : engine_(engine),
+          settings_(settings)
     {
         addAndMakeVisible(scanButton_);
         addAndMakeVisible(rescanButton_);
@@ -63,14 +64,16 @@ public:
         addAndMakeVisible(status_);
         addAndMakeVisible(knownTitle_);
         addAndMakeVisible(failedTitle_);
+        addAndMakeVisible(suspiciousTitle_);
         addAndMakeVisible(knownList_);
         addAndMakeVisible(failedList_);
+        addAndMakeVisible(suspiciousList_);
 
         scanButton_.setButtonText("Scan");
         rescanButton_.setButtonText("Rescan");
         stopButton_.setButtonText("Stop");
         clearButton_.setButtonText("Clear failed");
-        fileButton_.setButtonText("Scan file…");
+        fileButton_.setButtonText("Scan file...");
         selectedButton_.setButtonText("Rescan selected");
         wavesButton_.setButtonText("Scan Waves shells");
         appleButton_.setButtonText("Show Apple Audio Units in inserts");
@@ -114,15 +117,20 @@ public:
 
         knownTitle_.setFont(juce::Font(juce::FontOptions(13.0f)));
         failedTitle_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        suspiciousTitle_.setFont(juce::Font(juce::FontOptions(13.0f)));
+        suspiciousTitle_.setText("Suspicious", juce::dontSendNotification);
         status_.setFont(juce::Font(juce::FontOptions(13.0f)));
         status_.setColour(juce::Label::textColourId, theme::dim);
 
         knownList_.setModel(&knownModel_);
         failedList_.setModel(&failedModel_);
+        suspiciousList_.setModel(&suspiciousModel_);
         knownList_.setRowHeight(22);
         failedList_.setRowHeight(22);
+        suspiciousList_.setRowHeight(22);
         knownList_.setColour(juce::ListBox::backgroundColourId, theme::background);
         failedList_.setColour(juce::ListBox::backgroundColourId, theme::background);
+        suspiciousList_.setColour(juce::ListBox::backgroundColourId, theme::background);
 
         wavesButton_.setTooltip("Off by default. A Waves shell lists hundreds of plugins and is scanned last when this is on.");
         appleButton_.setTooltip("Apple's built-in Audio Units stay out of the insert list until this is on.");
@@ -193,6 +201,18 @@ public:
         if (status.skippedWaves > 0)
             failedLabel << "   Waves skipped " << status.skippedWaves;
         failedTitle_.setText(failedLabel, juce::dontSendNotification);
+
+        const auto suspicious = settings_.loadSuspiciousPlugins();
+        std::vector<juce::String> suspiciousLines;
+        std::vector<juce::String> suspiciousIds;
+        for (const auto& identifier : suspicious)
+        {
+            suspiciousLines.push_back(identifier);
+            suspiciousIds.push_back(identifier);
+        }
+        suspiciousModel_.setRows(std::move(suspiciousLines), std::move(suspiciousIds));
+        suspiciousList_.updateContent();
+        suspiciousTitle_.setText("Suspicious (" + juce::String(suspicious.size()) + ")", juce::dontSendNotification);
         repaint();
     }
 
@@ -226,6 +246,10 @@ public:
         area.removeFromLeft(8);
         knownTitle_.setBounds(left.removeFromTop(20));
         failedTitle_.setBounds(area.removeFromTop(20));
+        auto suspiciousArea = area.removeFromBottom(std::max(90, area.getHeight() / 3));
+        area.removeFromBottom(4);
+        suspiciousTitle_.setBounds(suspiciousArea.removeFromTop(18));
+        suspiciousList_.setBounds(suspiciousArea);
         knownList_.setBounds(left);
         failedList_.setBounds(area);
     }
@@ -272,6 +296,7 @@ private:
     }
 
     AudioEngine& engine_;
+    AppSettings& settings_;
     juce::TextButton scanButton_;
     juce::TextButton rescanButton_;
     juce::TextButton stopButton_;
@@ -284,10 +309,13 @@ private:
     juce::Label status_;
     juce::Label knownTitle_;
     juce::Label failedTitle_;
+    juce::Label suspiciousTitle_;
     NameList knownModel_;
     NameList failedModel_;
+    NameList suspiciousModel_;
     juce::ListBox knownList_;
     juce::ListBox failedList_;
+    juce::ListBox suspiciousList_;
     juce::Rectangle<int> progressArea_;
     float progress_ = 0.0f;
     bool scanning_ = false;
@@ -301,7 +329,7 @@ ScannerWindow::ScannerWindow(AudioEngine& engine, AppSettings& settings)
       engine_(engine),
       settings_(settings)
 {
-    auto content = std::make_unique<Content>(engine_);
+    auto content = std::make_unique<Content>(engine_, settings_);
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);

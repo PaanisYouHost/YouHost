@@ -67,13 +67,69 @@ void Recorder::setAudioFolder(const juce::File& folder)
 void Recorder::setDevice(double sampleRate, bool callbacksLive)
 {
     deviceRate_.store(sampleRate, std::memory_order_relaxed);
-    callbacksLive_.store(callbacksLive, std::memory_order_release);
-    if (! callbacksLive)
-        audioHolding_.store(true, std::memory_order_release);
+    setCallbacksLive(callbacksLive);
 
     const std::lock_guard<std::mutex> lock(stateLock_);
     if (takes_.empty() && mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::stopped))
         timelineRate_.store(sampleRate, std::memory_order_relaxed);
+}
+
+void Recorder::setCallbacksLive(bool live) noexcept
+{
+    callbacksLive_.store(live, std::memory_order_release);
+    audioHolding_.store(! live, std::memory_order_release);
+}
+
+double Recorder::timelineSampleRate() const noexcept
+{
+    const double timeline = timelineRate_.load(std::memory_order_relaxed);
+    if (timeline > 0.0)
+        return timeline;
+    return deviceRate_.load(std::memory_order_relaxed);
+}
+
+void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const
+{
+    if (fn == nullptr)
+        return;
+
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    std::vector<RecordedTakeView> views;
+    views.reserve(takes_.size());
+    for (const auto& take : takes_)
+    {
+        RecordedTakeView view;
+        view.start = take.start;
+        view.length = take.length;
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            const auto index = static_cast<std::size_t>(channel);
+            view.recorded[index] = take.files[index].isNotEmpty();
+            if (! take.channelPeaks[index].empty())
+                view.peaks[index] = &take.channelPeaks[index];
+        }
+        views.push_back(view);
+    }
+
+    RecordedTakeView live;
+    const RecordedTakeView* livePtr = nullptr;
+    const auto liveLength = std::max(diskSamples_.load(std::memory_order_relaxed),
+                                     audioSamples_.load(std::memory_order_relaxed));
+    if (mode_.load(std::memory_order_relaxed) == static_cast<int>(TransportMode::recording) && liveLength > 0)
+    {
+        live.start = takeStart_.load(std::memory_order_relaxed);
+        live.length = liveLength;
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            const auto index = static_cast<std::size_t>(channel);
+            live.recorded[index] = takeFiles_[index].isNotEmpty();
+            if (! liveChannelPeaks_[index].empty())
+                live.peaks[index] = &liveChannelPeaks_[index];
+        }
+        livePtr = &live;
+    }
+
+    fn(views.empty() ? nullptr : views.data(), static_cast<int>(views.size()), livePtr);
 }
 
 void Recorder::setDirtyHandler(std::function<void()> handler)
@@ -448,6 +504,14 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     peakBucketCount_ = 0;
     peakBucketLow_ = 0.0f;
     peakBucketHigh_ = 0.0f;
+    channelBucketLow_.fill(0.0f);
+    channelBucketHigh_.fill(0.0f);
+    channelBucketCount_.fill(0);
+    {
+        const std::lock_guard<std::mutex> lock(stateLock_);
+        for (auto& peaks : liveChannelPeaks_)
+            peaks.clear();
+    }
     lastFlushMs_ = juce::Time::getMillisecondCounter();
     diskSamples_.store(0, std::memory_order_relaxed);
     audioSamples_.store(0, std::memory_order_relaxed);
@@ -496,11 +560,13 @@ void Recorder::commitTake()
     const auto written = diskSamples_.load(std::memory_order_relaxed);
     const auto heard = audioSamples_.load(std::memory_order_relaxed);
     std::vector<WavePeak> peaks;
+    std::array<std::vector<WavePeak>, kMaxChannels> channelPeaks;
     std::array<juce::String, kMaxChannels> files {};
     std::int64_t start = 0;
     {
         const std::lock_guard<std::mutex> lock(stateLock_);
         peaks.swap(livePeaks_);
+        channelPeaks.swap(liveChannelPeaks_);
         files = takeFiles_;
         start = takeStart_.load(std::memory_order_relaxed);
     }
@@ -522,6 +588,7 @@ void Recorder::commitTake()
     take.length = length;
     take.files = files;
     take.peaks = std::move(peaks);
+    take.channelPeaks = std::move(channelPeaks);
     {
         const std::lock_guard<std::mutex> lock(stateLock_);
         takes_.push_back(std::move(take));
@@ -666,7 +733,7 @@ void Recorder::play()
 
     {
         const std::lock_guard<std::mutex> lock(stateLock_);
-        status_ = "Playback — virtual soundcheck.";
+        status_ = "Playback - virtual soundcheck.";
     }
     mode_.store(static_cast<int>(TransportMode::playing), std::memory_order_release);
     notify();
@@ -782,7 +849,6 @@ TransportView Recorder::view() const
         TakeDraw draw;
         draw.number = number++;
         draw.span = { take.start, take.length };
-        draw.peaks = take.peaks;
         draw.files = take.files;
         result.takes.push_back(std::move(draw));
     }
@@ -793,11 +859,10 @@ TransportView Recorder::view() const
         result.live.number = number;
         result.live.span.start = takeStart_.load(std::memory_order_relaxed);
         result.live.span.length = std::max<std::int64_t>(0, audioSamples_.load(std::memory_order_relaxed));
-        result.live.peaks = livePeaks_;
         result.live.files = takeFiles_;
         result.length = std::max(result.length, result.live.span.start + result.live.span.length);
         if (result.overflows > 0)
-            result.status = "Recording — the disk fell behind, audio kept running.";
+            result.status = "Recording - the disk fell behind, audio kept running.";
     }
 
     return result;
@@ -821,6 +886,7 @@ void Recorder::captureSession(SessionData& data) const
         stored.lengthSamples = take.length;
         stored.files = take.files;
         stored.peaks = take.peaks;
+        stored.channelPeaks = take.channelPeaks;
         data.takes.push_back(std::move(stored));
     }
 
@@ -831,6 +897,7 @@ void Recorder::captureSession(SessionData& data) const
         live.lengthSamples = diskSamples_.load(std::memory_order_relaxed);
         live.files = takeFiles_;
         live.peaks = livePeaks_;
+        live.channelPeaks = liveChannelPeaks_;
         if (live.lengthSamples > 0)
             data.takes.push_back(std::move(live));
     }
@@ -856,6 +923,7 @@ void Recorder::restoreSession(const SessionData& data, const juce::File& audioFo
         take.length = source.lengthSamples;
         take.files = source.files;
         take.peaks = source.peaks;
+        take.channelPeaks = source.channelPeaks;
         takes_.push_back(std::move(take));
     }
     timelineRate_.store(data.sampleRate, std::memory_order_relaxed);
@@ -916,6 +984,16 @@ bool Recorder::drainOnce()
             {
                 const std::lock_guard<std::mutex> lock(stateLock_);
                 livePeaks_.push_back({ peakBucketLow_, peakBucketHigh_ });
+                for (const auto& open : writers_)
+                {
+                    if (open.channel < 0 || open.channel >= kMaxChannels)
+                        continue;
+                    const auto index = static_cast<std::size_t>(open.channel);
+                    liveChannelPeaks_[index].push_back({ channelBucketLow_[index], channelBucketHigh_[index] });
+                    channelBucketLow_[index] = 0.0f;
+                    channelBucketHigh_[index] = 0.0f;
+                    channelBucketCount_[index] = 0;
+                }
                 peakBucketCount_ = 0;
                 peakBucketLow_ = 0.0f;
                 peakBucketHigh_ = 0.0f;
@@ -945,9 +1023,15 @@ bool Recorder::drainOnce()
         float high = 0.0f;
         for (const auto& open : writers_)
         {
-            const float sample = pointers[static_cast<std::size_t>(open.channel)][index];
+            if (open.channel < 0 || open.channel >= kMaxChannels)
+                continue;
+            const auto channelIndex = static_cast<std::size_t>(open.channel);
+            const float sample = pointers[channelIndex][index];
             low = std::min(low, sample);
             high = std::max(high, sample);
+            channelBucketLow_[channelIndex] = std::min(channelBucketLow_[channelIndex], sample);
+            channelBucketHigh_[channelIndex] = std::max(channelBucketHigh_[channelIndex], sample);
+            ++channelBucketCount_[channelIndex];
         }
         peakBucketLow_ = std::min(peakBucketLow_, low);
         peakBucketHigh_ = std::max(peakBucketHigh_, high);
@@ -955,6 +1039,18 @@ bool Recorder::drainOnce()
         {
             const std::lock_guard<std::mutex> lock(stateLock_);
             livePeaks_.push_back({ peakBucketLow_, peakBucketHigh_ });
+            for (const auto& open : writers_)
+            {
+                if (open.channel < 0 || open.channel >= kMaxChannels)
+                    continue;
+                const auto channelIndex = static_cast<std::size_t>(open.channel);
+                if (channelBucketCount_[channelIndex] <= 0)
+                    continue;
+                liveChannelPeaks_[channelIndex].push_back({ channelBucketLow_[channelIndex], channelBucketHigh_[channelIndex] });
+                channelBucketLow_[channelIndex] = 0.0f;
+                channelBucketHigh_[channelIndex] = 0.0f;
+                channelBucketCount_[channelIndex] = 0;
+            }
             peakBucketCount_ = 0;
             peakBucketLow_ = 0.0f;
             peakBucketHigh_ = 0.0f;

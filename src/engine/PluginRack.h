@@ -85,6 +85,9 @@ public:
     void restoreSession(const SessionData& data);
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
+    void setBlockedIdentifiers(const juce::StringArray& identifiers);
+    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)> trace);
+    void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
 private:
@@ -97,7 +100,8 @@ private:
         juce::PluginDescription description;
         juce::MemoryBlock state;
         bool bypassed = false;
-        bool stereo = false;
+        int processChannels = 1;
+        bool prepared = false;
         int latencySamples = 0;
     };
 
@@ -128,7 +132,11 @@ private:
     std::unique_ptr<LiveGraph> buildGraph();
     std::vector<std::shared_ptr<juce::AudioPluginInstance>> collectInstances() const;
     void closeEditor(int channel, int slot);
+    void closeAllEditors();
     void notifyDirty();
+    void waitUntilOutsideCallback();
+    bool isBlocked(const juce::PluginDescription& description) const;
+    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
     bool validSlot(int channel, int slot) const noexcept;
 
     PluginCatalogue& catalogue_;
@@ -157,11 +165,14 @@ private:
     std::atomic<LiveGraph*> inUse_ { nullptr };
     std::atomic<std::uint32_t> callbackEpoch_ { 0 };
     std::atomic<bool> callbacksRunning_ { false };
+    std::atomic<bool> blockProcessing_ { true };
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
     std::atomic<bool> capturing_ { false };
 
     std::array<std::array<std::unique_ptr<EditorWindow>, kSlotsPerChannel>, kMaxChannels> editors_ {};
+    juce::StringArray blocked_;
+    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 
 } // namespace youhost

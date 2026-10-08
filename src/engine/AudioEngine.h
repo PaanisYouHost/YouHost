@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelEnable.h"
+#include "CrashJournal.h"
 #include "DisplayLayout.h"
 #include "DropoutDetect.h"
 #include "DropoutLog.h"
@@ -10,6 +11,7 @@
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
 #include "Recorder.h"
+#include "TimelineLanes.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -147,6 +149,15 @@ public:
     void setMeterRestoreHandler(std::function<void(bool peak, int referenceDb)> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
 
+    bool deviceLost() const noexcept { return deviceLostBanner_; }
+    juce::String rateWarning() const { return rateWarning_; }
+    juce::String startupDeviceNote() const { return startupDeviceNote_; }
+    bool takeUncleanShutdown();
+    juce::String uncleanPluginMessage() const;
+    void acceptCrashChoice(bool leaveOff);
+    void prepareForQuit();
+    void visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const;
+
 private:
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                           int numInputChannels,
@@ -173,6 +184,12 @@ private:
     void applyDisplay(const SessionData& data);
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
+    void applyOpenDevice(juce::AudioIODevice& device, bool remember);
+    void handleDeviceDown();
+    void tryReopenWanted();
+    bool deviceNameListed(const juce::String& name);
+    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
+    void rememberSavedSetup(const juce::XmlElement* saved);
 
     AppSettings& settings_;
     juce::AudioDeviceManager deviceManager_;
@@ -233,6 +250,28 @@ private:
     bool microphoneGranted_ = false;
     bool persistSetup_ = false;
     bool started_ = false;
+
+    std::atomic<bool> deviceStarting_ { false };
+    std::atomic<bool> deviceDown_ { false };
+    std::atomic<bool> closingDevice_ { false };
+    bool deviceLostBanner_ = false;
+    bool reopenInProgress_ = false;
+    bool lossFinalized_ = false;
+    bool awaitingSavedDevice_ = false;
+    bool quitPrepared_ = false;
+    bool crashChoicePending_ = false;
+    std::uint32_t downSinceMs_ = 0;
+    std::uint32_t lastDeviceScanMs_ = 0;
+    double preparedRate_ = 0.0;
+    int preparedBuffer_ = 0;
+    juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;
+    juce::String wantedName_;
+    juce::String startupFallbackName_;
+    juce::String startupDeviceNote_;
+    juce::String rateWarning_;
+    juce::BigInteger lastInputMask_;
+    juce::BigInteger lastOutputMask_;
+    CrashJournal journal_;
 };
 
 } // namespace youhost

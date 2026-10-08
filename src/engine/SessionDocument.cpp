@@ -151,6 +151,9 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
             auto* fileElement = element->createNewChildElement("File");
             fileElement->setAttribute("channel", channel);
             fileElement->setAttribute("name", name);
+            const auto channelPeaks = encodePeaks(take.channelPeaks[static_cast<std::size_t>(channel)]);
+            if (channelPeaks.isNotEmpty())
+                fileElement->setAttribute("peaks", channelPeaks);
         }
     }
 
@@ -238,6 +241,7 @@ bool readSessionFile(const juce::File& file, SessionData& data)
             if (channel < 0 || channel >= kMaxChannels)
                 continue;
             stored.files[static_cast<std::size_t>(channel)] = fileElement->getStringAttribute("name");
+            stored.channelPeaks[static_cast<std::size_t>(channel)] = decodePeaks(fileElement->getStringAttribute("peaks"));
         }
         if (stored.lengthSamples > 0)
             data.takes.push_back(std::move(stored));
