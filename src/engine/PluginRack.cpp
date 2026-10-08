@@ -254,7 +254,8 @@ void PluginRack::loadPlugin(int channel,
                             const juce::PluginDescription& description,
                             const juce::MemoryBlock& state,
                             bool bypassed,
-                            bool markDirty)
+                            bool markDirty,
+                            bool openWhenReady)
 {
     if (! validSlot(channel, slot))
         return;
@@ -279,13 +280,13 @@ void PluginRack::loadPlugin(int channel,
         description,
         rate,
         block,
-        [this, alive, channel, slot, ticket, markDirty, bypassed, description, state](
+        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, description, state](
             std::unique_ptr<juce::AudioPluginInstance> instance,
             const juce::String& error)
         {
             if (! alive->load(std::memory_order_acquire))
                 return;
-            finishLoad(channel, slot, ticket, markDirty, bypassed, description, state, std::move(instance), error);
+            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, description, state, std::move(instance), error);
         });
 }
 
@@ -294,6 +295,7 @@ void PluginRack::finishLoad(int channel,
                             std::uint64_t ticket,
                             bool markDirty,
                             bool bypassed,
+                            bool openWhenReady,
                             juce::PluginDescription description,
                             juce::MemoryBlock state,
                             std::unique_ptr<juce::AudioPluginInstance> instance,
@@ -347,6 +349,7 @@ void PluginRack::finishLoad(int channel,
     }
 
     bool notify = false;
+    bool openIt = false;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -358,10 +361,13 @@ void PluginRack::finishLoad(int channel,
         model.plugin = std::move(hosted);
         publishUnlocked();
         notify = markDirty;
+        openIt = openWhenReady && model.plugin != nullptr;
     }
 
     if (notify)
         notifyDirty();
+    if (openIt)
+        openEditor(channel, slot);
 }
 
 void PluginRack::clearAll(bool markDirty)
@@ -434,6 +440,23 @@ void PluginRack::setExcluded(int channel, bool excluded)
         publishUnlocked();
     }
     notifyDirty();
+}
+
+void PluginRack::toggleEditor(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+    if (editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] != nullptr)
+        closeEditor(channel, slot);
+    else
+        openEditor(channel, slot);
+}
+
+bool PluginRack::isEditorOpen(int channel, int slot) const
+{
+    if (! validSlot(channel, slot))
+        return false;
+    return editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] != nullptr;
 }
 
 void PluginRack::openEditor(int channel, int slot)

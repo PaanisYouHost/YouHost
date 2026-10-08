@@ -30,10 +30,11 @@ struct BarParts
     juce::Rectangle<float> number;
 };
 
-BarParts splitCell(juce::Rectangle<float> cell)
+BarParts splitCell(juce::Rectangle<float> cell, bool recordRow)
 {
     const float numberHeight = juce::jlimit(10.0f, 14.0f, cell.getHeight() * 0.12f);
-    const float slotHeight = juce::jlimit(9.0f, 12.0f, cell.getHeight() * 0.1f);
+    const float slotHeight = recordRow ? juce::jlimit(14.0f, 18.0f, cell.getHeight() * 0.16f)
+                                       : juce::jlimit(9.0f, 12.0f, cell.getHeight() * 0.1f);
     auto body = cell.reduced(3.0f, 2.0f);
     auto number = body.removeFromBottom(numberHeight);
     body.removeFromBottom(1.0f);
@@ -179,6 +180,12 @@ void MeterGrid::setReadings(std::vector<MeterReading> readings, bool showPeak, i
     repaint();
 }
 
+void MeterGrid::setRecordMode(bool enabled)
+{
+    showRecord_ = enabled;
+    repaint();
+}
+
 void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
 {
     onClearClip_ = std::move(handler);
@@ -187,6 +194,11 @@ void MeterGrid::setClearHandler(std::function<void(int channel)> handler)
 void MeterGrid::setSlotHandler(std::function<void(int channel, int slot)> handler)
 {
     onSlot_ = std::move(handler);
+}
+
+void MeterGrid::setRecordHandler(std::function<void(int channel)> handler)
+{
+    onRecord_ = std::move(handler);
 }
 
 MeterLayout MeterGrid::layoutFor(int count) const
@@ -225,11 +237,17 @@ MeterHit MeterGrid::meterAt(juce::Point<float> position) const
                                              static_cast<float>(row) * layout_.cellHeight,
                                              layout_.cellWidth,
                                              layout_.cellHeight);
-    const auto parts = splitCell(cell);
+    const auto parts = splitCell(cell, showRecord_);
     hit.channel = index;
     if (parts.clip.contains(position))
     {
         hit.clip = true;
+        return hit;
+    }
+
+    if (showRecord_ && parts.slotRow.contains(position))
+    {
+        hit.record = true;
         return hit;
     }
 
@@ -252,7 +270,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
     {
         graphics.setColour(theme::dim);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
-        graphics.drawFittedText("No input channels open. Choose a device below and enable its inputs.",
+        graphics.drawFittedText("No input channels open. Open Audio setup and enable the inputs.",
                                 getLocalBounds().reduced(8),
                                 juce::Justification::centred,
                                 3);
@@ -271,7 +289,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
                                                  static_cast<float>(row) * layout_.cellHeight,
                                                  layout_.cellWidth,
                                                  layout_.cellHeight);
-        const auto parts = splitCell(cell);
+        const auto parts = splitCell(cell, showRecord_);
         const auto& reading = readings_[static_cast<std::size_t>(index)];
         const float level = showPeak_ ? reading.peak : reading.rms;
 
@@ -289,7 +307,22 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.setColour(reading.clipped ? theme::red : theme::panelEdge);
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
 
-        drawSlotChips(graphics, parts.slotRow, reading.slots);
+        if (showRecord_)
+        {
+            const auto button = parts.slotRow.withSizeKeepingCentre(std::min(parts.slotRow.getWidth(), 14.0f),
+                                                                    std::min(parts.slotRow.getHeight(), 14.0f));
+            graphics.setColour(reading.recordLive ? theme::red : reading.recordArmed ? juce::Colour(0xff8d2430) : theme::panelEdge);
+            graphics.fillEllipse(button);
+            if (reading.recordArmed)
+            {
+                graphics.setColour(reading.recordLive ? theme::text : theme::red);
+                graphics.drawEllipse(button, 1.0f);
+            }
+        }
+        else
+        {
+            drawSlotChips(graphics, parts.slotRow, reading.slots);
+        }
 
         graphics.setColour(reading.hasInput ? theme::dim : theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(fontSize)));
@@ -311,8 +344,8 @@ void MeterGrid::paint(juce::Graphics& graphics)
                                                  static_cast<float>(row) * layout_.cellHeight,
                                                  layout_.cellWidth,
                                                  layout_.cellHeight);
-        const auto firstBar = splitCell(first).bar;
-        const auto lastBar = splitCell(last).bar;
+        const auto firstBar = splitCell(first, showRecord_).bar;
+        const auto lastBar = splitCell(last, showRecord_).bar;
         const auto ticks = placeTicks(firstBar, showPeak_, rmsReferenceDb_);
         drawScaleLines(graphics, ticks, firstBar.getX(), lastBar.getRight());
         drawScaleLabels(graphics, ticks, firstBar.getX(), lastBar.getRight());
@@ -325,7 +358,9 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
     const auto hit = meterAt(event.position);
     if (hit.channel < 0)
         return;
-    if (hit.slot >= 0 && onSlot_ != nullptr)
+    if (hit.record && onRecord_ != nullptr)
+        onRecord_(hit.channel);
+    else if (hit.slot >= 0 && onSlot_ != nullptr)
         onSlot_(hit.channel, hit.slot);
     else if (hit.clip && onClearClip_ != nullptr)
         onClearClip_(hit.channel);

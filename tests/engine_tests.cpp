@@ -5,6 +5,7 @@
 #include "engine/MeterScale.h"
 #include "engine/Passthrough.h"
 #include "engine/SessionFiles.h"
+#include "engine/TakePlan.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -201,6 +202,26 @@ void testLatencyFormulas()
     CHECK(youhost::samplesToMilliseconds(48, 0.0) == 0.0);
 }
 
+void testTakePlan()
+{
+    youhost::TakeSpan takes[] = { { 0, 1000 }, { 1000, 500 } };
+    CHECK(youhost::timelineEnd(takes, 2) == 1500);
+    const auto marks = youhost::takeMarkers(takes, 2);
+    CHECK(marks.size() == 3);
+    CHECK(youhost::previousMarker(1000, marks) == 0);
+    CHECK(youhost::nextMarker(1000, marks) == 1500);
+    CHECK(youhost::previousMarker(0, marks) == 0);
+    CHECK(youhost::nudgeSamples(100, -500, 1500) == 0);
+    CHECK(youhost::nudgeSamples(1400, 500, 1500) == 1500);
+    const auto code = youhost::timecodeFromSamples(48000 * 3661, 48000.0);
+    CHECK(code.hours == 1);
+    CHECK(code.minutes == 1);
+    CHECK(code.seconds == 1);
+    CHECK(youhost::takeWaveName(1, 3, "Kick Drum") == "Take01_Ch03_Kick_Drum.wav");
+    CHECK(youhost::takeWaveName(12, 1, "Kick/Snare") == "Take12_Ch01_KickSnare.wav");
+    CHECK(youhost::sanitiseChannelName("  ") == "");
+}
+
 void testMeterLayoutScales()
 {
     const auto stereo = youhost::layoutMeters(2, 800.0f, 300.0f);
@@ -351,6 +372,7 @@ int main()
     testSessionLayout();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
+    testTakePlan();
     testMeterLayoutScales();
 
     if (failures != 0)

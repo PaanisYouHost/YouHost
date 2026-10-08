@@ -5,6 +5,7 @@
 #include "Passthrough.h"
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
+#include "Recorder.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace youhost
 {
@@ -60,15 +62,34 @@ public:
 
     PluginCatalogue& pluginCatalogue() noexcept { return *catalogue_; }
     ChannelSnapshot channelSnapshot(int channel) const;
-    void loadPlugin(int channel, int slot, const juce::PluginDescription& description);
+    void loadPlugin(int channel, int slot, const juce::PluginDescription& description, bool openEditor = false);
     void removePlugin(int channel, int slot);
     void setSlotBypassed(int channel, int slot, bool bypassed);
     void setChannelExcluded(int channel, bool excluded);
     void openPluginEditor(int channel, int slot);
+    void togglePluginEditor(int channel, int slot);
+    bool isPluginEditorOpen(int channel, int slot) const;
+
+    void setRecordArmed(int channel, bool armed);
+    bool isRecordArmed(int channel) const;
+    void setChannelName(int channel, const juce::String& name);
+    juce::String channelName(int channel) const;
+    void transportRecord();
+    void transportStop();
+    void transportPlay();
+    void transportLocate(std::int64_t sample);
+    void transportJump(int direction);
+    void transportNudge(double seconds);
+    TransportView transportView() const;
+    void startNewSession();
 
     void setSessionMeters(bool peak, int rmsReferenceDb);
     void noteSessionEdit();
+    void touchSession();
     void maintainSession();
+    void setSessionPage(int page);
+    int sessionPage() const noexcept { return sessionPage_; }
+    void setPageRestoreHandler(std::function<void(int)> handler);
     bool hasSession() const noexcept { return sessionFolder_.getFullPathName().isNotEmpty(); }
     juce::String sessionName() const { return sessionFolder_.getFileName(); }
     juce::File suggestedSessionFolder() const;
@@ -92,6 +113,8 @@ private:
 
     void publishConfig(juce::AudioIODevice& device);
     void saveSetupIfAllowed();
+    void ensureSessionFolder();
+    void syncRecorderFolder();
     void pushRouting(const Routing& routing);
     Routing routingFromDevice(const juce::AudioIODevice& device) const;
     void installOverloadListener(const juce::String& deviceName);
@@ -121,14 +144,20 @@ private:
 
     std::unique_ptr<PluginCatalogue> catalogue_;
     std::unique_ptr<PluginRack> rack_;
+    std::unique_ptr<Recorder> recorder_;
+    std::vector<float> playbackScratch_;
+    std::array<float*, kMaxChannels> playbackPtrs_ {};
+    int playbackMax_ = 0;
     bool sessionPeak_ = false;
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
+    int sessionPage_ = 1;
     juce::File sessionFolder_;
     juce::String sessionMessage_;
     bool sessionDirty_ = false;
     bool restoringSession_ = false;
     juce::uint32 sessionDirtyAtMs_ = 0;
     std::function<void(bool, int)> meterRestoreHandler_;
+    std::function<void(int)> pageRestoreHandler_;
 
     juce::String deviceName_ { "No device" };
     juce::String openError_;

@@ -26,6 +26,8 @@ struct MeterReading
     float peak = 0.0f;
     bool clipped = false;
     bool hasInput = false;
+    bool recordArmed = true;
+    bool recordLive = false;
     std::array<SlotMark, kSlotsPerChannel> slots {};
 };
 
@@ -33,6 +35,7 @@ struct MeterHit
 {
     int channel = -1;
     bool clip = false;
+    bool record = false;
     int slot = -1;
 };
 
@@ -42,8 +45,10 @@ public:
     MeterGrid();
 
     void setReadings(std::vector<MeterReading> readings, bool showPeak, int rmsReferenceDb);
+    void setRecordMode(bool enabled);
     void setClearHandler(std::function<void(int channel)> handler);
     void setSlotHandler(std::function<void(int channel, int slot)> handler);
+    void setRecordHandler(std::function<void(int channel)> handler);
 
     void paint(juce::Graphics& graphics) override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -54,9 +59,11 @@ private:
 
     std::vector<MeterReading> readings_;
     bool showPeak_ = false;
+    bool showRecord_ = false;
     int rmsReferenceDb_ = -20;
     std::function<void(int)> onClearClip_;
     std::function<void(int, int)> onSlot_;
+    std::function<void(int)> onRecord_;
     MeterLayout layout_ {};
 };
 

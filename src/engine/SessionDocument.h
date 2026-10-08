@@ -1,11 +1,14 @@
 #pragma once
 
 #include "HostLimits.h"
+#include "TakePlan.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace youhost
 {
@@ -21,15 +24,28 @@ struct SessionSlot
 struct SessionChannel
 {
     bool excludeFromCompensation = false;
+    bool recordEnabled = true;
+    juce::String name;
     std::array<SessionSlot, kSlotsPerChannel> slots {};
+};
+
+struct SessionTake
+{
+    std::int64_t startSample = 0;
+    std::int64_t lengthSamples = 0;
+    std::array<juce::String, kMaxChannels> files {};
+    std::vector<WavePeak> peaks;
 };
 
 struct SessionData
 {
     bool peakMeter = false;
     int rmsReferenceDb = kDefaultRmsReferenceDb;
+    int page = 1;
+    double sampleRate = 0.0;
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};
+    std::vector<SessionTake> takes;
 };
 
 // Writes session.youhost. The caller creates the sibling audio/ folder.

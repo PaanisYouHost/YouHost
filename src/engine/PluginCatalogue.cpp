@@ -418,6 +418,11 @@ juce::Array<juce::PluginDescription> PluginCatalogue::types() const
     return list_.getTypes();
 }
 
+juce::StringArray PluginCatalogue::failedFiles() const
+{
+    return list_.getBlacklistedFiles();
+}
+
 CatalogueStatus PluginCatalogue::status() const
 {
     CatalogueStatus status;

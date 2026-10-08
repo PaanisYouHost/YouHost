@@ -37,11 +37,14 @@ target_sources(YouHost PRIVATE
     src/engine/AudioEngine.cpp
     src/engine/PluginCatalogue.cpp
     src/engine/PluginRack.cpp
+    src/engine/Recorder.cpp
     src/engine/SessionDocument.cpp
-    src/ui/ChannelStripPanel.cpp
     src/ui/LatencyReadout.cpp
     src/ui/MeterGrid.cpp
-    src/ui/MainComponent.cpp)
+    src/ui/MainComponent.cpp
+    src/ui/PluginPage.cpp
+    src/ui/ScannerWindow.cpp
+    src/ui/TimelineView.cpp)
 
 target_include_directories(YouHost PRIVATE src)
 

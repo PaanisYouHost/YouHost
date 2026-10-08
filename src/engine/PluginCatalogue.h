@@ -61,6 +61,7 @@ public:
     void clearFailedAndScan();
 
     juce::Array<juce::PluginDescription> types() const;
+    juce::StringArray failedFiles() const;
     CatalogueStatus status() const;
     void flushSave();
 

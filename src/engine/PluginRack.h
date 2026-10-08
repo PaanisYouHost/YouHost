@@ -59,12 +59,15 @@ public:
                     const juce::PluginDescription& description,
                     const juce::MemoryBlock& state,
                     bool bypassed,
-                    bool markDirty);
+                    bool markDirty,
+                    bool openWhenReady = false);
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
     void setBypassed(int channel, int slot, bool bypassed);
     void setExcluded(int channel, bool excluded);
     void openEditor(int channel, int slot);
+    void toggleEditor(int channel, int slot);
+    bool isEditorOpen(int channel, int slot) const;
 
     ChannelSnapshot snapshot(int channel) const;
     int alignmentSamples() const;
@@ -104,6 +107,7 @@ private:
                     std::uint64_t ticket,
                     bool markDirty,
                     bool bypassed,
+                    bool openWhenReady,
                     juce::PluginDescription description,
                     juce::MemoryBlock state,
                     std::unique_ptr<juce::AudioPluginInstance> instance,

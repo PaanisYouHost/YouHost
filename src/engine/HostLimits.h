@@ -3,8 +3,8 @@
 namespace youhost
 {
 
-// Fixed topology from the architecture notes. Later phases fill the slots,
-// the recorder, and the compensation delay. They do not grow this array.
+// Fixed topology from the architecture notes. The recorder and the plugin rack
+// use this same channel count. They do not grow this array.
 inline constexpr int kMaxChannels = 128;
 inline constexpr int kSlotsPerChannel = 4;
 
