@@ -71,6 +71,8 @@ public:
 
     bool isRecording() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::recording); }
     bool isPlaying() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::playing); }
+    std::int64_t playhead() const noexcept { return position_.load(std::memory_order_relaxed); }
+    void addImportedTake(std::int64_t length, const std::array<juce::String, kMaxChannels>& files, double sampleRate);
 
     void setArmed(int channel, bool armed);
     bool isArmed(int channel) const;

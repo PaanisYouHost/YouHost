@@ -477,7 +477,8 @@ void Recorder::deleteEmptyTakeFiles()
 
 void Recorder::commitTake()
 {
-    const auto length = diskSamples_.load(std::memory_order_relaxed);
+    const auto written = diskSamples_.load(std::memory_order_relaxed);
+    const auto heard = audioSamples_.load(std::memory_order_relaxed);
     std::vector<WavePeak> peaks;
     std::array<juce::String, kMaxChannels> files {};
     std::int64_t start = 0;
@@ -488,7 +489,9 @@ void Recorder::commitTake()
         start = takeStart_.load(std::memory_order_relaxed);
     }
 
-    if (length <= 0)
+    // A take the audio thread actually heard must stay on the timeline.
+    // Only a rec/stop with no callbacks removes the empty header files.
+    if (written <= 0 && heard <= 0)
     {
         deleteEmptyTakeFiles();
         const std::lock_guard<std::mutex> lock(stateLock_);
@@ -497,6 +500,7 @@ void Recorder::commitTake()
         return;
     }
 
+    const auto length = written > 0 ? written : heard;
     StoredTake take;
     take.start = start;
     take.length = length;
@@ -506,6 +510,8 @@ void Recorder::commitTake()
         const std::lock_guard<std::mutex> lock(stateLock_);
         takes_.push_back(std::move(take));
         status_ = "Take " + juce::String(static_cast<int>(takes_.size())) + " saved.";
+        if (written <= 0)
+            status_ = "Take kept on the timeline. The disk had not flushed audio yet.";
         publishEnd();
     }
     position_.store(start + length, std::memory_order_relaxed);
@@ -702,6 +708,28 @@ void Recorder::nudgeSeconds(double seconds)
     const auto position = position_.load(std::memory_order_relaxed);
     const auto end = contentEnd_.load(std::memory_order_relaxed);
     locate(nudgeSamples(position, delta, std::max(end, position)));
+}
+
+void Recorder::addImportedTake(std::int64_t length, const std::array<juce::String, kMaxChannels>& files, double sampleRate)
+{
+    if (length <= 0)
+        return;
+
+    if (isRecording() || isPlaying())
+        stop();
+
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    StoredTake take;
+    take.start = contentEndUnlocked();
+    take.length = length;
+    take.files = files;
+    takes_.push_back(std::move(take));
+    if (sampleRate > 0.0 && timelineRate_.load(std::memory_order_relaxed) <= 0.0)
+        timelineRate_.store(sampleRate, std::memory_order_relaxed);
+    publishEnd();
+    position_.store(contentEndUnlocked(), std::memory_order_relaxed);
+    status_ = juce::String(static_cast<int>(takes_.size())) + " takes on the timeline.";
+    markDirty();
 }
 
 void Recorder::clearTakes()

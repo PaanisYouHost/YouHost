@@ -74,8 +74,12 @@ LatencyReadout::CardLayout LatencyReadout::layoutCard(juce::Rectangle<float> bou
 LatencyReadout::LatencyReadout()
 {
     setOpaque(false);
+    addAndMakeVisible(graphButton_);
     addAndMakeVisible(resetButton_);
+    graphButton_.setTooltip("Open the dropout timeline  (4 or D)");
     resetButton_.setTooltip("Reset the dropout counter");
+    graphButton_.setMouseClickGrabsKeyboardFocus(false);
+    resetButton_.setMouseClickGrabsKeyboardFocus(false);
 }
 
 void LatencyReadout::setNumbers(const LatencyNumbers& numbers)
@@ -89,11 +93,18 @@ void LatencyReadout::setResetHandler(std::function<void()> handler)
     resetButton_.onClick = std::move(handler);
 }
 
+void LatencyReadout::setGraphHandler(std::function<void()> handler)
+{
+    graphButton_.onClick = std::move(handler);
+}
+
 void LatencyReadout::resized()
 {
     const auto layout = layoutCard(getLocalBounds().toFloat());
     auto row = layout.dropoutRow.toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
+    row.removeFromRight(6);
+    graphButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
 }
 
 void LatencyReadout::paint(juce::Graphics& graphics)
@@ -136,7 +147,7 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     drawStat(graphics, layout.compensationRow, "Compensation", numbers_.compensationSamples, rate, theme::dim);
 
     auto dropoutRow = layout.dropoutRow;
-    dropoutRow.removeFromRight(80.0f);
+    dropoutRow.removeFromRight(156.0f);
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
     graphics.drawText("Dropouts", dropoutRow.removeFromLeft(132.0f), juce::Justification::centredLeft, false);

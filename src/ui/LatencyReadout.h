@@ -16,6 +16,7 @@ public:
 
     void setNumbers(const LatencyNumbers& numbers);
     void setResetHandler(std::function<void()> handler);
+    void setGraphHandler(std::function<void()> handler);
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -35,6 +36,7 @@ private:
     static CardLayout layoutCard(juce::Rectangle<float> bounds);
 
     LatencyNumbers numbers_;
+    juce::TextButton graphButton_ { "Graph" };
     juce::TextButton resetButton_ { "Reset" };
 };
 

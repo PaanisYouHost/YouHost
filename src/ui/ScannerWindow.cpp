@@ -1,6 +1,8 @@
 #include "ScannerWindow.h"
 #include "Theme.h"
 
+#include <algorithm>
+
 namespace youhost
 {
 namespace
@@ -22,13 +24,22 @@ public:
         graphics.drawText(lines_[static_cast<std::size_t>(row)], 6, 0, width - 8, height, juce::Justification::centredLeft, true);
     }
 
-    void setLines(std::vector<juce::String> lines)
+    void setRows(std::vector<juce::String> lines, std::vector<juce::String> identifiers)
     {
         lines_ = std::move(lines);
+        identifiers_ = std::move(identifiers);
+    }
+
+    juce::String identifier(int row) const
+    {
+        if (row < 0 || row >= static_cast<int>(identifiers_.size()))
+            return {};
+        return identifiers_[static_cast<std::size_t>(row)];
     }
 
 private:
     std::vector<juce::String> lines_;
+    std::vector<juce::String> identifiers_;
 };
 
 } // namespace
@@ -41,7 +52,13 @@ public:
     {
         addAndMakeVisible(scanButton_);
         addAndMakeVisible(rescanButton_);
+        addAndMakeVisible(stopButton_);
         addAndMakeVisible(clearButton_);
+        addAndMakeVisible(fileButton_);
+        addAndMakeVisible(selectedButton_);
+        addAndMakeVisible(wavesButton_);
+        addAndMakeVisible(appleButton_);
+        addAndMakeVisible(instrumentButton_);
         addAndMakeVisible(status_);
         addAndMakeVisible(knownTitle_);
         addAndMakeVisible(failedTitle_);
@@ -50,15 +67,50 @@ public:
 
         scanButton_.setButtonText("Scan");
         rescanButton_.setButtonText("Rescan");
+        stopButton_.setButtonText("Stop");
         clearButton_.setButtonText("Clear failed");
+        fileButton_.setButtonText("Scan file…");
+        selectedButton_.setButtonText("Rescan selected");
+        wavesButton_.setButtonText("Scan Waves shells");
+        appleButton_.setButtonText("Show Apple Audio Units in inserts");
+        instrumentButton_.setButtonText("Show instruments in inserts");
+
+        wavesButton_.setToggleState(engine_.pluginCatalogue().scanWavesShells(), juce::dontSendNotification);
+        appleButton_.setToggleState(engine_.pluginCatalogue().showAppleInInserts(), juce::dontSendNotification);
+        instrumentButton_.setToggleState(engine_.pluginCatalogue().showInstrumentsInInserts(), juce::dontSendNotification);
+
         scanButton_.onClick = [this] { engine_.pluginCatalogue().scanNew(); };
         rescanButton_.onClick = [this] { engine_.pluginCatalogue().rescan(); };
+        stopButton_.onClick = [this] { engine_.pluginCatalogue().stopScan(); };
         clearButton_.onClick = [this] { engine_.pluginCatalogue().clearFailedAndScan(); };
-        for (auto* button : { &scanButton_, &rescanButton_, &clearButton_ })
-            button->setMouseClickGrabsKeyboardFocus(false);
+        fileButton_.onClick = [this] { chooseFile(); };
+        selectedButton_.onClick = [this]
+        {
+            const auto identifier = knownModel_.identifier(knownList_.getSelectedRow());
+            if (identifier.isNotEmpty())
+                engine_.pluginCatalogue().rescanIdentifier(identifier);
+        };
+        wavesButton_.onClick = [this]
+        {
+            engine_.pluginCatalogue().setScanWavesShells(wavesButton_.getToggleState());
+        };
+        appleButton_.onClick = [this]
+        {
+            engine_.pluginCatalogue().setShowAppleInInserts(appleButton_.getToggleState());
+        };
+        instrumentButton_.onClick = [this]
+        {
+            engine_.pluginCatalogue().setShowInstrumentsInInserts(instrumentButton_.getToggleState());
+        };
 
-        knownTitle_.setText("Scanned plugins", juce::dontSendNotification);
-        failedTitle_.setText("Failed", juce::dontSendNotification);
+        for (auto* button : { &scanButton_, &rescanButton_, &stopButton_, &clearButton_, &fileButton_, &selectedButton_ })
+            button->setMouseClickGrabsKeyboardFocus(false);
+        for (auto* toggle : { &wavesButton_, &appleButton_, &instrumentButton_ })
+        {
+            toggle->setMouseClickGrabsKeyboardFocus(false);
+            toggle->setClickingTogglesState(true);
+        }
+
         knownTitle_.setFont(juce::Font(juce::FontOptions(13.0f)));
         failedTitle_.setFont(juce::Font(juce::FontOptions(13.0f)));
         status_.setFont(juce::Font(juce::FontOptions(13.0f)));
@@ -70,50 +122,103 @@ public:
         failedList_.setRowHeight(22);
         knownList_.setColour(juce::ListBox::backgroundColourId, theme::background);
         failedList_.setColour(juce::ListBox::backgroundColourId, theme::background);
+
+        wavesButton_.setTooltip("Off by default. A Waves shell lists hundreds of plugins and is scanned last when this is on.");
+        appleButton_.setTooltip("Apple's built-in Audio Units stay out of the insert list until this is on.");
+        instrumentButton_.setTooltip("Instruments and plugins with no audio input stay out of the insert list until this is on.");
     }
 
     void refresh()
     {
         const auto status = engine_.pluginCatalogue().status();
-        status_.setText(status.text, juce::dontSendNotification);
+        juce::String line = status.text;
+        if (status.scanning)
+        {
+            line = juce::String(status.done) + " / " + juce::String(status.total);
+            if (status.current.isNotEmpty())
+                line << "   " << status.current;
+            const int seconds = std::max(0, status.elapsedMs / 1000);
+            line << "   " << (seconds / 60) << ":" << juce::String(seconds % 60).paddedLeft('0', 2);
+        }
+        status_.setText(line, juce::dontSendNotification);
+        progress_ = status.total > 0 ? static_cast<float>(status.done) / static_cast<float>(status.total) : (status.scanning ? 0.0f : 1.0f);
+        scanning_ = status.scanning;
+
         scanButton_.setEnabled(! status.scanning);
         rescanButton_.setEnabled(! status.scanning);
         clearButton_.setEnabled(! status.scanning);
+        fileButton_.setEnabled(! status.scanning);
+        selectedButton_.setEnabled(! status.scanning);
+        stopButton_.setEnabled(status.scanning);
+
+        const double knownScroll = knownList_.getVerticalPosition();
+        const double failedScroll = failedList_.getVerticalPosition();
+        const int knownSelection = knownList_.getSelectedRow();
 
         std::vector<juce::String> known;
+        std::vector<juce::String> knownIds;
         for (const auto& type : engine_.pluginCatalogue().types())
         {
-            juce::String line = type.name;
+            juce::String text = type.name;
             if (type.pluginFormatName.isNotEmpty())
-                line << "   " << type.pluginFormatName;
+                text << "   " << type.pluginFormatName;
             if (type.manufacturerName.isNotEmpty())
-                line << "   " << type.manufacturerName;
-            known.push_back(line);
+                text << "   " << type.manufacturerName;
+            known.push_back(text);
+            knownIds.push_back(type.fileOrIdentifier);
         }
-        knownModel_.setLines(std::move(known));
+        knownModel_.setRows(std::move(known), std::move(knownIds));
         knownList_.updateContent();
+        knownList_.setVerticalPosition(knownScroll);
+        if (knownSelection >= 0)
+            knownList_.selectRow(knownSelection, true, true);
 
         std::vector<juce::String> failed;
-        for (const auto& file : engine_.pluginCatalogue().failedFiles())
-            failed.push_back(file);
-        failedModel_.setLines(std::move(failed));
+        std::vector<juce::String> failedIds;
+        for (const auto& failure : engine_.pluginCatalogue().failures())
+        {
+            juce::String text = failure.reason;
+            if (failure.identifier.isNotEmpty())
+                text << "   " << failure.identifier;
+            failed.push_back(text);
+            failedIds.push_back(failure.identifier);
+        }
+        failedModel_.setRows(std::move(failed), std::move(failedIds));
         failedList_.updateContent();
-        knownTitle_.setText("Scanned plugins (" + juce::String(status.known) + ")", juce::dontSendNotification);
-        failedTitle_.setText("Failed (" + juce::String(status.failed) + ")", juce::dontSendNotification);
+        failedList_.setVerticalPosition(failedScroll);
+
+        knownTitle_.setText("Found (" + juce::String(status.known) + ")", juce::dontSendNotification);
+        auto failedLabel = "Failed (" + juce::String(status.failed) + ")";
+        if (status.skippedWaves > 0)
+            failedLabel << "   Waves skipped " << status.skippedWaves;
+        failedTitle_.setText(failedLabel, juce::dontSendNotification);
+        repaint();
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced(12);
         auto buttons = area.removeFromTop(28);
-        scanButton_.setBounds(buttons.removeFromLeft(90));
-        buttons.removeFromLeft(8);
-        rescanButton_.setBounds(buttons.removeFromLeft(90));
-        buttons.removeFromLeft(8);
-        clearButton_.setBounds(buttons.removeFromLeft(120));
-        area.removeFromTop(8);
+        scanButton_.setBounds(buttons.removeFromLeft(72));
+        buttons.removeFromLeft(6);
+        rescanButton_.setBounds(buttons.removeFromLeft(84));
+        buttons.removeFromLeft(6);
+        stopButton_.setBounds(buttons.removeFromLeft(72));
+        buttons.removeFromLeft(6);
+        clearButton_.setBounds(buttons.removeFromLeft(110));
+        buttons.removeFromLeft(6);
+        fileButton_.setBounds(buttons.removeFromLeft(100));
+        buttons.removeFromLeft(6);
+        selectedButton_.setBounds(buttons.removeFromLeft(140));
+        area.removeFromTop(6);
+        wavesButton_.setBounds(area.removeFromTop(22));
+        appleButton_.setBounds(area.removeFromTop(22));
+        instrumentButton_.setBounds(area.removeFromTop(22));
+        area.removeFromTop(6);
+        progressArea_ = area.removeFromTop(14);
+        area.removeFromTop(6);
         status_.setBounds(area.removeFromTop(22));
-        area.removeFromTop(8);
+        area.removeFromTop(6);
 
         auto left = area.removeFromLeft(area.getWidth() * 2 / 3);
         area.removeFromLeft(8);
@@ -126,13 +231,54 @@ public:
     void paint(juce::Graphics& graphics) override
     {
         graphics.fillAll(theme::background);
+        if (progressArea_.isEmpty())
+            return;
+        graphics.setColour(theme::panel);
+        graphics.fillRoundedRectangle(progressArea_.toFloat(), 4.0f);
+        if (progress_ > 0.0f)
+        {
+            auto filled = progressArea_.toFloat();
+            filled.setWidth(filled.getWidth() * std::clamp(progress_, 0.0f, 1.0f));
+            graphics.setColour(scanning_ ? theme::amber : theme::green);
+            graphics.fillRoundedRectangle(filled, 4.0f);
+        }
     }
 
 private:
+    void chooseFile()
+    {
+        if (chooser_ != nullptr)
+            return;
+        const auto start = juce::File("/Library/Audio/Plug-Ins");
+        chooser_ = std::make_unique<juce::FileChooser>("Scan one plugin",
+                                                       start.isDirectory() ? start : juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+                                                       "*.vst3;*.component",
+                                                       true);
+        chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::canSelectDirectories,
+                              [this](const juce::FileChooser& chooser)
+                              {
+                                  const auto chosen = chooser.getResult();
+                                  juce::MessageManager::callAsync([this, chosen]
+                                  {
+                                      chooser_.reset();
+                                      if (chosen.getFullPathName().isNotEmpty())
+                                          engine_.pluginCatalogue().scanFile(chosen);
+                                      refresh();
+                                  });
+                              });
+    }
+
     AudioEngine& engine_;
     juce::TextButton scanButton_;
     juce::TextButton rescanButton_;
+    juce::TextButton stopButton_;
     juce::TextButton clearButton_;
+    juce::TextButton fileButton_;
+    juce::TextButton selectedButton_;
+    juce::ToggleButton wavesButton_;
+    juce::ToggleButton appleButton_;
+    juce::ToggleButton instrumentButton_;
     juce::Label status_;
     juce::Label knownTitle_;
     juce::Label failedTitle_;
@@ -140,6 +286,10 @@ private:
     NameList failedModel_;
     juce::ListBox knownList_;
     juce::ListBox failedList_;
+    juce::Rectangle<int> progressArea_;
+    float progress_ = 0.0f;
+    bool scanning_ = false;
+    std::unique_ptr<juce::FileChooser> chooser_;
 };
 
 ScannerWindow::ScannerWindow(AudioEngine& engine)
@@ -153,7 +303,7 @@ ScannerWindow::ScannerWindow(AudioEngine& engine)
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
     setResizable(true, false);
-    centreWithSize(760, 480);
+    centreWithSize(860, 560);
     setVisible(false);
     startTimerHz(4);
 }

@@ -51,21 +51,6 @@ bool configureBuses(juce::AudioPluginInstance& instance, bool& stereo)
     return instance.getTotalNumOutputChannels() > 0;
 }
 
-void delayInPlace(std::vector<float>& buffer, int& write, int length, float* data, int numSamples)
-{
-    if (data == nullptr || length <= 0 || static_cast<int>(buffer.size()) < length)
-        return;
-
-    for (int index = 0; index < numSamples; ++index)
-    {
-        const float oldest = buffer[static_cast<std::size_t>(write)];
-        buffer[static_cast<std::size_t>(write)] = data[index];
-        data[index] = oldest;
-        if (++write >= length)
-            write = 0;
-    }
-}
-
 } // namespace
 
 struct PluginRack::LiveGraph
@@ -180,6 +165,8 @@ void PluginRack::process(float* const* outputs, int numOutputs, int numSamples, 
             for (int slot = 0; slot < kSlotsPerChannel; ++slot)
                 anyPlugin = anyPlugin || graph->slots[channel][slot].instance != nullptr;
 
+            // No plugin: the passthrough copy stays. That is the dry virtual-soundcheck
+            // path, and the delay below still lines it up with the processed channels.
             if (anyPlugin && numSamples <= graph->maxBlock && graph->scratchLeft.size() >= static_cast<std::size_t>(numSamples))
             {
                 juce::FloatVectorOperations::copy(graph->scratchLeft.data(), output, numSamples);
@@ -202,11 +189,14 @@ void PluginRack::process(float* const* outputs, int numOutputs, int numSamples, 
                 juce::FloatVectorOperations::copy(output, graph->scratchLeft.data(), numSamples);
             }
 
-            delayInPlace(graph->delay[static_cast<std::size_t>(channel)],
-                         graph->delayWrite[static_cast<std::size_t>(channel)],
-                         graph->delayLength[static_cast<std::size_t>(channel)],
-                         output,
-                         numSamples);
+            auto& line = graph->delay[static_cast<std::size_t>(channel)];
+            const int length = graph->delayLength[static_cast<std::size_t>(channel)];
+            if (length > 0 && static_cast<int>(line.size()) >= length)
+                delayInPlace(line.data(),
+                             length,
+                             graph->delayWrite[static_cast<std::size_t>(channel)],
+                             output,
+                             numSamples);
         }
     }
 

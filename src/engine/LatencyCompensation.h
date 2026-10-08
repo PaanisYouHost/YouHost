@@ -77,4 +77,23 @@ inline CompensationPlan planCompensation(const ChannelLatencyInput* channels, in
     return plan;
 }
 
+// Realtime delay of `length` samples. A dry channel uses this so it lines up
+// with a channel whose plugins already delayed the signal.
+inline void delayInPlace(float* line, int length, int& write, float* data, int numSamples) noexcept
+{
+    if (line == nullptr || data == nullptr || length <= 0 || numSamples <= 0)
+        return;
+    if (write < 0 || write >= length)
+        write = 0;
+
+    for (int index = 0; index < numSamples; ++index)
+    {
+        const float oldest = line[write];
+        line[write] = data[index];
+        data[index] = oldest;
+        if (++write >= length)
+            write = 0;
+    }
+}
+
 } // namespace youhost

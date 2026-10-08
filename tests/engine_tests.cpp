@@ -1,10 +1,13 @@
 #include "engine/DropoutDetect.h"
+#include "engine/DropoutLog.h"
 #include "engine/LatencyCompensation.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterLayout.h"
 #include "engine/MeterScale.h"
 #include "engine/Passthrough.h"
+#include "engine/ScanJobs.h"
 #include "engine/SessionFiles.h"
+#include "engine/TakeImport.h"
 #include "engine/TakePlan.h"
 
 #include <cmath>
@@ -343,6 +346,126 @@ void testLatencyCompensation()
     CHECK(youhost::sumSlotLatency(latencies, occupied, bypassed, 4) == 40);
 }
 
+void testPlaybackCopiesDryChannels()
+{
+    std::array<bool, youhost::kMaxChannels> inputs {};
+    std::array<bool, youhost::kMaxChannels> outputs {};
+    inputs[0] = true;
+    inputs[2] = true;
+    outputs[0] = true;
+    outputs[2] = true;
+    auto routing = youhost::makeRouting(inputs, outputs);
+    for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+        routing.inputPacked[static_cast<std::size_t>(channel)] = static_cast<std::int16_t>(channel);
+
+    float playback[youhost::kMaxChannels][4] {};
+    playback[0][0] = 0.25f;
+    playback[2][0] = -0.5f;
+    const float* inputPointers[youhost::kMaxChannels] {};
+    for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+        inputPointers[channel] = playback[channel];
+
+    float out0[4] {};
+    float out2[4] {};
+    float* outputsPacked[2] = { out0, out2 };
+    std::array<youhost::ChannelStrip, youhost::kMaxChannels> strips {};
+    youhost::processPassthrough(inputPointers,
+                                youhost::kMaxChannels,
+                                outputsPacked,
+                                2,
+                                4,
+                                configAt(48000.0, routing),
+                                strips.data(),
+                                youhost::kMaxChannels);
+    CHECK(near(out0[0], 0.25f, 0.0001f));
+    CHECK(near(out2[0], -0.5f, 0.0001f));
+    CHECK(out0[1] == 0.0f);
+    CHECK(out2[1] == 0.0f);
+}
+
+void testDryChannelDelayMatchesPluginChannel()
+{
+    youhost::ChannelLatencyInput channels[2] {};
+    channels[0] = { 8, true };
+    channels[1] = { 0, true };
+    const auto plan = youhost::planCompensation(channels, 2);
+    CHECK(plan.alignmentSamples == 8);
+    CHECK(plan.delaySamples[0] == 0);
+    CHECK(plan.delaySamples[1] == 8);
+
+    float plugin[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0 };
+    float dry[12] = { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    float line[8] {};
+    int write = 0;
+    youhost::delayInPlace(line, plan.delaySamples[1], write, dry, 12);
+    CHECK(dry[8] == 1.0f);
+    CHECK(plugin[8] == 1.0f);
+    CHECK(dry[0] == 0.0f);
+}
+
+void testScanOrderSkipsWavesAndHidesBuiltIns()
+{
+    auto waves = youhost::makeScanCandidate("AudioUnit", "AudioUnit:Effects/aumf,CLSM,ksWV");
+    auto feedback = youhost::makeScanCandidate("VST3", "/Library/Audio/Plug-Ins/VST3/Defeedback.vst3");
+    auto shell = youhost::makeScanCandidate("VST3", "/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3.vst3");
+    CHECK(waves.waves);
+    CHECK(waves.shell);
+    CHECK(! feedback.shell);
+    CHECK(shell.waves);
+    CHECK(youhost::skipBecauseWaves(waves, false));
+    CHECK(! youhost::skipBecauseWaves(waves, true));
+    CHECK(! youhost::skipBecauseWaves(feedback, false));
+
+    std::vector<youhost::ScanCandidate> jobs { waves, feedback, shell };
+    youhost::orderScanCandidates(jobs);
+    CHECK(jobs[0].identifier.find("Defeedback") != std::string::npos);
+
+    CHECK(! youhost::showInInsertList("Apple", "AudioUnit:Effects/aufx,appl", false, 2, false, false));
+    CHECK(youhost::showInInsertList("Apple", "AudioUnit:Effects/aufx,appl", false, 2, true, false));
+    CHECK(! youhost::showInInsertList("Alpha Labs", "Defeedback", true, 0, false, false));
+    CHECK(youhost::showInInsertList("Alpha Labs", "/Library/Audio/Plug-Ins/VST3/Defeedback.vst3", false, 1, false, false));
+}
+
+void testTakeImportGroups()
+{
+    const auto kick = youhost::parseRecordingName("Take01_Ch03_Kick.wav");
+    CHECK(kick.takeNumber == 1);
+    CHECK(kick.channelNumber == 3);
+    const auto slash = youhost::parseRecordingName("Take12_Ch01_KickSnare.wav");
+    CHECK(slash.takeNumber == 12);
+    CHECK(slash.channelNumber == 1);
+    const auto loose = youhost::parseRecordingName("Track 4 snare.wav");
+    CHECK(loose.takeNumber == 0);
+    CHECK(loose.channelNumber == 4);
+
+    const auto takes = youhost::groupImportedRecordings({ "Take02_Ch01_A.wav", "Kick.wav", "Take01_Ch02_B.wav" });
+    CHECK(takes.size() == 3);
+    CHECK(takes[0].number == 1);
+    CHECK(takes[0].channels[0].channel == 1);
+    CHECK(takes[1].number == 2);
+    CHECK(takes[2].number == 0);
+    CHECK(takes[2].channels[0].channel == 0);
+}
+
+void testDropoutWindow()
+{
+    youhost::DropoutRing ring;
+    ring.push(1000, 10, true);
+    ring.push(5000, -1, false);
+    youhost::DropoutMark marks[4];
+    CHECK(ring.drain(marks, 4) == 2);
+    CHECK(marks[0].recording);
+    CHECK(marks[0].timelineSample == 10);
+    CHECK(! marks[1].recording);
+    CHECK(ring.drain(marks, 4) == 0);
+
+    CHECK(youhost::countMarksInWindow(marks, 2, 6000, 2000) == 1);
+    CHECK(youhost::countMarksInWindow(marks, 2, 6000, 0) == 2);
+    CHECK(youhost::windowIsStable(marks, 2, 6000, 500));
+    CHECK(! youhost::windowIsStable(marks, 2, 6000, 0));
+    CHECK(youhost::latestMarkNs(marks, 2) == 5000);
+}
+
 void testSessionLayout()
 {
     const auto layout = youhost::sessionLayoutFor("/tmp/My Session/");
@@ -369,6 +492,11 @@ int main()
     testMeterScales();
     testDropoutDecisions();
     testLatencyCompensation();
+    testPlaybackCopiesDryChannels();
+    testDryChannelDelayMatchesPluginChannel();
+    testScanOrderSkipsWavesAndHidesBuiltIns();
+    testTakeImportGroups();
+    testDropoutWindow();
     testSessionLayout();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();

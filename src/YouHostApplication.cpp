@@ -73,14 +73,8 @@ void YouHostApplication::initialise(const juce::String& commandLine)
     if (isScanWorkerCommandLine(commandLine))
     {
         worker_ = std::make_unique<ScanWorker>();
-        if (worker_->initialiseFromCommandLine(commandLine, "YouHostScan", 15000))
-        {
-            workerMode_ = true;
-            return;
-        }
-
-        worker_.reset();
-        quit();
+        worker_->startFromCommandLine(commandLine);
+        workerMode_ = true;
         return;
     }
 

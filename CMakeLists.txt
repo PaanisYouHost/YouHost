@@ -39,6 +39,7 @@ target_sources(YouHost PRIVATE
     src/engine/PluginRack.cpp
     src/engine/Recorder.cpp
     src/engine/SessionDocument.cpp
+    src/ui/DropoutWindow.cpp
     src/ui/LatencyReadout.cpp
     src/ui/MeterGrid.cpp
     src/ui/MainComponent.cpp

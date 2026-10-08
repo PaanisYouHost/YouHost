@@ -115,6 +115,100 @@ public:
         }
     }
 
+    std::unique_ptr<juce::XmlElement> loadScanFailures()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getXmlValue("scanFailures");
+        return {};
+    }
+
+    void saveScanFailures(const juce::XmlElement* xml)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            if (xml != nullptr)
+                settings->setValue("scanFailures", xml);
+            else
+                settings->removeValue("scanFailures");
+            settings->saveIfNeeded();
+        }
+    }
+
+    bool loadScanWavesShells()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getBoolValue("scanWavesShells", false);
+        return false;
+    }
+
+    void saveScanWavesShells(bool enabled)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("scanWavesShells", enabled);
+            settings->saveIfNeeded();
+        }
+    }
+
+    bool loadShowAppleInserts()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getBoolValue("showAppleInserts", false);
+        return false;
+    }
+
+    void saveShowAppleInserts(bool enabled)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("showAppleInserts", enabled);
+            settings->saveIfNeeded();
+        }
+    }
+
+    bool loadShowInstrumentInserts()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getBoolValue("showInstrumentInserts", false);
+        return false;
+    }
+
+    void saveShowInstrumentInserts(bool enabled)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("showInstrumentInserts", enabled);
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::StringArray loadRecentSessions()
+    {
+        juce::StringArray lines;
+        if (auto* settings = properties_.getUserSettings())
+            lines.addLines(settings->getValue("recentSessions"));
+        lines.removeEmptyStrings();
+        while (lines.size() > 10)
+            lines.remove(lines.size() - 1);
+        return lines;
+    }
+
+    void rememberRecentSession(const juce::String& folder)
+    {
+        if (folder.isEmpty())
+            return;
+        if (auto* settings = properties_.getUserSettings())
+        {
+            auto lines = loadRecentSessions();
+            lines.removeString(folder);
+            lines.insert(0, folder);
+            while (lines.size() > 10)
+                lines.remove(lines.size() - 1);
+            settings->setValue("recentSessions", lines.joinIntoString("\n"));
+            settings->saveIfNeeded();
+        }
+    }
+
     juce::String loadLastSessionFolder()
     {
         if (auto* settings = properties_.getUserSettings())

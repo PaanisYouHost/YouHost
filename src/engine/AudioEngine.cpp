@@ -3,6 +3,7 @@
 #include "MeterScale.h"
 #include "SessionDocument.h"
 #include "SessionFiles.h"
+#include "TakeImport.h"
 
 #include <algorithm>
 #include <chrono>
@@ -30,9 +31,9 @@ OSStatus overloadListener(AudioObjectID,
                           const AudioObjectPropertyAddress*,
                           void* client)
 {
-    auto* counter = static_cast<std::atomic<std::uint32_t>*>(client);
-    if (counter != nullptr)
-        counter->fetch_add(numberOfAddresses == 0 ? 1u : numberOfAddresses, std::memory_order_relaxed);
+    auto* engine = static_cast<AudioEngine*>(client);
+    if (engine != nullptr)
+        engine->noteDropout(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses));
     return noErr;
 }
 
@@ -93,6 +94,7 @@ AudioEngine::AudioEngine(AppSettings& settings)
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
+    dropoutOriginNs_ = steadyNowNs();
 }
 
 AudioEngine::~AudioEngine()
@@ -257,6 +259,11 @@ void AudioEngine::requestClipClearAll()
 void AudioEngine::resetDropouts()
 {
     dropoutCount_.store(0, std::memory_order_relaxed);
+    dropoutRing_.discardPending();
+    dropoutMarks_.clear();
+    cpuSamples_.clear();
+    dropoutOriginNs_ = steadyNowNs();
+    lastCpuSampleNs_ = 0;
 }
 
 void AudioEngine::noteDropout(int events)
@@ -264,6 +271,67 @@ void AudioEngine::noteDropout(int events)
     if (events <= 0)
         return;
     dropoutCount_.fetch_add(static_cast<std::uint32_t>(events), std::memory_order_relaxed);
+    const bool recording = recorder_ != nullptr && recorder_->isRecording();
+    const auto sample = recording ? recorder_->playhead() : static_cast<std::int64_t>(-1);
+    const auto stamp = steadyNowNs();
+    const int marks = std::min(events, 8);
+    for (int index = 0; index < marks; ++index)
+        dropoutRing_.push(stamp, sample, recording);
+}
+
+void AudioEngine::drainDropoutLog()
+{
+    DropoutMark batch[64];
+    const int count = dropoutRing_.drain(batch, 64);
+    const auto nowSteady = steadyNowNs();
+    const auto nowWall = juce::Time::currentTimeMillis();
+
+    if (dropoutOriginNs_ == 0)
+        dropoutOriginNs_ = nowSteady;
+
+    for (int index = 0; index < count; ++index)
+    {
+        dropoutMarks_.push_back(batch[index]);
+        if (dropoutMarks_.size() > 8192)
+            dropoutMarks_.erase(dropoutMarks_.begin());
+
+        if (sessionFolder_ != juce::File())
+        {
+            const auto ageMs = std::max<std::int64_t>(0, (nowSteady - batch[index].steadyNs) / 1000000);
+            const auto wall = nowWall - ageMs;
+            auto file = sessionFolder_.getChildFile("dropouts.csv");
+            if (! dropoutHeaderWritten_ || ! file.existsAsFile())
+            {
+                if (! file.existsAsFile())
+                    file.appendText("wall_ms,steady_ns,timeline_sample,recording\n");
+                dropoutHeaderWritten_ = true;
+            }
+            file.appendText(juce::String(wall) + ","
+                            + juce::String(batch[index].steadyNs) + ","
+                            + juce::String(batch[index].timelineSample) + ","
+                            + juce::String(batch[index].recording ? 1 : 0) + "\n");
+        }
+    }
+
+    if (lastCpuSampleNs_ == 0 || nowSteady - lastCpuSampleNs_ >= 200000000)
+    {
+        lastCpuSampleNs_ = nowSteady;
+        cpuSamples_.push_back({ nowSteady, cpuUsage_.load(std::memory_order_relaxed) });
+        if (cpuSamples_.size() > 20000)
+            cpuSamples_.erase(cpuSamples_.begin(), cpuSamples_.begin() + 4000);
+    }
+}
+
+DropoutSnapshot AudioEngine::dropoutSnapshot() const
+{
+    DropoutSnapshot snapshot;
+    snapshot.nowNs = steadyNowNs();
+    snapshot.originNs = dropoutOriginNs_;
+    snapshot.total = static_cast<int>(std::min<std::uint32_t>(dropoutCount_.load(std::memory_order_relaxed), 2147483647u));
+    snapshot.marks = dropoutMarks_;
+    snapshot.cpu = cpuSamples_;
+    snapshot.lastSteadyNs = latestMarkNs(snapshot.marks.data(), static_cast<int>(snapshot.marks.size()));
+    return snapshot;
 }
 
 void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -301,6 +369,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         AudioThreadConfig playConfig = config;
         for (int channel = 0; channel < kMaxChannels; ++channel)
             playConfig.routing.inputPacked[static_cast<std::size_t>(channel)] = channel;
+        // Every recorded channel, including ones with no plugin, is copied onto
+        // its matching USB output here. The rack then runs plugins and the
+        // alignment delay, so a dry channel is delayed up to the slowest chain.
         processPassthrough(playbackPtrs_.data(),
                            kMaxChannels,
                            outputChannelData,
@@ -429,7 +500,7 @@ void AudioEngine::installOverloadListener(const juce::String& deviceName)
         return;
 
     const AudioObjectPropertyAddress address = overloadAddress();
-    if (AudioObjectAddPropertyListener(id, &address, &overloadListener, &dropoutCount_) == noErr)
+    if (AudioObjectAddPropertyListener(id, &address, &overloadListener, this) == noErr)
         overloadDeviceId_ = static_cast<std::uint32_t>(id);
    #else
     juce::ignoreUnused(deviceName);
@@ -446,7 +517,7 @@ void AudioEngine::removeOverloadListener()
     AudioObjectRemovePropertyListener(static_cast<AudioDeviceID>(overloadDeviceId_),
                                       &address,
                                       &overloadListener,
-                                      &dropoutCount_);
+                                      this);
     overloadDeviceId_ = 0;
    #endif
 }
@@ -582,9 +653,12 @@ void AudioEngine::transportStop()
 {
     if (recorder_ == nullptr)
         return;
-    const bool active = recorder_->isRecording() || recorder_->isPlaying();
+    const bool recording = recorder_->isRecording();
+    const bool active = recording || recorder_->isPlaying();
     recorder_->stop();
-    if (active)
+    if (recording)
+        saveSession();
+    else if (active)
         noteSessionEdit();
 }
 
@@ -622,8 +696,13 @@ TransportView AudioEngine::transportView() const
 void AudioEngine::startNewSession()
 {
     if (recorder_ != nullptr)
+        recorder_->stop();
+    if (sessionFolder_ != juce::File())
+        saveSession();
+    if (recorder_ != nullptr)
         recorder_->clearTakes();
     sessionFolder_ = juce::File();
+    sessionDirty_ = false;
     ensureSessionFolder();
 }
 
@@ -700,6 +779,7 @@ void AudioEngine::maintainSession()
 {
     if (catalogue_ != nullptr)
         catalogue_->flushSave();
+    drainDropoutLog();
 
     if (! sessionDirty_ || sessionFolder_ == juce::File())
         return;
@@ -722,6 +802,8 @@ juce::File AudioEngine::suggestedSessionFolder() const
 
 bool AudioEngine::saveSession()
 {
+    if (sessionFolder_ == juce::File())
+        ensureSessionFolder();
     if (sessionFolder_ == juce::File())
         return false;
     return saveSessionToFolder(sessionFolder_);
@@ -758,6 +840,7 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
 
     syncRecorderFolder();
     settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
+    settings_.rememberRecentSession(sessionFolder_.getFullPathName());
     if (sessionMessage_.isEmpty() || sessionMessage_.startsWith("Saved "))
         sessionMessage_ = "Saved " + sessionFolder_.getFileName();
     sessionDirty_ = false;
@@ -812,10 +895,166 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     }
 
     settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
+    settings_.rememberRecentSession(sessionFolder_.getFullPathName());
     sessionMessage_ = "Opened " + sessionFolder_.getFileName();
     sessionDirty_ = false;
     restoringSession_ = false;
+    dropoutHeaderWritten_ = false;
     return true;
+}
+
+bool AudioEngine::saveSessionAs(const juce::File& folder)
+{
+    if (folder.getFullPathName().isEmpty())
+        return false;
+
+    if (recorder_ != nullptr)
+        recorder_->stop();
+    if (sessionFolder_ == juce::File())
+        ensureSessionFolder();
+    else if (! saveSession())
+        return false;
+
+    if (folder.getFullPathName() == sessionFolder_.getFullPathName())
+        return true;
+
+    folder.createDirectory();
+    for (const auto& child : sessionFolder_.findChildFiles(juce::File::findFiles, false))
+        child.copyFileTo(folder.getChildFile(child.getFileName()));
+
+    const auto audio = sessionFolder_.getChildFile(kAudioFolderName);
+    const auto destinationAudio = folder.getChildFile(kAudioFolderName);
+    destinationAudio.createDirectory();
+    if (audio.isDirectory())
+    {
+        for (const auto& wav : audio.findChildFiles(juce::File::findFiles, false))
+        {
+            if (! wav.copyFileTo(destinationAudio.getChildFile(wav.getFileName())))
+            {
+                sessionMessage_ = "Could not copy " + wav.getFileName();
+                return false;
+            }
+        }
+    }
+
+    sessionFolder_ = folder;
+    dropoutHeaderWritten_ = false;
+    syncRecorderFolder();
+    if (! saveSession())
+        return false;
+    sessionMessage_ = "Saved a copy to " + folder.getFullPathName() + ". The original folder was left in place.";
+    return true;
+}
+
+bool AudioEngine::importRecordingFolder(const juce::File& folder)
+{
+    if (folder.getChildFile(kSessionFileName).existsAsFile())
+        return loadSessionFrom(folder);
+    if (folder.getFileName() == juce::String(kSessionFileName) && folder.existsAsFile())
+        return loadSessionFrom(folder);
+
+    auto source = folder.isDirectory() ? folder : folder.getParentDirectory();
+    juce::Array<juce::File> wavs = source.findChildFiles(juce::File::findFiles, false, "*.wav");
+    if (wavs.isEmpty())
+        wavs = source.findChildFiles(juce::File::findFiles, true, "*.wav");
+    if (wavs.isEmpty())
+    {
+        sessionMessage_ = "No WAV files in that folder.";
+        return false;
+    }
+
+    if (recorder_ != nullptr)
+        recorder_->stop();
+    ensureSessionFolder();
+    const auto layout = sessionLayoutFor(sessionFolder_.getFullPathName().toStdString());
+    const juce::File audioFolder(layout.audioFolder);
+    audioFolder.createDirectory();
+
+    std::vector<std::string> names;
+    names.reserve(static_cast<std::size_t>(wavs.size()));
+    for (const auto& wav : wavs)
+        names.push_back(wav.getFileName().toStdString());
+    const auto groups = groupImportedRecordings(names);
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    int added = 0;
+    double importedRate = 0.0;
+    for (const auto& group : groups)
+    {
+        std::array<juce::String, kMaxChannels> files {};
+        std::int64_t length = 0;
+        for (const auto& channel : group.channels)
+        {
+            if (channel.channel < 0 || channel.channel >= kMaxChannels)
+                continue;
+
+            juce::File sourceFile;
+            for (const auto& wav : wavs)
+            {
+                if (wav.getFileName() == juce::String(channel.fileName))
+                {
+                    sourceFile = wav;
+                    break;
+                }
+            }
+            if (sourceFile == juce::File())
+                continue;
+
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(sourceFile));
+            if (reader == nullptr || reader->lengthInSamples <= 0)
+                continue;
+            if (importedRate <= 0.0)
+                importedRate = reader->sampleRate;
+            else if (reader->sampleRate < importedRate - 1.0 || reader->sampleRate > importedRate + 1.0)
+                continue;
+
+            auto storedName = sourceFile.getFileName();
+            const auto alreadyThere = audioFolder.getChildFile(storedName);
+            if (sourceFile != alreadyThere)
+            {
+                if (alreadyThere.existsAsFile())
+                    storedName = "import_" + storedName;
+                if (! sourceFile.copyFileTo(audioFolder.getChildFile(storedName)))
+                    continue;
+            }
+
+            files[static_cast<std::size_t>(channel.channel)] = storedName;
+            length = std::max(length, static_cast<std::int64_t>(reader->lengthInSamples));
+        }
+
+        if (length > 0 && recorder_ != nullptr)
+        {
+            recorder_->addImportedTake(length, files, importedRate);
+            ++added;
+        }
+    }
+
+    if (added == 0)
+    {
+        sessionMessage_ = "Could not import those WAV files.";
+        return false;
+    }
+
+    saveSession();
+    sessionMessage_ = "Imported " + juce::String(added) + (added == 1 ? " take." : " takes.");
+    return true;
+}
+
+void AudioEngine::clearTimeline()
+{
+    if (recorder_ != nullptr)
+    {
+        recorder_->stop();
+        recorder_->clearTakes();
+    }
+    saveSession();
+    sessionMessage_ = "Timeline cleared. The WAV files are still in the audio folder.";
+}
+
+juce::StringArray AudioEngine::recentSessions() const
+{
+    return settings_.loadRecentSessions();
 }
 
 } // namespace youhost

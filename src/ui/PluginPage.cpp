@@ -27,7 +27,7 @@ public:
         : engine_(engine),
           onChoose_(std::move(onChoose))
     {
-        types_ = engine_.pluginCatalogue().types();
+        types_ = engine_.pluginCatalogue().insertTypes();
         addAndMakeVisible(search_);
         addAndMakeVisible(list_);
         search_.setTextToShowWhenEmpty("Search plugins", theme::fainter);

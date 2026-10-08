@@ -2,6 +2,7 @@
 
 #include "AppSettings.h"
 #include "engine/AudioEngine.h"
+#include "ui/DropoutWindow.h"
 #include "ui/LatencyReadout.h"
 #include "ui/MeterGrid.h"
 #include "ui/PluginPage.h"
@@ -35,7 +36,14 @@ private:
     void hideDeviceTestTone();
     void showPage(int page);
     void toggleScanner();
+    void toggleDropouts();
     void openSession();
+    void saveSession();
+    void saveSessionAs();
+    void importRecordings();
+    void confirmClearTimeline();
+    void openRecent(int index);
+    void showFileMenu();
     void showHelp();
     bool shortcutBlocked(juce::Component* originating) const;
 
@@ -46,6 +54,9 @@ private:
     TimelineView timeline_;
     PluginPage pluginPage_;
     ScannerWindow scanner_;
+    DropoutWindow dropouts_;
+    class FileMenu;
+    std::unique_ptr<FileMenu> fileMenu_;
     juce::TooltipWindow tooltipWindow_ { this, 700 };
 
     juce::TextButton recorderButton_ { "1  Recorder" };
@@ -66,6 +77,9 @@ private:
     juce::TextButton clearClipsButton_ { "Clear clips" };
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
+    juce::TextButton saveButton_ { "Save" };
+    juce::TextButton fileButton_ { "File" };
+    juce::TextButton dropoutsButton_ { "Dropouts" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "Latency" };
     juce::TextButton retryButton_ { "Retry" };

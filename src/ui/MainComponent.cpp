@@ -12,10 +12,13 @@ constexpr const char* kShortcutHelp =
     "1  Recorder\n"
     "2  Plugins\n"
     "3  Open or close the plugin scanner\n"
+    "4 or D  Open or close the dropout timeline\n"
     "Space  Play, or Stop if YouHost is already playing or recording\n"
     "Shift+Space, R, or Cmd+Space  Record\n"
     "Left / Right  Previous or next take marker\n"
-    "Shift+Left / Shift+Right  Move 5 seconds\n\n"
+    "Shift+Left / Shift+Right  Move 5 seconds\n"
+    "Cmd+S  Save the session\n"
+    "Cmd+Shift+S  Save a copy of the session folder\n\n"
     "Cmd+Space only arrives if Spotlight is not using that shortcut. Shift+Space and R always work.\n"
     "Shortcuts stay quiet while you are typing in a text field or a plugin window.";
 
@@ -101,11 +104,83 @@ struct MainComponent::KeyProxy : juce::KeyListener
     MainComponent& owner;
 };
 
+class MainComponent::FileMenu : public juce::MenuBarModel
+{
+public:
+    explicit FileMenu(MainComponent& ownerIn)
+        : owner(ownerIn)
+    {
+    }
+
+    juce::StringArray getMenuBarNames() override
+    {
+        return { "File" };
+    }
+
+    juce::PopupMenu getMenuForIndex(int, const juce::String&) override
+    {
+        juce::PopupMenu menu;
+        menu.addItem(1, "New");
+        menu.addItem(2, "Open…");
+
+        juce::PopupMenu recent;
+        const auto sessions = owner.engine_.recentSessions();
+        for (int index = 0; index < sessions.size() && index < 10; ++index)
+        {
+            juce::PopupMenu::Item item;
+            item.itemID = 100 + index;
+            item.text = juce::File(sessions[index]).getFileName();
+            recent.addItem(item);
+        }
+        menu.addSubMenu("Open Recent", recent, ! sessions.isEmpty());
+        menu.addItem(5, "Import recording folder…");
+        menu.addSeparator();
+
+        juce::PopupMenu::Item save;
+        save.itemID = 3;
+        save.text = "Save";
+        save.shortcutKeyDescription = "Cmd+S";
+        menu.addItem(save);
+
+        juce::PopupMenu::Item saveAs;
+        saveAs.itemID = 4;
+        saveAs.text = "Save As…";
+        saveAs.shortcutKeyDescription = "Cmd+Shift+S";
+        menu.addItem(saveAs);
+        menu.addSeparator();
+        menu.addItem(6, "Clear timeline…");
+        return menu;
+    }
+
+    void menuItemSelected(int id, int) override
+    {
+        if (id == 1)
+            owner.engine_.startNewSession();
+        else if (id == 2)
+            owner.openSession();
+        else if (id == 3)
+            owner.saveSession();
+        else if (id == 4)
+            owner.saveSessionAs();
+        else if (id == 5)
+            owner.importRecordings();
+        else if (id == 6)
+            owner.confirmClearTimeline();
+        else if (id >= 100 && id < 110)
+            owner.openRecent(id - 100);
+        owner.refresh();
+    }
+
+private:
+    MainComponent& owner;
+};
+
 MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     : engine_(engine),
       settings_(settings),
       pluginPage_(engine),
       scanner_(engine),
+      dropouts_(engine),
       deviceSelector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false)
 {
     setOpaque(true);
@@ -143,6 +218,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(clearClipsButton_);
     addAndMakeVisible(newButton_);
     addAndMakeVisible(openButton_);
+    addAndMakeVisible(saveButton_);
+    addAndMakeVisible(fileButton_);
+    addAndMakeVisible(dropoutsButton_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
     addAndMakeVisible(retryButton_);
@@ -151,10 +229,16 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
     latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, 440, 280);
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
+    latencyReadout_.setGraphHandler([this] { toggleDropouts(); });
+    fileMenu_ = std::make_unique<FileMenu>(*this);
+#if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu(fileMenu_.get());
+#endif
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
-                          &clearClipsButton_, &newButton_, &openButton_, &setupButton_, &latencyButton_, &retryButton_ })
+                          &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
+                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_ })
         quiet(*button);
 
     recorderButton_.onClick = [this] { showPage(1); };
@@ -166,8 +250,14 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     playButton_.onClick = [this] { engine_.transportPlay(); };
     recButton_.onClick = [this] { engine_.transportRecord(); };
     helpButton_.onClick = [this] { showHelp(); };
-    newButton_.onClick = [this] { engine_.startNewSession(); };
+    newButton_.onClick = [this] { engine_.startNewSession(); refresh(); };
     openButton_.onClick = [this] { openSession(); };
+    saveButton_.onClick = [this] { saveSession(); };
+    fileButton_.onClick = [this] { showFileMenu(); };
+    dropoutsButton_.onClick = [this] { toggleDropouts(); };
+    dropoutsButton_.setTooltip("Dropout timeline  (4 or D)");
+    saveButton_.setTooltip("Save session.youhost  (Cmd+S)");
+    fileButton_.setTooltip("New, Open Recent, Save As, Import, Clear timeline");
     latencyButton_.onClick = [this]
     {
         const bool show = latencyWindow_ == nullptr || ! latencyWindow_->isVisible();
@@ -263,6 +353,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 MainComponent::~MainComponent()
 {
     stopTimer();
+#if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu(nullptr);
+#endif
+    fileMenu_.reset();
     if (keyTarget_ != nullptr && keys_ != nullptr)
         keyTarget_->removeKeyListener(keys_.get());
     engine_.setMeterRestoreHandler(nullptr);
@@ -322,6 +416,19 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         toggleScanner();
         return true;
     }
+    if ((character == '4' || character == 'd') && ! shift && ! command)
+    {
+        toggleDropouts();
+        return true;
+    }
+    if (character == 's' && command)
+    {
+        if (shift)
+            saveSessionAs();
+        else
+            saveSession();
+        return true;
+    }
 
     if (key.isKeyCode(juce::KeyPress::spaceKey))
     {
@@ -376,6 +483,106 @@ void MainComponent::toggleScanner()
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
 }
 
+void MainComponent::toggleDropouts()
+{
+    dropouts_.toggle();
+    dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+}
+
+void MainComponent::saveSession()
+{
+    engine_.saveSession();
+    refresh();
+}
+
+void MainComponent::saveSessionAs()
+{
+    if (fileChooser_ != nullptr)
+        return;
+
+    fileChooser_ = std::make_unique<juce::FileChooser>("Save a copy of this session",
+                                                       engine_.suggestedSessionFolder().getParentDirectory(),
+                                                       "*",
+                                                       true);
+    fileChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [this](const juce::FileChooser& chooser)
+                              {
+                                  const auto chosen = chooser.getResult();
+                                  juce::MessageManager::callAsync([this, chosen]
+                                  {
+                                      fileChooser_.reset();
+                                      if (chosen.getFullPathName().isNotEmpty())
+                                          engine_.saveSessionAs(chosen);
+                                      refresh();
+                                  });
+                              });
+}
+
+void MainComponent::importRecordings()
+{
+    if (fileChooser_ != nullptr)
+        return;
+
+    fileChooser_ = std::make_unique<juce::FileChooser>("Import a folder of WAV files",
+                                                       engine_.suggestedSessionFolder(),
+                                                       "*",
+                                                       true);
+    fileChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [this](const juce::FileChooser& chooser)
+                              {
+                                  const auto chosen = chooser.getResult();
+                                  juce::MessageManager::callAsync([this, chosen]
+                                  {
+                                      fileChooser_.reset();
+                                      if (chosen.getFullPathName().isNotEmpty())
+                                          engine_.importRecordingFolder(chosen);
+                                      refresh();
+                                  });
+                              });
+}
+
+void MainComponent::confirmClearTimeline()
+{
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
+                                       "Clear the timeline?",
+                                       "This forgets the takes in this session. The WAV files stay in the audio folder.",
+                                       "Clear timeline",
+                                       "Cancel",
+                                       nullptr,
+                                       juce::ModalCallbackFunction::create([this](int result)
+                                       {
+                                           if (result == 1)
+                                           {
+                                               engine_.clearTimeline();
+                                               refresh();
+                                           }
+                                       }));
+}
+
+void MainComponent::openRecent(int index)
+{
+    const auto sessions = engine_.recentSessions();
+    if (index < 0 || index >= sessions.size())
+        return;
+    if (engine_.hasSession())
+        engine_.saveSession();
+    engine_.loadSessionFrom(juce::File(sessions[index]));
+    refresh();
+}
+
+void MainComponent::showFileMenu()
+{
+    if (fileMenu_ == nullptr)
+        return;
+    auto menu = fileMenu_->getMenuForIndex(0, "File");
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&fileButton_),
+                       [this](int result)
+                       {
+                           if (fileMenu_ != nullptr)
+                               fileMenu_->menuItemSelected(result, 0);
+                       });
+}
+
 void MainComponent::showHelp()
 {
     juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
@@ -417,6 +624,8 @@ void MainComponent::openSession()
     if (fileChooser_ != nullptr)
         return;
 
+    if (engine_.hasSession())
+        engine_.saveSession();
     fileChooser_ = std::make_unique<juce::FileChooser>("Open a session",
                                                        engine_.suggestedSessionFolder(),
                                                        "*.youhost",
@@ -485,6 +694,7 @@ void MainComponent::refresh()
     recButton_.setToggleState(recording, juce::dontSendNotification);
     playButton_.setToggleState(playing, juce::dontSendNotification);
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
+    dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
 
     const int channels = engine_.visibleChannels();
     std::vector<MeterReading> readings(static_cast<std::size_t>(std::max(0, channels)));
@@ -602,10 +812,14 @@ void MainComponent::resized()
     tools.removeFromLeft(8);
     clearClipsButton_.setBounds(tools.removeFromLeft(96).reduced(0, 2));
     tools.removeFromLeft(8);
-    newButton_.setBounds(tools.removeFromLeft(58).reduced(0, 2));
-    openButton_.setBounds(tools.removeFromLeft(64).reduced(0, 2));
-    setupButton_.setBounds(tools.removeFromLeft(118).reduced(0, 2));
-    latencyButton_.setBounds(tools.removeFromLeft(84).reduced(0, 2));
+    newButton_.setBounds(tools.removeFromLeft(52).reduced(0, 2));
+    openButton_.setBounds(tools.removeFromLeft(58).reduced(0, 2));
+    saveButton_.setBounds(tools.removeFromLeft(54).reduced(0, 2));
+    fileButton_.setBounds(tools.removeFromLeft(50).reduced(0, 2));
+    tools.removeFromLeft(8);
+    setupButton_.setBounds(tools.removeFromLeft(108).reduced(0, 2));
+    latencyButton_.setBounds(tools.removeFromLeft(76).reduced(0, 2));
+    dropoutsButton_.setBounds(tools.removeFromLeft(88).reduced(0, 2));
     latencyLabel_.setBounds(tools.reduced(8, 0));
 
     const bool showBanner = ! engine_.microphoneGranted();

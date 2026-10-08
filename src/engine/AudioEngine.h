@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DropoutDetect.h"
+#include "DropoutLog.h"
 #include "LatencyMath.h"
 #include "Passthrough.h"
 #include "PluginCatalogue.h"
@@ -58,6 +59,9 @@ public:
     void requestClipClear(int channel);
     void requestClipClearAll();
     void resetDropouts();
+    void noteDropout(int events);
+    void drainDropoutLog();
+    DropoutSnapshot dropoutSnapshot() const;
     float cpuUsage() const noexcept { return cpuUsage_.load(std::memory_order_relaxed); }
 
     PluginCatalogue& pluginCatalogue() noexcept { return *catalogue_; }
@@ -95,7 +99,11 @@ public:
     juce::File suggestedSessionFolder() const;
     bool saveSession();
     bool saveSessionToFolder(const juce::File& folder);
+    bool saveSessionAs(const juce::File& folder);
     bool loadSessionFrom(const juce::File& fileOrFolder);
+    bool importRecordingFolder(const juce::File& folder);
+    void clearTimeline();
+    juce::StringArray recentSessions() const;
     juce::String sessionMessage() const { return sessionMessage_; }
     void setMeterRestoreHandler(std::function<void(bool peak, int referenceDb)> handler);
 
@@ -119,7 +127,6 @@ private:
     Routing routingFromDevice(const juce::AudioIODevice& device) const;
     void installOverloadListener(const juce::String& deviceName);
     void removeOverloadListener();
-    void noteDropout(int events);
     const AudioThreadConfig& currentConfig() const;
 
     AppSettings& settings_;
@@ -133,6 +140,12 @@ private:
     std::atomic<int> inputLatencySamples_ { 0 };
     std::atomic<int> outputLatencySamples_ { 0 };
     std::atomic<std::uint32_t> dropoutCount_ { 0 };
+    DropoutRing dropoutRing_;
+    std::vector<DropoutMark> dropoutMarks_;
+    std::vector<CpuSample> cpuSamples_;
+    std::int64_t dropoutOriginNs_ = 0;
+    std::int64_t lastCpuSampleNs_ = 0;
+    bool dropoutHeaderWritten_ = false;
     std::atomic<std::int64_t> lastCallbackNs_ { 0 };
     std::atomic<bool> skipNextGap_ { true };
     std::uint32_t overloadDeviceId_ = 0;
