@@ -183,8 +183,28 @@ private:
     void addCoreNs(int core, std::uint64_t ns) noexcept;
     bool waitUntilOutsideCallback();
     std::vector<std::shared_ptr<juce::AudioPluginInstance>> collectInstances() const;
+    void removePluginNow(int channel, int slot);
     void closeEditor(int channel, int slot);
     void closeAllEditors();
+    void beginLoad(int channel,
+                   int slot,
+                   juce::PluginDescription description,
+                   juce::MemoryBlock state,
+                   bool bypassed,
+                   bool markDirty,
+                   bool openWhenReady);
+    void enqueueChannel(int channel, std::function<void()> work, bool asynchronous);
+    void pumpChannel(int channel);
+    void finishChannelWork(int channel, std::uint64_t ticket);
+    bool channelBusy(int channel) const;
+    void detachEditor(int channel, int slot);
+    void placeEditor(int channel, int slot);
+    void bury(std::shared_ptr<HostedPlugin> plugin, std::unique_ptr<EditorWindow> window);
+    void scheduleGraves();
+    void pumpGraves();
+    void scheduleCondemn();
+    void pumpCondemned();
+    void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
@@ -238,6 +258,26 @@ private:
     int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};
 
     std::array<std::array<std::unique_ptr<EditorWindow>, kSlotsPerChannel>, kMaxChannels> editors_ {};
+
+    struct DeferredPluginRelease;
+    struct ChannelWork
+    {
+        bool inFlight = false;
+        std::uint64_t ticket = 0;
+        std::vector<std::function<void()>> pending;
+    };
+    struct CondemnedInstance
+    {
+        juce::AudioPluginInstance* instance = nullptr;
+        int hops = 0;
+    };
+
+    std::array<ChannelWork, kMaxChannels> channelWork_ {};
+    std::unique_ptr<DeferredPluginRelease> deferred_;
+    std::vector<CondemnedInstance> condemned_;
+    bool gravesPosted_ = false;
+    bool condemnPosted_ = false;
+    bool quitting_ = false;
     juce::StringArray blocked_;
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };

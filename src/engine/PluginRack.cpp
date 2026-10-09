@@ -2,6 +2,7 @@
 #include "AppSettings.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
+#include "PluginMoves.h"
 #include "SignalPath.h"
 #include "StallWatch.h"
 #include "ui/Theme.h"
@@ -309,7 +310,7 @@ static juce::String editorWindowKey(const juce::PluginDescription& description)
 
 struct PluginRack::EditorWindow : public juce::DocumentWindow
 {
-    EditorWindow(const juce::String& title, std::function<void()> onClose, AppSettings* settings, juce::String key)
+    EditorWindow(const juce::String& title, std::function<void(int, int)> onClose, AppSettings* settings, juce::String key)
         : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
           onClose_(std::move(onClose)),
           settings_(settings),
@@ -326,15 +327,35 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
             settings_->saveNamedWindow(key_, getWindowStateAsString());
     }
 
+    void place(int channel, int slot) noexcept
+    {
+        channel_ = channel;
+        slot_ = slot;
+    }
+
     void closeButtonPressed() override
     {
         if (onClose_ != nullptr)
-            onClose_();
+            onClose_(channel_, slot_);
     }
 
-    std::function<void()> onClose_;
+    std::function<void(int, int)> onClose_;
     AppSettings* settings_ = nullptr;
     juce::String key_;
+    int channel_ = -1;
+    int slot_ = -1;
+};
+
+struct PluginRack::DeferredPluginRelease
+{
+    struct Item
+    {
+        std::shared_ptr<HostedPlugin> plugin;
+        std::unique_ptr<EditorWindow> window;
+        int hops = pluginGraveHops();
+    };
+
+    std::vector<Item> items;
 };
 
 PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples, AppSettings* settings)
@@ -344,6 +365,7 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
 {
     audible_.fill(true);
     groups_.fill(-1);
+    deferred_ = std::make_unique<DeferredPluginRelease>();
     pool_ = std::make_unique<RealtimePool>(dspWorkerCount());
     startTimerHz(5);
 }
@@ -772,31 +794,81 @@ void PluginRack::loadPlugin(int channel,
     if (! validSlot(channel, slot))
         return;
 
-    closeEditor(channel, slot);
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (! messages->isThisTheMessageThread())
+        {
+            auto alive = alive_;
+            juce::MessageManager::callAsync(
+                [this, alive, channel, slot, description, state, bypassed, markDirty, openWhenReady]
+                {
+                    if (! alive->load(std::memory_order_acquire))
+                        return;
+                    loadPlugin(channel, slot, description, state, bypassed, markDirty, openWhenReady);
+                });
+            return;
+        }
+    }
+
+    // Loads on one channel run one at a time. A second load waits behind this one.
+    enqueueChannel(channel,
+                   [this, channel, slot, description, state, bypassed, markDirty, openWhenReady]
+                   {
+                       beginLoad(channel, slot, description, state, bypassed, markDirty, openWhenReady);
+                   },
+                   true);
+}
+
+void PluginRack::beginLoad(int channel,
+                           int slot,
+                           juce::PluginDescription description,
+                           juce::MemoryBlock state,
+                           bool bypassed,
+                           bool markDirty,
+                           bool openWhenReady)
+{
+    if (! validSlot(channel, slot))
+    {
+        finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
+        return;
+    }
+
+    // Hide the old editor now. It stays allocated until the deferred AU view
+    // callbacks have had a few turns on the message loop.
+    detachEditor(channel, slot);
+
+    std::uint64_t ticket = 0;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        ticket = ++ticketSource_;
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        model.ticket = ticket;
+        model.loading = true;
+        model.error.clear();
+    }
+    channelWork_[static_cast<std::size_t>(channel)].ticket = ticket;
 
     if (isBlocked(description))
     {
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
+        std::shared_ptr<HostedPlugin> previous;
         {
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-            model.ticket = ++ticketSource_;
             model.loading = false;
             model.error = name + " may have crashed YouHost. It is turned off.";
-            model.plugin.reset();
+            previous = std::move(model.plugin);
+            publishUnlocked();
         }
+        bury(std::move(previous), nullptr);
+        finishChannelWork(channel, ticket);
         return;
     }
 
-    std::uint64_t ticket = 0;
     double rate = 48000.0;
     int block = 512;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
-        ticket = ++ticketSource_;
-        model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].ticket = ticket;
-        model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].loading = true;
-        model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].error.clear();
         rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
@@ -814,7 +886,11 @@ void PluginRack::loadPlugin(int channel,
             const juce::String& error)
         {
             if (! alive->load(std::memory_order_acquire))
+            {
+                if (instance != nullptr)
+                    destroyInstance(nullptr, instance.release());
                 return;
+            }
             finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, description, state, std::move(instance), error);
         });
 }
@@ -833,10 +909,24 @@ void PluginRack::finishLoad(int channel,
     if (! validSlot(channel, slot))
         return;
 
+    bool stale = false;
+    bool ownsGate = false;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
-        if (model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].ticket != ticket)
-            return;
+        stale = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].ticket != ticket;
+        ownsGate = channelWork_[static_cast<std::size_t>(channel)].ticket == ticket;
+    }
+    if (stale)
+    {
+        if (instance != nullptr)
+        {
+            auto retired = std::make_shared<HostedPlugin>();
+            retired->instance.reset(instance.release(), InstanceDeleter { this });
+            bury(std::move(retired), nullptr);
+        }
+        if (ownsGate)
+            finishChannelWork(channel, ticket);
+        return;
     }
 
     BusChoice buses;
@@ -847,7 +937,9 @@ void PluginRack::finishLoad(int channel,
     {
         if (problem.isEmpty())
             problem = "This plugin needs a sidechain or a channel layout YouHost cannot host safely.";
-        instance.reset();
+        auto retired = std::make_shared<HostedPlugin>();
+        retired->instance.reset(instance.release(), InstanceDeleter { this });
+        bury(std::move(retired), nullptr);
     }
 
     std::shared_ptr<HostedPlugin> hosted;
@@ -888,27 +980,40 @@ void PluginRack::finishLoad(int channel,
     bool notify = false;
     bool openIt = false;
     bool loaded = false;
+    bool replaced = false;
     juce::String loadedName = description.name;
     juce::String loadedId = pluginIdentifier(description);
+    std::shared_ptr<HostedPlugin> previous;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-        if (model.ticket != ticket)
-            return;
-
-        model.loading = false;
-        model.error = hosted == nullptr ? problem : juce::String();
-        model.plugin = std::move(hosted);
-        publishUnlocked();
-        notify = markDirty;
-        openIt = openWhenReady && model.plugin != nullptr;
-        loaded = model.plugin != nullptr;
-        if (loaded)
+        ownsGate = channelWork_[static_cast<std::size_t>(channel)].ticket == ticket;
+        if (model.ticket == ticket)
         {
-            loadedName = model.plugin->description.name;
-            loadedId = pluginIdentifier(model.plugin->description);
+            model.loading = false;
+            model.error = hosted == nullptr ? problem : juce::String();
+            previous = std::move(model.plugin);
+            model.plugin = std::move(hosted);
+            publishUnlocked();
+            notify = markDirty;
+            openIt = openWhenReady && model.plugin != nullptr;
+            loaded = model.plugin != nullptr;
+            replaced = true;
+            if (loaded)
+            {
+                loadedName = model.plugin->description.name;
+                loadedId = pluginIdentifier(model.plugin->description);
+            }
         }
     }
+    if (! replaced)
+    {
+        bury(std::move(hosted), nullptr);
+        if (ownsGate)
+            finishChannelWork(channel, ticket);
+        return;
+    }
+    bury(std::move(previous), nullptr);
 
     tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId);
 
@@ -916,13 +1021,36 @@ void PluginRack::finishLoad(int channel,
         notifyDirty();
     if (openIt)
         openEditor(channel, slot);
+    if (channelWork_[static_cast<std::size_t>(channel)].ticket == ticket)
+        finishChannelWork(channel, ticket);
 }
 
 void PluginRack::clearAll(bool markDirty)
 {
-    closeAllEditors();
+    for (auto& gate : channelWork_)
+    {
+        gate.pending.clear();
+        gate.inFlight = false;
+        gate.ticket = 0;
+    }
 
     std::vector<std::tuple<int, int, juce::String, juce::String>> unloaded;
+    std::vector<std::shared_ptr<HostedPlugin>> retiredPlugins;
+    std::vector<std::unique_ptr<EditorWindow>> retiredWindows;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
+            if (window != nullptr)
+            {
+                window->onClose_ = nullptr;
+                window->setVisible(false);
+                retiredWindows.push_back(std::move(window));
+            }
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         for (int channel = 0; channel < kMaxChannels; ++channel)
@@ -935,10 +1063,23 @@ void PluginRack::clearAll(bool markDirty)
                 model.ticket = ++ticketSource_;
                 model.loading = false;
                 model.error.clear();
-                model.plugin.reset();
+                if (model.plugin != nullptr)
+                    retiredPlugins.push_back(std::move(model.plugin));
             }
         }
         publishUnlocked();
+    }
+
+    const auto count = std::max(retiredPlugins.size(), retiredWindows.size());
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        std::shared_ptr<HostedPlugin> plugin;
+        std::unique_ptr<EditorWindow> window;
+        if (index < retiredPlugins.size())
+            plugin = std::move(retiredPlugins[index]);
+        if (index < retiredWindows.size())
+            window = std::move(retiredWindows[index]);
+        bury(std::move(plugin), std::move(window));
     }
 
     for (const auto& item : unloaded)
@@ -953,26 +1094,22 @@ void PluginRack::removePlugin(int channel, int slot)
     if (! validSlot(channel, slot))
         return;
 
-    closeEditor(channel, slot);
-    juce::String name;
-    juce::String identifier;
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
     {
-        std::lock_guard<std::mutex> lock(lifeLock_);
-        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-        if (model.plugin != nullptr)
+        if (! messages->isThisTheMessageThread())
         {
-            name = model.plugin->description.name;
-            identifier = pluginIdentifier(model.plugin->description);
+            auto alive = alive_;
+            juce::MessageManager::callAsync([this, alive, channel, slot]
+            {
+                if (! alive->load(std::memory_order_acquire))
+                    return;
+                removePlugin(channel, slot);
+            });
+            return;
         }
-        model.ticket = ++ticketSource_;
-        model.loading = false;
-        model.error.clear();
-        model.plugin.reset();
-        publishUnlocked();
     }
-    if (identifier.isNotEmpty() || name.isNotEmpty())
-        tracePlugin(channel, slot, "unload", name, identifier);
-    notifyDirty();
+
+    enqueueChannel(channel, [this, channel, slot] { removePluginNow(channel, slot); }, false);
 }
 
 void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
@@ -982,23 +1119,88 @@ void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, in
     if (fromChannel == toChannel && fromSlot == toSlot)
         return;
 
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (! messages->isThisTheMessageThread())
+        {
+            auto alive = alive_;
+            juce::MessageManager::callAsync([this, alive, fromChannel, fromSlot, toChannel, toSlot, copy]
+            {
+                if (! alive->load(std::memory_order_acquire))
+                    return;
+                transferPlugin(fromChannel, fromSlot, toChannel, toSlot, copy);
+            });
+            return;
+        }
+    }
+
+    // A drag during a load is ignored. Queueing it would unload an instance
+    // whose editor is still being configured.
+    if (channelBusy(fromChannel) || channelBusy(toChannel))
+        return;
+
+    SlotMoveState fromState;
+    SlotMoveState toState;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        const auto& source = model_[static_cast<std::size_t>(fromChannel)][static_cast<std::size_t>(fromSlot)];
+        const auto& destination = model_[static_cast<std::size_t>(toChannel)][static_cast<std::size_t>(toSlot)];
+        fromState.loading = source.loading;
+        toState.loading = destination.loading;
+        fromState.instance = source.plugin != nullptr && source.plugin->instance != nullptr ? 1 : 0;
+        toState.instance = destination.plugin != nullptr && destination.plugin->instance != nullptr ? 1 : 0;
+    }
+    if (! slotDragAccepted(fromState, toState, false))
+        return;
+
+    if (! copy)
+    {
+        juce::String name;
+        juce::String identifier;
+        {
+            std::lock_guard<std::mutex> lock(lifeLock_);
+            auto& source = model_[static_cast<std::size_t>(fromChannel)][static_cast<std::size_t>(fromSlot)];
+            auto& destination = model_[static_cast<std::size_t>(toChannel)][static_cast<std::size_t>(toSlot)];
+            if (source.plugin != nullptr)
+            {
+                name = source.plugin->description.name;
+                identifier = pluginIdentifier(source.plugin->description);
+            }
+            std::swap(source.plugin, destination.plugin);
+            publishUnlocked();
+        }
+        std::swap(editors_[static_cast<std::size_t>(fromChannel)][static_cast<std::size_t>(fromSlot)],
+                  editors_[static_cast<std::size_t>(toChannel)][static_cast<std::size_t>(toSlot)]);
+        placeEditor(fromChannel, fromSlot);
+        placeEditor(toChannel, toSlot);
+        if (name.isNotEmpty() || identifier.isNotEmpty())
+        {
+            tracePlugin(fromChannel, fromSlot, "moved-from", name, identifier);
+            tracePlugin(toChannel, toSlot, "move", name, identifier);
+        }
+        notifyDirty();
+        return;
+    }
+
     juce::PluginDescription description;
     juce::MemoryBlock state;
     bool bypassed = false;
+    std::shared_ptr<HostedPlugin> sourcePlugin;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& source = model_[static_cast<std::size_t>(fromChannel)][static_cast<std::size_t>(fromSlot)];
-        if (source.loading || source.plugin == nullptr || source.plugin->instance == nullptr)
+        if (source.plugin == nullptr || source.plugin->instance == nullptr)
             return;
-        source.plugin->instance->getStateInformation(source.plugin->state);
+        sourcePlugin = source.plugin;
         description = source.plugin->description;
-        state = source.plugin->state;
         bypassed = source.plugin->bypassed;
     }
-
+    if (sourcePlugin->gate == nullptr || ! pauseGate(*sourcePlugin->gate))
+        return;
+    sourcePlugin->instance->getStateInformation(sourcePlugin->state);
+    state = sourcePlugin->state;
+    resumeGate(*sourcePlugin->gate);
     loadPlugin(toChannel, toSlot, description, state, bypassed, true, false);
-    if (! copy)
-        removePlugin(fromChannel, fromSlot);
 }
 
 void PluginRack::setBypassAll(bool bypass) noexcept
@@ -1111,17 +1313,18 @@ void PluginRack::openEditor(int channel, int slot)
     const auto key = editorWindowKey(plugin->description);
     auto window = std::make_unique<EditorWindow>(
         plugin->description.name.isNotEmpty() ? plugin->description.name : "Plugin",
-        [this, alive, channel, slot]
+        [this, alive](int editorChannel, int editorSlot)
         {
-            juce::MessageManager::callAsync([this, alive, channel, slot]
+            juce::MessageManager::callAsync([this, alive, editorChannel, editorSlot]
             {
                 if (! alive->load(std::memory_order_acquire))
                     return;
-                closeEditor(channel, slot);
+                closeEditor(editorChannel, editorSlot);
             });
         },
         settings_,
         key);
+    window->place(channel, slot);
     window->setContentOwned(editor, true);
     const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
     if (stored.isEmpty() || ! window->restoreWindowStateFromString(stored))
@@ -1152,43 +1355,7 @@ void PluginRack::setGlobalKeyListener(juce::KeyListener* listener)
 
 void PluginRack::closeEditor(int channel, int slot)
 {
-    if (! validSlot(channel, slot))
-        return;
-    auto& window = editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-    if (window == nullptr)
-        return;
-
-    std::shared_ptr<PluginGate> gate;
-    {
-        std::lock_guard<std::mutex> lock(lifeLock_);
-        const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-        if (model.plugin != nullptr)
-            gate = model.plugin->gate;
-    }
-
-    PhaseScope phase(kPhaseCloseEditor);
-    if (gate != nullptr && ! pauseGate(*gate))
-    {
-        auto& tries = editorCloseTries_[channel][slot];
-        if (tries < 5)
-        {
-            ++tries;
-            auto alive = alive_;
-            juce::MessageManager::callAsync([this, alive, channel, slot]
-            {
-                if (! alive->load(std::memory_order_acquire))
-                    return;
-                closeEditor(channel, slot);
-            });
-        }
-        return;
-    }
-
-    editorCloseTries_[channel][slot] = 0;
-    window->clearContentComponent();
-    window.reset();
-    if (gate != nullptr)
-        resumeGate(*gate);
+    detachEditor(channel, slot);
 }
 
 void PluginRack::closeAllEditors()
@@ -1469,12 +1636,14 @@ void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&
 
 void PluginRack::releaseForQuit()
 {
+    quitting_ = true;
     alive_->store(false, std::memory_order_release);
     stopTimer();
     blockProcessing_.store(true, std::memory_order_release);
     const bool idle = waitUntilOutsideCallback();
     if (idle)
         closeAllEditors();
+    flushDeferred();
     if (pool_ != nullptr)
     {
         pool_->stop();
@@ -1536,6 +1705,256 @@ void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, c
         trace_(channel, slot, phase, name, identifier);
 }
 
+void PluginRack::removePluginNow(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+
+    auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
+    if (window != nullptr)
+    {
+        window->onClose_ = nullptr;
+        window->setVisible(false);
+    }
+
+    juce::String name;
+    juce::String identifier;
+    std::shared_ptr<HostedPlugin> plugin;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin != nullptr)
+        {
+            name = model.plugin->description.name;
+            identifier = pluginIdentifier(model.plugin->description);
+        }
+        model.ticket = ++ticketSource_;
+        model.loading = false;
+        model.error.clear();
+        plugin = std::move(model.plugin);
+        publishUnlocked();
+    }
+    bury(std::move(plugin), std::move(window));
+    if (identifier.isNotEmpty() || name.isNotEmpty())
+        tracePlugin(channel, slot, "unload", name, identifier);
+    notifyDirty();
+}
+
+void PluginRack::enqueueChannel(int channel, std::function<void()> work, bool asynchronous)
+{
+    if (channel < 0 || channel >= kMaxChannels || quitting_)
+        return;
+    auto& gate = channelWork_[static_cast<std::size_t>(channel)];
+    gate.pending.push_back([this, channel, work = std::move(work), asynchronous]() mutable
+    {
+        work();
+        if (! asynchronous)
+            finishChannelWork(channel, 0);
+    });
+    pumpChannel(channel);
+}
+
+void PluginRack::pumpChannel(int channel)
+{
+    if (channel < 0 || channel >= kMaxChannels || quitting_)
+        return;
+    auto& gate = channelWork_[static_cast<std::size_t>(channel)];
+    if (gate.inFlight || gate.pending.empty())
+        return;
+    gate.inFlight = true;
+    auto work = std::move(gate.pending.front());
+    gate.pending.erase(gate.pending.begin());
+    work();
+}
+
+void PluginRack::finishChannelWork(int channel, std::uint64_t ticket)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    auto& gate = channelWork_[static_cast<std::size_t>(channel)];
+    if (ticket != 0 && gate.ticket != ticket)
+        return;
+    if (! gate.inFlight)
+        return;
+    gate.inFlight = false;
+    if (ticket != 0)
+        gate.ticket = 0;
+    pumpChannel(channel);
+}
+
+bool PluginRack::channelBusy(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return true;
+    const auto& gate = channelWork_[static_cast<std::size_t>(channel)];
+    if (gate.inFlight || ! gate.pending.empty())
+        return true;
+    for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        if (model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].loading)
+            return true;
+    return false;
+}
+
+void PluginRack::detachEditor(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+    auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
+    if (window == nullptr)
+        return;
+    editorCloseTries_[channel][slot] = 0;
+    window->onClose_ = nullptr;
+    window->setVisible(false);
+    bury(nullptr, std::move(window));
+}
+
+void PluginRack::placeEditor(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+    auto& window = editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+    if (window != nullptr)
+        window->place(channel, slot);
+}
+
+void PluginRack::bury(std::shared_ptr<HostedPlugin> plugin, std::unique_ptr<EditorWindow> window)
+{
+    if (plugin == nullptr && window == nullptr)
+        return;
+    if (deferred_ == nullptr)
+        return;
+    if (window != nullptr)
+    {
+        window->onClose_ = nullptr;
+        window->setVisible(false);
+    }
+    DeferredPluginRelease::Item item;
+    item.plugin = std::move(plugin);
+    item.window = std::move(window);
+    item.hops = pluginGraveHops();
+    deferred_->items.push_back(std::move(item));
+    if (! quitting_)
+        scheduleGraves();
+}
+
+void PluginRack::scheduleGraves()
+{
+    if (gravesPosted_ || quitting_)
+        return;
+    gravesPosted_ = true;
+    auto alive = alive_;
+    juce::MessageManager::callAsync([this, alive]
+    {
+        gravesPosted_ = false;
+        if (! alive->load(std::memory_order_acquire))
+            return;
+        pumpGraves();
+    });
+}
+
+void PluginRack::pumpGraves()
+{
+    if (deferred_ == nullptr)
+        return;
+
+    std::vector<DeferredPluginRelease::Item> keep;
+    keep.reserve(deferred_->items.size());
+    for (auto& item : deferred_->items)
+    {
+        const auto step = graveStep(item.hops);
+        if (step == GraveStep::keep)
+        {
+            item.hops = graveNextHops(item.hops);
+            keep.push_back(std::move(item));
+            continue;
+        }
+
+        if (step == GraveStep::dropEditor)
+        {
+            std::shared_ptr<PluginGate> gate = item.plugin != nullptr ? item.plugin->gate : nullptr;
+            if (item.window != nullptr && gate != nullptr && ! pauseGate(*gate))
+            {
+                keep.push_back(std::move(item));
+                continue;
+            }
+            item.window.reset();
+            if (gate != nullptr)
+                resumeGate(*gate);
+            item.hops = 0;
+            keep.push_back(std::move(item));
+            continue;
+        }
+
+        item.window.reset();
+        item.plugin.reset();
+    }
+    deferred_->items.swap(keep);
+    if (! deferred_->items.empty())
+        scheduleGraves();
+}
+
+void PluginRack::scheduleCondemn()
+{
+    if (condemnPosted_ || quitting_)
+        return;
+    condemnPosted_ = true;
+    auto alive = alive_;
+    juce::MessageManager::callAsync([this, alive]
+    {
+        condemnPosted_ = false;
+        if (! alive->load(std::memory_order_acquire))
+            return;
+        pumpCondemned();
+    });
+}
+
+void PluginRack::pumpCondemned()
+{
+    std::vector<CondemnedInstance> keep;
+    keep.reserve(condemned_.size());
+    for (auto& item : condemned_)
+    {
+        if (item.instance == nullptr)
+            continue;
+        if (item.hops > 0)
+        {
+            item.hops = graveNextHops(item.hops);
+            if (item.hops > 0)
+            {
+                keep.push_back(item);
+                continue;
+            }
+        }
+        item.instance->removeListener(this);
+        item.instance->releaseResources();
+        delete item.instance;
+    }
+    condemned_.swap(keep);
+    if (! condemned_.empty())
+        scheduleCondemn();
+}
+
+void PluginRack::flushDeferred()
+{
+    quitting_ = true;
+    if (deferred_ != nullptr)
+    {
+        for (auto& item : deferred_->items)
+            item.window.reset();
+        deferred_->items.clear();
+    }
+    for (auto& item : condemned_)
+    {
+        if (item.instance == nullptr)
+            continue;
+        item.instance->removeListener(this);
+        item.instance->releaseResources();
+        delete item.instance;
+        item.instance = nullptr;
+    }
+    condemned_.clear();
+}
+
 void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance)
 {
     if (instance == nullptr)
@@ -1553,10 +1972,20 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
         }
     }
 
-    if (rack != nullptr)
-        instance->removeListener(rack);
-    instance->releaseResources();
-    delete instance;
+    if (rack == nullptr || rack->quitting_)
+    {
+        if (rack != nullptr)
+            instance->removeListener(rack);
+        instance->releaseResources();
+        delete instance;
+        return;
+    }
+
+    CondemnedInstance condemned;
+    condemned.instance = instance;
+    condemned.hops = pluginGraveHops();
+    rack->condemned_.push_back(condemned);
+    rack->scheduleCondemn();
 }
 
 } // namespace youhost

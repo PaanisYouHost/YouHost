@@ -87,7 +87,8 @@ constexpr const char* kShortcutHelp =
     "Esc  Cancel a channel name edit\n"
     "Cmd+S  Save\n"
     "Cmd+Shift+S  Save a copy of the session folder\n"
-    "Option-drag  Copy a plugin and its settings\n\n"
+    "Option-drag  Copy a plugin and its settings. A plain drag moves the same plugin.\n"
+    "A drag is ignored while a plugin on that channel is still loading.\n\n"
     "REC records and plays through the plugins. INPUT plays through and is not recorded. OFF is silent.\n"
     "Click the channel button to cycle REC, INPUT, OFF. The default is REC.\n"
     "Audio setup ticks follow that. A tick means the channel is live (REC or INPUT). Untick turns it OFF. Ticking an OFF channel sets REC. The device stays open.\n"
@@ -1989,7 +1990,7 @@ void MainComponent::paint(juce::Graphics& graphics)
     if (hint.isEmpty() && page_ == 1)
         hint = "The channel number stays visible. Record blinks when armed. Play starts the take. Cmd+Space records immediately. T and R zoom the timeline. Live sound still passes through.";
     if (hint.isEmpty())
-        hint = "The channel number stays visible. Drag a slot to move it. Option-drag to copy the plugin and its settings. Right-click or double-click a group bar to rename it.";
+        hint = "The channel number stays visible. Drag a slot to move that plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.";
 
     graphics.setColour(engine_.openError().isNotEmpty() || engine_.rateWarning().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));

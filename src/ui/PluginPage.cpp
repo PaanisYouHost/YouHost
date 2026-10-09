@@ -737,7 +737,7 @@ public:
             button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
             button.setTooltip(source.error.isNotEmpty()
                                   ? source.error
-                                  : "Drag to move. Option-drag to copy this plugin and its settings. Right-click for bypass and remove.");
+                                  : "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.");
         }
         repaint();
     }

@@ -1018,7 +1018,7 @@ void AudioEngine::notePluginTrace(int channel,
     if (quitPrepared_)
         return;
 
-    if (phase == "unload")
+    if (phase == "unload" || phase == "moved-from")
         eraseCrashMark(journal_, channel, slot);
     else
     {

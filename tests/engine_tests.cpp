@@ -19,6 +19,7 @@
 #include "engine/CrashJournal.h"
 #include "engine/DeviceWatch.h"
 #include "engine/InsertMenu.h"
+#include "engine/PluginMoves.h"
 #include "engine/StallWatch.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
@@ -875,6 +876,82 @@ void testWaveformAndAnchor()
     CHECK(youhost::anchorPlayhead(4000, 4000, 2000) == 0);
 }
 
+void testPluginMovesDoNotReload()
+{
+    youhost::SlotMoveState slots[4] {};
+    for (int index = 0; index < 4; ++index)
+        slots[index].instance = index + 1;
+
+    CHECK(youhost::moveSlotInstance(slots[0], slots[1]));
+    CHECK(youhost::moveSlotInstance(slots[1], slots[2]));
+    CHECK(youhost::moveSlotInstance(slots[2], slots[3]));
+
+    bool seen[5] = {};
+    for (int index = 0; index < 4; ++index)
+    {
+        CHECK(slots[index].instance >= 1 && slots[index].instance <= 4);
+        CHECK(! seen[slots[index].instance]);
+        seen[slots[index].instance] = true;
+        CHECK(! slots[index].loading);
+    }
+
+    const int parked = slots[2].instance;
+    slots[3].loading = true;
+    CHECK(! youhost::slotDragAccepted(slots[2], slots[3], false));
+    CHECK(! youhost::moveSlotInstance(slots[2], slots[3]));
+    CHECK(slots[2].instance == parked);
+    slots[3].loading = false;
+
+    CHECK(! youhost::slotDragAccepted(slots[0], slots[1], true));
+
+    int next = 4;
+    const int source = slots[0].instance;
+    const auto copied = youhost::copySlotInstance(slots[0], slots[1], next);
+    CHECK(copied.ok);
+    CHECK(copied.created == 5);
+    CHECK(copied.created != source);
+    CHECK(slots[0].instance == source);
+    CHECK(slots[1].instance == 5);
+    CHECK(slots[1].loading);
+    slots[1].loading = false;
+
+    youhost::ChannelOpQueue queue;
+    CHECK(youhost::beginQueuedLoad(queue));
+    CHECK(! youhost::beginQueuedLoad(queue));
+    youhost::finishQueuedLoad(queue);
+    CHECK(youhost::beginQueuedLoad(queue));
+    CHECK(queue.started == 2);
+    CHECK(queue.finished == 1);
+
+    int hops = youhost::pluginGraveHops();
+    int aliveTurns = 0;
+    bool editorDropped = false;
+    bool instanceDropped = false;
+    for (int guard = 0; guard < 12 && ! instanceDropped; ++guard)
+    {
+        const auto step = youhost::graveStep(hops);
+        if (step == youhost::GraveStep::keep)
+        {
+            CHECK(! editorDropped);
+            ++aliveTurns;
+            hops = youhost::graveNextHops(hops);
+        }
+        else if (step == youhost::GraveStep::dropEditor)
+        {
+            CHECK(! instanceDropped);
+            editorDropped = true;
+            hops = 0;
+        }
+        else
+        {
+            CHECK(editorDropped);
+            instanceDropped = true;
+        }
+    }
+    CHECK(aliveTurns >= 3);
+    CHECK(instanceDropped);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -890,6 +967,7 @@ int main()
     testOutputGainAndListen();
     testWaveformAndAnchor();
     testRaiseUnit();
+    testPluginMovesDoNotReload();
     testPassthroughCopiesMatchingChannels();
     testMetersSettleClipAndClear();
     testClipClearWithoutAnOpenInput();
