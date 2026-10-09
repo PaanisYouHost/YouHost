@@ -323,7 +323,7 @@ private:
 };
 
 ScannerWindow::ScannerWindow(AudioEngine& engine, AppSettings& settings)
-    : juce::DocumentWindow("Plugin scanner",
+    : juce::DocumentWindow("SCAN",
                            theme::panel,
                            juce::DocumentWindow::closeButton),
       engine_(engine),

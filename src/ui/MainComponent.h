@@ -2,6 +2,7 @@
 
 #include "AppSettings.h"
 #include "engine/AudioEngine.h"
+#include "ui/CpuWindow.h"
 #include "ui/DropoutWindow.h"
 #include "ui/LatencyReadout.h"
 #include "ui/MeterGrid.h"
@@ -43,7 +44,9 @@ private:
     void showPage(int page);
     void toggleScanner();
     void toggleDropouts();
+    void toggleCpu();
     void toggleLatency();
+    void ensureLogo();
     void openSession();
     void saveSession();
     void saveSessionAs();
@@ -81,13 +84,14 @@ private:
     PluginPage pluginPage_;
     ScannerWindow scanner_;
     DropoutWindow dropouts_;
+    CpuWindow cpu_;
     class FileMenu;
     std::unique_ptr<FileMenu> fileMenu_;
     juce::TooltipWindow tooltipWindow_ { this, 700 };
 
-    juce::TextButton recorderButton_ { "1  Recorder" };
-    juce::TextButton pluginsButton_ { "2  Plugins" };
-    juce::TextButton scannerButton_ { "3  Scanner" };
+    juce::TextButton recorderButton_ { "1 REC" };
+    juce::TextButton pluginsButton_ { "2 HOST" };
+    juce::TextButton scannerButton_ { "SCAN" };
     juce::TextButton prevButton_ { "Prev" };
     juce::TextButton nextButton_ { "Next" };
     juce::TextButton stopButton_ { "Stop" };
@@ -105,9 +109,10 @@ private:
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
     juce::TextButton fileButton_ { "File" };
-    juce::TextButton dropoutsButton_ { "4  Dropouts" };
+    juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
+    juce::TextButton cpuButton_ { "4 CPU" };
     juce::TextButton setupButton_ { "Audio setup" };
-    juce::TextButton latencyButton_ { "Latency" };
+    juce::TextButton latencyButton_ { "5 LATENCY" };
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
@@ -132,6 +137,8 @@ private:
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     int page_ = 1;
     int pollDivider_ = 0;
+    bool logoTried_ = false;
+    juce::Image logo_;
 
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;

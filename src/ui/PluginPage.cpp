@@ -5,9 +5,11 @@
 #include "Theme.h"
 #include "WindowMemory.h"
 #include "X32Look.h"
+#include "engine/ChannelListen.h"
 #include "engine/DisplayLayout.h"
 #include "engine/InsertMenu.h"
 #include "engine/MeterScale.h"
+#include "engine/OutputGain.h"
 
 namespace youhost
 {
@@ -408,15 +410,19 @@ public:
         float level = 0.0f;
         bool clip = false;
         bool plugins = false;
-        int on = 0;
         int count = 0;
+        int recording = 0;
+        int inputOnly = 0;
         for (int channel = 0; channel < channels; ++channel)
         {
             if (engine_.channelGroup(channel) != group_)
                 continue;
             ++count;
-            if (engine_.isRecordArmed(channel))
-                ++on;
+            const auto listen = engine_.channelListen(channel);
+            if (listen == ChannelListen::record)
+                ++recording;
+            else if (listen == ChannelListen::input)
+                ++inputOnly;
             level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
             clip = clip || engine_.clipFor(channel);
             if (! plugins)
@@ -436,10 +442,12 @@ public:
         graphics.drawText(title, area.removeFromLeft(std::min(220, area.getWidth() / 3)), juce::Justification::centredLeft, true);
 
         juce::String state = "OFF";
-        if (count > 0 && on == count)
+        if (count > 0 && recording == count)
             state = "REC";
-        else if (on > 0)
-            state = juce::String(on) + " on";
+        else if (count > 0 && inputOnly == count)
+            state = "INPUT";
+        else if (recording + inputOnly > 0)
+            state = "mixed";
         if (clip)
             state << "   CLIP";
         if (plugins)
@@ -476,18 +484,118 @@ private:
     int referenceDb_ = kDefaultRmsReferenceDb;
 };
 
+class OutputTrim : public juce::Component,
+                     public juce::SettableTooltipClient
+{
+public:
+    OutputTrim(AudioEngine& engine, int channel)
+        : engine_(engine),
+          channel_(channel)
+    {
+        setMouseClickGrabsKeyboardFocus(false);
+        editor_.setJustification(juce::Justification::centred);
+        editor_.setInputRestrictions(8, "0123456789.-+");
+        editor_.setFont(juce::Font(juce::FontOptions(12.0f)));
+        editor_.onReturnKey = [this] { commitEditor(); };
+        editor_.onFocusLost = [this] { commitEditor(); };
+        editor_.onEscapeKey = [this] { editor_.setVisible(false); repaint(); };
+        addChildComponent(editor_);
+        juce::SettableTooltipClient::setTooltip("Output gain after the plugins, from -9 dB to +9 dB. Drag for 0.5 dB steps. Double-click to type a value. Option-click resets to 0 dB. The scroll wheel does not change it. Recorded WAVs stay at the raw input level.");
+    }
+
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override
+    {
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        if (event.mods.isAltDown())
+        {
+            dragging_ = false;
+            engine_.setOutputDb(channel_, 0.0f);
+            repaint();
+            return;
+        }
+        if (event.getNumberOfClicks() >= 2)
+        {
+            dragging_ = false;
+            editor_.setText(juce::String(engine_.outputDb(channel_), 1), false);
+            editor_.setVisible(true);
+            editor_.grabKeyboardFocus();
+            editor_.selectAll();
+            return;
+        }
+        dragging_ = true;
+        startDb_ = engine_.outputDb(channel_);
+    }
+
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        if (! dragging_)
+            return;
+        const float db = startDb_ - static_cast<float>(event.getDistanceFromDragStartY()) * (kOutputDbStep / 10.0f);
+        engine_.setOutputDb(channel_, db);
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        dragging_ = false;
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (editor_.isVisible())
+            return;
+        const float db = engine_.outputDb(channel_);
+        const bool unity = outputDbIsUnity(db);
+        graphics.setColour(unity ? theme::button : juce::Colour(0xff8a6a22));
+        graphics.fillRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 3.0f);
+        graphics.setColour(unity ? theme::text : juce::Colours::white);
+        auto font = juce::FontOptions(12.0f);
+        if (! unity)
+            font = font.withStyle("Bold");
+        graphics.setFont(juce::Font(font));
+        graphics.drawText(juce::String(db, 1) + " dB", getLocalBounds(), juce::Justification::centred, false);
+    }
+
+    void resized() override
+    {
+        editor_.setBounds(getLocalBounds().reduced(1));
+    }
+
+private:
+    void commitEditor()
+    {
+        if (! editor_.isVisible())
+            return;
+        engine_.setOutputDb(channel_, editor_.getText().getFloatValue());
+        editor_.setVisible(false);
+        repaint();
+    }
+
+    AudioEngine& engine_;
+    int channel_ = 0;
+    float startDb_ = 0.0f;
+    bool dragging_ = false;
+    juce::TextEditor editor_;
+};
+
 class PluginPage::Row : public juce::Component
 {
 public:
     Row(AudioEngine& engine, int channel)
         : engine_(engine),
           channel_(channel),
-          tabKeys_(*this)
+          tabKeys_(*this),
+          gain_(engine, channel)
     {
         addAndMakeVisible(number_);
         addAndMakeVisible(name_);
         addAndMakeVisible(arm_);
         addAndMakeVisible(exclude_);
+        addAndMakeVisible(pdc_);
+        addAndMakeVisible(gain_);
         number_.setInterceptsMouseClicks(false, false);
         number_.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
         number_.setColour(juce::Label::textColourId, theme::text);
@@ -512,10 +620,14 @@ public:
 
         arm_.setMouseClickGrabsKeyboardFocus(false);
         exclude_.setMouseClickGrabsKeyboardFocus(false);
-        arm_.setTooltip("Channel on. Meter, plugins, and output are live, and the next take records this channel. Click for OFF.");
         exclude_.setButtonText("Ex");
         exclude_.setTooltip("Exclude from alignment. This channel stays undelayed and does not move the others.");
-        arm_.onClick = [this] { engine_.setRecordArmed(channel_, ! engine_.isRecordArmed(channel_)); };
+        arm_.onClick = [this] { engine_.cycleChannelListen(channel_); };
+        pdc_.setFont(juce::Font(juce::FontOptions(11.0f)));
+        pdc_.setColour(juce::Label::textColourId, theme::dim);
+        pdc_.setJustificationType(juce::Justification::centredLeft);
+        pdc_.setMinimumHorizontalScale(0.7f);
+        pdc_.setInterceptsMouseClicks(false, false);
         exclude_.onClick = [this]
         {
             const bool excluded = engine_.channelSnapshot(channel_).excluded;
@@ -576,13 +688,28 @@ public:
         }
         number_.setText(juce::String(channel_ + 1), juce::dontSendNotification);
 
-        const bool armed = engine_.isRecordArmed(channel_);
-        arm_.setButtonText(armed ? "REC" : "OFF");
-        arm_.setTooltip(armed
-                            ? "Channel on. Meter, plugins, and output are live, and the next take records this channel. Click for OFF."
-                            : "Channel off. The meter stays still, plugins are skipped, and the output is silent. This take's files stay as they were. Click for REC.");
-        arm_.setColour(juce::TextButton::buttonColourId, armed ? juce::Colour(0xff8d2430) : theme::button);
-        arm_.setColour(juce::TextButton::textColourOffId, armed ? juce::Colours::white : theme::fainter);
+        const auto listen = engine_.channelListen(channel_);
+        arm_.setButtonText(channelListenLabel(listen));
+        if (listen == ChannelListen::record)
+        {
+            arm_.setTooltip("REC. Live sound passes through and the next take records this channel. Click for INPUT.");
+            arm_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8d2430));
+            arm_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        }
+        else if (listen == ChannelListen::input)
+        {
+            arm_.setTooltip("INPUT. Live sound passes through the plugins and is not recorded. Click for OFF.");
+            arm_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff245a9a));
+            arm_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        }
+        else
+        {
+            arm_.setTooltip("OFF. The meter stays still, plugins are skipped, and the output is silent. Click for REC.");
+            arm_.setColour(juce::TextButton::buttonColourId, theme::button);
+            arm_.setColour(juce::TextButton::textColourOffId, theme::fainter);
+        }
+        pdc_.setText(engine_.channelPdcText(channel_), juce::dontSendNotification);
+        gain_.repaint();
         const bool excluded = engine_.channelSnapshot(channel_).excluded;
         exclude_.setColour(juce::TextButton::buttonColourId, excluded ? theme::buttonOn : theme::button);
 
@@ -620,14 +747,17 @@ public:
         auto area = getLocalBounds().reduced(4, 2);
         area.removeFromLeft(8);
         number_.setBounds(area.removeFromLeft(46));
-        arm_.setBounds(area.removeFromLeft(46).reduced(2, 4));
-        name_.setBounds(area.removeFromLeft(128));
+        arm_.setBounds(area.removeFromLeft(62).reduced(2, 4));
+        name_.setBounds(area.removeFromLeft(120));
         meterArea_ = area.removeFromLeft(18).reduced(3, 3);
         exclude_.setBounds(area.removeFromLeft(34).reduced(2, 4));
+        gain_.setBounds(area.removeFromRight(72).reduced(2, 4));
         area.removeFromLeft(4);
-        const int slotWidth = std::min(128, std::max(64, area.getWidth() / kSlotsPerChannel));
+        const int slotBudget = std::max(0, area.getWidth() - 150);
+        const int slotWidth = std::min(128, std::max(56, slotBudget / kSlotsPerChannel));
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
             slots_[static_cast<std::size_t>(slot)].setBounds(area.removeFromLeft(slotWidth).reduced(2, 2));
+        pdc_.setBounds(area.reduced(4, 4));
     }
 
     void paint(juce::Graphics& graphics) override
@@ -657,7 +787,7 @@ public:
         graphics.setColour(juce::Colour(0xff8b95a8));
         graphics.fillRect(0, getHeight() - 1, getWidth(), 1);
 
-        const bool on = engine_.isRecordArmed(channel_);
+        const bool on = channelListenAudible(engine_.channelListen(channel_));
         graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
         graphics.fillRoundedRectangle(meterArea_.toFloat(), 2.0f);
         const float level = showPeak_ ? engine_.peakFor(channel_) : engine_.rmsFor(channel_);
@@ -773,6 +903,8 @@ private:
     TabKeys tabKeys_;
     juce::TextButton arm_;
     juce::TextButton exclude_;
+    juce::Label pdc_;
+    OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
     juce::Rectangle<int> meterArea_;
 };
@@ -782,6 +914,14 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
       settings_(settings)
 {
     pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
+    addAndMakeVisible(nullButton_);
+    nullButton_.setMouseClickGrabsKeyboardFocus(false);
+    nullButton_.setTooltip("Bypass every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. The recorded WAV is always the raw input.");
+    nullButton_.onClick = [this]
+    {
+        engine_.setBypassAll(! engine_.bypassAll());
+        refresh();
+    };
     addAndMakeVisible(viewport_);
     empty_.setText("No input channels are open. Open Audio setup and enable the inputs.", juce::dontSendNotification);
     empty_.setJustificationType(juce::Justification::centred);
@@ -895,6 +1035,10 @@ void PluginPage::refresh()
         rebuild();
 
     empty_.setVisible(channels_ == 0);
+    const bool bypass = engine_.bypassAll();
+    nullButton_.setButtonText(bypass ? "Bypass all" : "Null test");
+    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xff8a6a22) : theme::button);
+    nullButton_.setColour(juce::TextButton::textColourOffId, bypass ? juce::Colours::white : theme::text);
     for (auto& row : rows_)
         row->refresh();
     for (auto& header : headers_)
@@ -903,7 +1047,10 @@ void PluginPage::refresh()
 
 void PluginPage::resized()
 {
-    viewport_.setBounds(getLocalBounds());
+    auto bounds = getLocalBounds();
+    auto bar = bounds.removeFromTop(32);
+    nullButton_.setBounds(bar.removeFromLeft(128).reduced(0, 4));
+    viewport_.setBounds(bounds);
     int height = 0;
     for (int rowHeight : heights_)
         height += rowHeight;

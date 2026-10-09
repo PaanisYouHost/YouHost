@@ -150,6 +150,30 @@ inline std::int64_t viewStartKeepingPlayhead(std::int64_t span,
     return start;
 }
 
+// While playing or recording, keep the cursor near 75% of the view once it gets
+// there. Before that, the take start stays on screen.
+inline constexpr double kTransportAnchor = 0.75;
+
+inline std::int64_t anchorPlayhead(std::int64_t span, std::int64_t visible, std::int64_t playhead) noexcept
+{
+    if (span < 1)
+        span = 1;
+    if (visible < 1)
+        visible = 1;
+    if (playhead < 0)
+        playhead = 0;
+    if (visible >= span)
+        return 0;
+
+    const auto maxStart = span - visible;
+    auto start = playhead - static_cast<std::int64_t>(std::llround(kTransportAnchor * static_cast<double>(visible)));
+    if (start < 0)
+        start = 0;
+    if (start > maxStart)
+        start = maxStart;
+    return start;
+}
+
 // During playback, scroll only when the playhead leaves the comfortable middle of the view.
 inline std::int64_t followPlayhead(std::int64_t span,
                                   std::int64_t start,

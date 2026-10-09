@@ -41,6 +41,7 @@ target_sources(YouHost PRIVATE
     src/engine/Recorder.cpp
     src/engine/SessionDocument.cpp
     src/ui/ChannelMenu.cpp
+    src/ui/CpuWindow.cpp
     src/ui/DropoutWindow.cpp
     src/ui/LatencyReadout.cpp
     src/ui/MeterGrid.cpp
@@ -56,7 +57,8 @@ target_compile_definitions(YouHost PRIVATE
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_PLUGINHOST_VST3=1
-    YOUHOST_VERSION="${PROJECT_VERSION}")
+    YOUHOST_VERSION="${PROJECT_VERSION}"
+    YOUHOST_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources")
 
 if(APPLE)
     target_compile_definitions(YouHost PRIVATE JUCE_PLUGINHOST_AU=1)

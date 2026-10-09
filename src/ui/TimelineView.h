@@ -35,6 +35,8 @@ public:
     void fitAll();
     void verticalZoomIn();
     void verticalZoomOut();
+    void setWaveformGain(float gain);
+    void setWaveformGainHandler(std::function<void(float)> handler);
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -48,6 +50,8 @@ private:
     std::int64_t fullSpan() const;
     std::int64_t visibleSamples() const;
     void zoomBy(int delta);
+    void nudgeWaveformGain(int direction);
+    std::int64_t zoomAnchorSample() const;
     void verticalZoomBy(int delta);
     void syncScroll();
     juce::Rectangle<float> waveformArea() const;
@@ -77,6 +81,13 @@ private:
     juce::TextButton verticalOutButton_ { "v-" };
     juce::TextButton verticalInButton_ { "v+" };
     juce::TextButton fitButton_ { "Fit" };
+    juce::TextButton waveOutButton_ { "W-" };
+    juce::TextButton waveInButton_ { "W+" };
+    float waveformGain_ = 1.0f;
+    float laneWheel_ = 0.0f;
+    float timeWheel_ = 0.0f;
+    float gainWheel_ = 0.0f;
+    std::function<void(float)> onWaveformGain_;
 };
 
 } // namespace youhost

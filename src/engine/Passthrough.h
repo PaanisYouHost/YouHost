@@ -113,10 +113,15 @@ inline void processPassthrough(const float* const* inputs,
 
         if (output != nullptr)
         {
-            if (input != nullptr)
-                std::memcpy(output, input, sizeof(float) * static_cast<std::size_t>(numSamples));
-            else
+            if (input == nullptr)
                 std::memset(output, 0, sizeof(float) * static_cast<std::size_t>(numSamples));
+            else if (input != output)
+            {
+                // memmove stays a pure copy when the driver hands us overlapping
+                // input and output. memcpy on an overlap can smear samples forward,
+                // which is a comb, not a transparent path.
+                std::memmove(output, input, sizeof(float) * static_cast<std::size_t>(numSamples));
+            }
 
             if (outputIndex >= 0 && outputIndex < kMaxChannels)
                 outputWritten[static_cast<std::size_t>(outputIndex)] = true;

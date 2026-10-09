@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChannelListen.h"
 #include "DisplayLayout.h"
 #include "HostLimits.h"
 #include "TakePlan.h"
@@ -34,6 +35,8 @@ struct SessionChannel
 {
     bool excludeFromCompensation = false;
     bool recordEnabled = true;
+    ChannelListen listen = ChannelListen::record;
+    float outputDb = 0.0f;
     int color = 0;
     int group = -1;
     juce::String name;
@@ -55,6 +58,8 @@ struct SessionData
     int rmsReferenceDb = kDefaultRmsReferenceDb;
     int wavBitDepth = kDefaultWavBitDepth;
     int page = 1;
+    float waveformGain = 1.0f;
+    int alignGroup = 0;
     double sampleRate = 0.0;
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};

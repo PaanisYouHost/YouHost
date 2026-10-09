@@ -33,6 +33,7 @@ private:
 
     AudioEngine& engine_;
     AppSettings& settings_;
+    juce::TextButton nullButton_ { "Null test" };
     juce::Component content_;
     juce::Label empty_;
     juce::Viewport viewport_;

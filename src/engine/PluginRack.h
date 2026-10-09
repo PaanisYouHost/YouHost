@@ -65,6 +65,13 @@ struct DspLoad
     std::array<DspLoadLine, 8> lines {};
 };
 
+struct CpuMeters
+{
+    float callbackPercent = 0.0f;
+    int workers = 0;
+    std::array<float, 8> percent {};
+};
+
 // Four in-process slots per channel. The audio thread only reads a published
 // graph of raw processors and never takes a lock. A later sandbox can publish
 // the same graph shape.
@@ -86,6 +93,9 @@ public:
                  std::uint64_t enabledHigh);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
+    CpuMeters cpuMeters() const;
+    void setAlignMode(int perGroup);
+    void setChannelGroups(const int* groups, int count);
     void deviceStopped();
     void updateRouting(const Routing& routing);
 
@@ -100,6 +110,8 @@ public:
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setBypassed(int channel, int slot, bool bypassed);
+    void setBypassAll(bool bypass) noexcept;
+    bool bypassAll() const noexcept;
     void setExcluded(int channel, bool excluded);
     void setAudible(int channel, bool audible);
     void setAudibleAll(const std::array<bool, kMaxChannels>& audible);
@@ -130,6 +142,8 @@ private:
         juce::PluginDescription description;
         juce::MemoryBlock state;
         bool bypassed = false;
+        int inputChannels = 1;
+        int outputChannels = 1;
         int processChannels = 1;
         bool prepared = false;
         int latencySamples = 0;
@@ -166,6 +180,7 @@ private:
     void processJob(int index);
     void processOneChannel(LiveGraph& graph, int channel, float* output, int numSamples);
     void rememberActiveNames();
+    void addCoreNs(int core, std::uint64_t ns) noexcept;
     bool waitUntilOutsideCallback();
     std::vector<std::shared_ptr<juce::AudioPluginInstance>> collectInstances() const;
     void closeEditor(int channel, int slot);
@@ -186,6 +201,10 @@ private:
     std::array<std::array<SlotModel, kSlotsPerChannel>, kMaxChannels> model_ {};
     std::array<bool, kMaxChannels> excluded_ {};
     std::array<bool, kMaxChannels> audible_ {};
+    std::array<int, kMaxChannels> groups_ {};
+    int alignGroup_ = 0;
+    mutable std::array<std::atomic<std::uint64_t>, 8> coreNs_ {};
+    mutable std::array<std::atomic<std::uint32_t>, 8> coreBlocks_ {};
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
     int alignmentSamples_ = 0;
@@ -202,6 +221,7 @@ private:
     std::atomic<std::uint32_t> callbackEpoch_ { 0 };
     std::atomic<bool> callbacksRunning_ { false };
     std::atomic<bool> blockProcessing_ { true };
+    std::atomic<int> bypassAll_ { 0 };
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
     std::atomic<bool> capturing_ { false };

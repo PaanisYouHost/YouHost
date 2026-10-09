@@ -68,9 +68,11 @@ std::vector<WavePeak> decodePeaks(const juce::String& encoded)
 bool writeSessionFile(const juce::File& file, const SessionData& data)
 {
     juce::XmlElement root("YouHostSession");
-    root.setAttribute("version", 4);
+    root.setAttribute("version", 5);
     root.setAttribute("bits", normaliseWavBitDepth(data.wavBitDepth));
     root.setAttribute("page", data.page == 2 ? 2 : 1);
+    root.setAttribute("wave", data.waveformGain);
+    root.setAttribute("align", data.alignGroup == 1 ? "group" : "all");
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
 
@@ -88,16 +90,20 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         for (const auto& slot : source.slots)
             anySlot = anySlot || slot.occupied;
         const bool named = source.name.isNotEmpty();
-        const bool customArm = ! source.recordEnabled;
+        const bool customArm = source.listen != ChannelListen::record;
+        const bool customGain = std::fabs(source.outputDb) > 0.01f;
         const bool coloured = source.color != 0;
         const bool grouped = source.group >= 0;
-        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! coloured && ! grouped)
+        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! customGain && ! coloured && ! grouped)
             continue;
 
         auto* element = root.createNewChildElement("Channel");
         element->setAttribute("index", channel);
         element->setAttribute("exclude", source.excludeFromCompensation);
-        element->setAttribute("record", source.recordEnabled);
+        element->setAttribute("record", source.listen == ChannelListen::record);
+        element->setAttribute("listen", channelListenName(source.listen));
+        if (customGain)
+            element->setAttribute("outputDb", source.outputDb);
         element->setAttribute("color", source.color);
         if (grouped)
             element->setAttribute("group", source.group);
@@ -170,6 +176,8 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     data = {};
     data.page = root->getIntAttribute("page", 1) == 2 ? 2 : 1;
     data.sampleRate = root->getDoubleAttribute("rate", 0.0);
+    data.waveformGain = static_cast<float>(root->getDoubleAttribute("wave", 1.0));
+    data.alignGroup = root->getStringAttribute("align") == "group" ? 1 : 0;
     data.wavBitDepth = normaliseWavBitDepth(root->getIntAttribute("bits", kDefaultWavBitDepth));
     if (auto* meters = root->getChildByName("Meters"))
     {
@@ -189,7 +197,12 @@ bool readSessionFile(const juce::File& file, SessionData& data)
 
         auto& destination = data.channels[static_cast<std::size_t>(index)];
         destination.excludeFromCompensation = channel->getBoolAttribute("exclude", false);
-        destination.recordEnabled = channel->getBoolAttribute("record", true);
+        destination.outputDb = static_cast<float>(channel->getDoubleAttribute("outputDb", 0.0));
+        if (channel->hasAttribute("listen"))
+            destination.listen = channelListenFromName(channel->getStringAttribute("listen").toStdString());
+        else
+            destination.listen = channel->getBoolAttribute("record", true) ? ChannelListen::record : ChannelListen::off;
+        destination.recordEnabled = destination.listen == ChannelListen::record;
         destination.color = normaliseX32Colour(channel->getIntAttribute("color", 0));
         destination.group = channel->getIntAttribute("group", -1);
         if (destination.group < 0 || destination.group >= kMaxDisplayGroups)

@@ -15,8 +15,10 @@ public:
     LatencyReadout();
 
     void setNumbers(const LatencyNumbers& numbers);
+    void setAlignGroup(int perGroup);
     void setResetHandler(std::function<void()> handler);
     void setGraphHandler(std::function<void()> handler);
+    void setAlignHandler(std::function<void(int perGroup)> handler);
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -30,12 +32,17 @@ private:
         juce::Rectangle<float> outputRow;
         juce::Rectangle<float> compensationRow;
         juce::Rectangle<float> dropoutRow;
+        juce::Rectangle<float> modeRow;
         juce::Rectangle<float> note;
     };
 
     static CardLayout layoutCard(juce::Rectangle<float> bounds);
 
     LatencyNumbers numbers_;
+    int alignGroup_ = 0;
+    std::function<void(int)> onAlign_;
+    juce::TextButton allButton_ { "All aligned" };
+    juce::TextButton groupButton_ { "Per group" };
     juce::TextButton graphButton_ { "Timeline" };
     juce::TextButton resetButton_ { "Reset" };
 };

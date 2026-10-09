@@ -24,60 +24,42 @@ juce::String elapsedText(std::int64_t nanoseconds)
     return juce::String(minutes) + ":" + juce::String(remain).paddedLeft('0', 2);
 }
 
-} // namespace
+int textBlockHeight(const juce::String& text, int width)
+{
+    if (text.isEmpty() || width < 20)
+        return 0;
+    int lines = 1;
+    for (int index = 0; index < text.length(); ++index)
+        if (text[index] == '\n')
+            ++lines;
+    return lines * 16 + 8;
+}
 
-class DropoutWindow::Content : public juce::Component
+class DropoutBody : public juce::Component
 {
 public:
-    explicit Content(AudioEngine& engine)
-        : engine_(engine)
+    void setData(DropoutSnapshot snapshot, juce::String loadText, std::int64_t windowNs)
     {
-        addAndMakeVisible(rangeBox_);
-        rangeBox_.addItem("Last 10 min", 1);
-        rangeBox_.addItem("Last 1 hour", 2);
-        rangeBox_.addItem("Whole session", 3);
-        rangeBox_.setSelectedId(1, juce::dontSendNotification);
-        rangeBox_.onChange = [this] { repaint(); };
-        rangeBox_.setMouseClickGrabsKeyboardFocus(false);
-
-        addAndMakeVisible(resetButton_);
-        resetButton_.setButtonText("Reset");
-        resetButton_.setTooltip("Reset the dropout count and this graph. The CSV log is kept, with a reset line.");
-        resetButton_.setMouseClickGrabsKeyboardFocus(false);
-        resetButton_.onClick = [this]
-        {
-            engine_.resetDropouts();
-            refresh();
-        };
-    }
-
-    void refresh()
-    {
-        engine_.drainDropoutLog();
-        snapshot_ = engine_.dropoutSnapshot();
-        loadText_ = engine_.dspLoadText();
+        snapshot_ = std::move(snapshot);
+        loadText_ = std::move(loadText);
+        windowNs_ = windowNs;
         repaint();
     }
 
-    void resized() override
+    int preferredHeight(int width) const
     {
-        auto row = getLocalBounds().reduced(16, 12).removeFromTop(28);
-        rangeBox_.setBounds(row.removeFromRight(180));
-        row.removeFromRight(8);
-        resetButton_.setBounds(row.removeFromRight(78));
+        return 72 + 12 + textBlockHeight(loadText_, width) + 220;
     }
 
     void paint(juce::Graphics& graphics) override
     {
         graphics.fillAll(theme::background);
-        auto area = getLocalBounds().reduced(16, 12).toFloat();
-        area.removeFromTop(36.0f);
+        auto area = getLocalBounds().reduced(4, 0).toFloat();
 
-        const auto windowNs = selectedWindowNs();
         const int inWindow = countMarksInWindow(snapshot_.marks.data(),
                                                 static_cast<int>(snapshot_.marks.size()),
                                                 snapshot_.nowNs,
-                                                windowNs);
+                                                windowNs_);
         const bool stable = inWindow == 0;
 
         auto hero = area.removeFromTop(72.0f);
@@ -100,19 +82,20 @@ public:
         area.removeFromTop(6.0f);
         if (loadText_.isNotEmpty())
         {
-            auto dsp = area.removeFromTop(58.0f);
+            const int textHeight = textBlockHeight(loadText_, static_cast<int>(area.getWidth()));
+            auto dsp = area.removeFromTop(static_cast<float>(textHeight));
             graphics.setColour(theme::text);
             graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-            graphics.drawFittedText(loadText_, dsp.toNearestInt(), juce::Justification::topLeft, 4);
+            graphics.drawFittedText(loadText_, dsp.toNearestInt(), juce::Justification::topLeft, 64);
             area.removeFromTop(4.0f);
         }
-        area.removeFromTop(4.0f);
-        auto plot = area;
+
+        auto plot = area.withHeight(std::max(160.0f, area.getHeight()));
         graphics.setColour(theme::panel);
         graphics.fillRoundedRectangle(plot, 8.0f);
 
         const auto now = snapshot_.nowNs > 0 ? snapshot_.nowNs : 1;
-        const auto start = windowNs > 0 ? now - windowNs : (snapshot_.originNs > 0 ? snapshot_.originNs : now - 60000000000LL);
+        const auto start = windowNs_ > 0 ? now - windowNs_ : (snapshot_.originNs > 0 ? snapshot_.originNs : now - 60000000000LL);
         const auto span = std::max<std::int64_t>(1, now - start);
         auto inner = plot.reduced(12.0f, 10.0f);
 
@@ -167,6 +150,74 @@ public:
     }
 
 private:
+    DropoutSnapshot snapshot_;
+    juce::String loadText_;
+    std::int64_t windowNs_ = 600LL * 1000000000LL;
+};
+
+} // namespace
+
+class DropoutWindow::Content : public juce::Component
+{
+public:
+    explicit Content(AudioEngine& engine)
+        : engine_(engine)
+    {
+        addAndMakeVisible(rangeBox_);
+        rangeBox_.addItem("Last 10 min", 1);
+        rangeBox_.addItem("Last 1 hour", 2);
+        rangeBox_.addItem("Whole session", 3);
+        rangeBox_.setSelectedId(1, juce::dontSendNotification);
+        rangeBox_.onChange = [this]
+        {
+            body_.setData(snapshot_, loadText_, selectedWindowNs());
+            resized();
+        };
+        rangeBox_.setMouseClickGrabsKeyboardFocus(false);
+
+        addAndMakeVisible(resetButton_);
+        resetButton_.setButtonText("Reset");
+        resetButton_.setTooltip("Reset the dropout count and this graph. The CSV log is kept, with a reset line.");
+        resetButton_.setMouseClickGrabsKeyboardFocus(false);
+        resetButton_.onClick = [this]
+        {
+            engine_.resetDropouts();
+            refresh();
+        };
+
+        addAndMakeVisible(viewport_);
+        viewport_.setViewedComponent(&body_, false);
+        viewport_.setScrollBarsShown(true, false);
+    }
+
+    ~Content() override
+    {
+        viewport_.setViewedComponent(nullptr, false);
+    }
+
+    void refresh()
+    {
+        engine_.drainDropoutLog();
+        snapshot_ = engine_.dropoutSnapshot();
+        loadText_ = engine_.dspLoadText();
+        body_.setData(snapshot_, loadText_, selectedWindowNs());
+        resized();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(16, 12);
+        auto row = area.removeFromTop(28);
+        rangeBox_.setBounds(row.removeFromRight(180));
+        row.removeFromRight(8);
+        resetButton_.setBounds(row.removeFromRight(78));
+        area.removeFromTop(8);
+        viewport_.setBounds(area);
+        const int width = std::max(1, viewport_.getMaximumVisibleWidth());
+        body_.setSize(width, std::max(area.getHeight(), body_.preferredHeight(width)));
+    }
+
+private:
     std::int64_t selectedWindowNs() const
     {
         if (rangeBox_.getSelectedId() == 2)
@@ -179,12 +230,14 @@ private:
     AudioEngine& engine_;
     juce::ComboBox rangeBox_;
     juce::TextButton resetButton_;
+    juce::Viewport viewport_;
+    DropoutBody body_;
     DropoutSnapshot snapshot_;
     juce::String loadText_;
 };
 
 DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)
-    : juce::DocumentWindow("Dropouts", theme::panel, juce::DocumentWindow::closeButton),
+    : juce::DocumentWindow("DROPOUTS", theme::panel, juce::DocumentWindow::closeButton),
       engine_(engine),
       settings_(settings)
 {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelEnable.h"
+#include "ChannelListen.h"
 #include "CrashJournal.h"
 #include "DisplayLayout.h"
 #include "DropoutDetect.h"
@@ -82,6 +83,20 @@ public:
 
     void setRecordArmed(int channel, bool armed);
     bool isRecordArmed(int channel) const;
+    ChannelListen channelListen(int channel) const;
+    void setChannelListen(int channel, ChannelListen mode);
+    void cycleChannelListen(int channel);
+    float outputDb(int channel) const;
+    void setOutputDb(int channel, float db);
+    void setBypassAll(bool bypass);
+    bool bypassAll() const;
+    float waveformGain() const noexcept { return waveformGain_; }
+    void setWaveformGain(float gain);
+    void nudgeWaveformGain(int direction);
+    int alignGroup() const noexcept { return alignGroup_; }
+    void setAlignGroup(int perGroup);
+    CpuMeters cpuMeters() const;
+    juce::String channelPdcText(int channel) const;
     void setChannelName(int channel, const juce::String& name);
     juce::String channelName(int channel) const;
 
@@ -177,6 +192,7 @@ private:
     void rememberSessionParent(const juce::File& sessionFolder);
     bool isInternalFallback(const juce::File& folder) const;
     void pushRouting(const Routing& routing);
+    void syncCompensation();
     Routing routingFromDevice(const juce::AudioIODevice& device) const;
     void installOverloadListener(const juce::String& deviceName);
     void removeOverloadListener();
@@ -241,6 +257,11 @@ private:
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
     std::array<int, kMaxChannels> channelColor_ {};
     std::array<int, kMaxChannels> channelGroup_ {};
+    std::array<ChannelListen, kMaxChannels> listen_ {};
+    std::array<float, kMaxChannels> outputDb_ {};
+    std::array<std::atomic<float>, kMaxChannels> outputGain_ {};
+    float waveformGain_ = 1.0f;
+    int alignGroup_ = 0;
     std::array<SessionGroup, kMaxDisplayGroups> groups_ {};
     std::vector<int> selection_;
     int selectionAnchor_ = 0;

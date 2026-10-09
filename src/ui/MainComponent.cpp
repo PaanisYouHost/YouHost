@@ -65,11 +65,12 @@ namespace
 {
 
 constexpr const char* kShortcutHelp =
-    "1  Recorder\n"
-    "2  Plugins\n"
-    "3  Open or close the plugin scanner\n"
-    "4 or D  Open or close the dropout timeline\n"
-    "5  Open or close the latency card\n"
+    "1  REC page\n"
+    "2  HOST page\n"
+    "3 or D  Open or close DROPOUTS\n"
+    "4  Open or close CPU\n"
+    "5  Open or close LATENCY\n"
+    "S  Open or close SCAN\n"
     "Space  Play, or Stop when already playing or recording\n"
     "Cmd+Space  Record immediately\n"
     "Left / Right  Previous or next take\n"
@@ -77,6 +78,7 @@ constexpr const char* kShortcutHelp =
     "T  Zoom the timeline in\n"
     "R  Zoom the timeline out until the whole session fits\n"
     "Option+R  Fit the whole session across and down\n"
+    "W+ / W-  Waveform height. Display only. Cmd or Option plus the wheel over the lanes does the same\n"
     "Cmd+[  Taller timeline lanes\n"
     "Cmd+]  Shorter timeline lanes\n"
     "Tab  Commit the channel name and edit the next visible channel\n"
@@ -86,18 +88,26 @@ constexpr const char* kShortcutHelp =
     "Cmd+S  Save\n"
     "Cmd+Shift+S  Save a copy of the session folder\n"
     "Option-drag  Copy a plugin and its settings\n\n"
+    "REC records and plays through the plugins. INPUT plays through and is not recorded. OFF is silent.\n"
+    "Click the channel button to cycle REC, INPUT, OFF. The default is REC.\n"
+    "Audio setup ticks follow that. A tick means the channel is live (REC or INPUT). Untick turns it OFF. Ticking an OFF channel sets REC. The device stays open.\n"
     "Record arms the take and the button blinks red. Play while armed starts recording.\n"
     "Play while not armed is the virtual soundcheck. Stop turns record arm off.\n"
     "Cmd+Space records immediately. Cmd+S also works from the File menu and while a plugin window is in front.\n"
     "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
-    "The + and - buttons zoom the same way as T and R.\n"
+    "The + and - buttons zoom time the same way as T and R. W+ and W- zoom the waveform height. That does not change the audio.\n"
+    "A full-scale peak fills the lane. Quieter audio is drawn on a dB curve so normal levels stay visible.\n"
     "Fit and Option+R show every take, from 0 to just past the last take, and every visible lane. With no takes yet the timeline shows 60 seconds.\n"
+    "While recording or playing, the cursor sits about three quarters of the way across the view.\n"
     "A take is a colored block that starts and ends with that take. Empty time stays dark. TAKE and the number mark each start. While recording, the block grows.\n"
-    "Double-click a channel name to edit it. Tab and Shift+Tab move through the visible channels and skip folded groups.\n"
-    "An empty plugin slot lists plugins by manufacturer. Search matches the plugin name or the manufacturer.\n"
-    "3, 4, D, and 5 open that window, or close it when it is already open, including when that window is in front.\n"
-    "v+ and v- zoom the lanes taller or shorter, the same as Cmd+[ and Cmd+]. Option or Cmd plus the scroll wheel does that too.\n"
-    "The plain wheel scrolls the lanes when they are zoomed. Drag the timeline's bottom edge to change its height.\n"
+    "The plain wheel scrolls lanes slowly. Shift plus the wheel scrolls time. Drag the timeline's bottom edge to change its height.\n"
+    "v+ and v- zoom the lanes taller or shorter, the same as Cmd+[ and Cmd+].\n"
+    "On HOST, the dB box after the plugins is output gain, -9 to +9. Drag for 0.5 dB steps, double-click to type, Option-click resets to 0. The wheel does not change it. Amber means it is not 0 dB. It is not written to the WAV.\n"
+    "Null test bypasses every plugin and the compensation delay so you can hear the clean input. Click again to restore the plugins.\n"
+    "With no plugins, input goes to output unchanged, apart from the device's own delay. YouHost does not filter, flip polarity, or mix a delayed copy back in.\n"
+    "FX and PDC on a row are that channel's plugin latency and the extra delay that lines it up. LATENCY chooses All aligned or Per group.\n"
+    "3, 4, 5, D, and S open that window, or close it when it is already open, including when that window is in front.\n"
+    "DROPOUTS lists CPU only for channels that have a plugin, and the list scrolls.\n"
     "If YouHost quits unexpectedly, the next launch names the plugin that was loading. Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"
     "Other shortcuts do nothing while a text field has focus.";
 
@@ -894,6 +904,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
       pluginPage_(engine, settings),
       scanner_(engine, settings),
       dropouts_(engine, settings),
+      cpu_(engine, settings),
       deviceSelector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false)
 {
     setOpaque(true);
@@ -918,6 +929,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(recorderButton_);
     addAndMakeVisible(pluginsButton_);
     addAndMakeVisible(scannerButton_);
+    addAndMakeVisible(cpuButton_);
     addAndMakeVisible(prevButton_);
     addAndMakeVisible(nextButton_);
     addAndMakeVisible(stopButton_);
@@ -946,11 +958,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterViewport_.setViewedComponent(&meterGrid_, false);
     meterViewport_.setScrollBarsShown(false, true);
 
-    latencyWindow_ = std::make_unique<FloatWindow>("Latency", latencyReadout_, settings_, "windowLatency", 480, 360, 420, 280);
+    latencyWindow_ = std::make_unique<FloatWindow>("LATENCY", latencyReadout_, settings_, "windowLatency", 520, 420, 420, 320);
     if (keys_ != nullptr)
     {
         scanner_.addKeyListener(keys_.get());
         dropouts_.addKeyListener(keys_.get());
+        cpu_.addKeyListener(keys_.get());
         latencyWindow_->addKeyListener(keys_.get());
     }
     setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
@@ -959,6 +972,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
     latencyReadout_.setGraphHandler([this] { toggleDropouts(); });
+    latencyReadout_.setAlignHandler([this](int mode) { engine_.setAlignGroup(mode); });
+    timeline_.setWaveformGainHandler([this](float gain) { engine_.setWaveformGain(gain); });
     fileMenu_ = std::make_unique<FileMenu>(*this);
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(fileMenu_.get());
@@ -967,17 +982,20 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
-                          &dropoutsButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
+                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
                           &allButton_, &hideButton_ })
         quiet(*button);
 
-    for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &latencyButton_,
+    for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &latencyButton_,
                           &setupButton_, &groupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
     pluginsButton_.onClick = [this] { showPage(2); };
     scannerButton_.onClick = [this] { toggleScanner(); };
+    scannerButton_.setTooltip("SCAN. Press S. Used when new plugins are installed.");
+    cpuButton_.onClick = [this] { toggleCpu(); };
+    cpuButton_.setTooltip("CPU. Press 4. Per-core usage and the audio callback.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
     stopButton_.onClick = [this] { engine_.transportStop(); refresh(); };
@@ -1068,7 +1086,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
     clearClipsButton_.setTooltip("Clear every latched clip mark");
     setupButton_.onClick = [this] { toggleSetup(); };
-    setupButton_.setTooltip("Channel ticks are the same as REC and OFF. The audio device stays open.");
+    setupButton_.setTooltip("A tick means the channel is live (REC or INPUT). Untick sets OFF. The audio device stays open.");
 
     meterGrid_.setClearHandler([this](int channel)
     {
@@ -1077,7 +1095,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     meterGrid_.setRecordHandler([this](int channel)
     {
-        engine_.setRecordArmed(channel, ! engine_.isRecordArmed(channel));
+        engine_.cycleChannelListen(channel);
     });
     meterGrid_.setChannelMenuHandler([this](int channel)
     {
@@ -1229,19 +1247,25 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         showPage(2);
         return true;
     }
-    if (character == '3' && ! shift && ! command)
-    {
-        toggleScanner();
-        return true;
-    }
-    if ((character == '4' || character == 'd') && ! shift && ! command)
+    if ((character == '3' || character == 'd') && ! shift && ! command)
     {
         toggleDropouts();
+        return true;
+    }
+    if (character == '4' && ! shift && ! command)
+    {
+        toggleCpu();
         return true;
     }
     if (character == '5' && ! shift && ! command)
     {
         toggleLatency();
+        return true;
+    }
+    const bool altEarly = key.getModifiers().isAltDown();
+    if (character == 's' && ! shift && ! command && ! altEarly)
+    {
+        toggleScanner();
         return true;
     }
     const auto code = key.getKeyCode();
@@ -1519,6 +1543,12 @@ void MainComponent::toggleDropouts()
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
 }
 
+void MainComponent::toggleCpu()
+{
+    cpu_.toggle();
+    cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
+}
+
 void MainComponent::toggleLatency()
 {
     if (latencyWindow_ == nullptr)
@@ -1751,6 +1781,7 @@ void MainComponent::refresh()
     }
     if (transport.mode == TransportMode::recording)
         engine_.touchSession();
+    timeline_.setWaveformGain(engine_.waveformGain());
     timeline_.setTransport(transport);
     timeLabel_.setText(timecodeText(transport.position, transport.sampleRate), juce::dontSendNotification);
     const bool recording = transport.mode == TransportMode::recording;
@@ -1764,7 +1795,9 @@ void MainComponent::refresh()
     playButton_.setToggleState(playing, juce::dontSendNotification);
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+    cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
+    latencyReadout_.setAlignGroup(engine_.alignGroup());
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
     if (bitDepthSlot_ != nullptr)
         bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
@@ -1792,7 +1825,12 @@ void MainComponent::refresh()
                 if (engine_.channelGroup(channel) != item.group)
                     continue;
                 ++cell.memberCount;
-                if (engine_.isRecordArmed(channel))
+                const auto listen = engine_.channelListen(channel);
+                if (listen == ChannelListen::record)
+                    ++cell.membersRecord;
+                else if (listen == ChannelListen::input)
+                    ++cell.membersInput;
+                if (channelListenAudible(listen))
                     ++cell.membersOn;
                 const float level = showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel);
                 if (showPeak_)
@@ -1818,8 +1856,11 @@ void MainComponent::refresh()
             cell.reading.peak = engine_.peakFor(item.channel);
             cell.reading.clipped = engine_.clipFor(item.channel);
             cell.reading.hasInput = engine_.inputActive(item.channel);
-            cell.reading.recordArmed = engine_.isRecordArmed(item.channel);
+            const auto listen = engine_.channelListen(item.channel);
+            cell.reading.listen = static_cast<int>(listen);
+            cell.reading.recordArmed = channelListenRecords(listen);
             cell.reading.recordLive = recording && cell.reading.recordArmed && cell.reading.hasInput;
+            cell.pdc = engine_.channelPdcText(item.channel);
         }
         cells.push_back(std::move(cell));
     }
@@ -1864,16 +1905,25 @@ void MainComponent::mirrorSetupToggles()
             auto* button = list[static_cast<std::size_t>(index)];
             if (button == nullptr)
                 continue;
-            const bool armed = engine_.isRecordArmed(index);
-            if (button->getToggleState() != armed)
-                button->setToggleState(armed, juce::dontSendNotification);
+            const auto listen = engine_.channelListen(index);
+            const bool live = channelListenAudible(listen);
+            if (button->getToggleState() != live)
+                button->setToggleState(live, juce::dontSendNotification);
             button->onClick = [this, index, button]
             {
-                engine_.setRecordArmed(index, button->getToggleState());
+                if (button->getToggleState())
+                {
+                    if (engine_.channelListen(index) == ChannelListen::off)
+                        engine_.setChannelListen(index, ChannelListen::record);
+                }
+                else
+                {
+                    engine_.setChannelListen(index, ChannelListen::off);
+                }
             };
-            button->setTooltip(armed
-                                   ? "Same as REC. Untick to turn this channel OFF. The audio device stays open."
-                                   : "Same as OFF. Tick to turn this channel on. The audio device stays open.");
+            button->setTooltip(live
+                                   ? "Live (REC or INPUT). Untick to turn this channel OFF. The audio device stays open."
+                                   : "OFF. Tick to set REC. The audio device stays open.");
         }
     }
 }
@@ -1943,7 +1993,46 @@ void MainComponent::paint(juce::Graphics& graphics)
 
     graphics.setColour(engine_.openError().isNotEmpty() || engine_.rateWarning().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-    graphics.drawFittedText(hint, hintArea_, juce::Justification::centredLeft, 2);
+    auto hintBounds = hintArea_;
+    auto brand = hintBounds.removeFromLeft(148);
+    graphics.drawFittedText(hint, hintBounds, juce::Justification::centredLeft, 2);
+
+    ensureLogo();
+    if (logo_.isValid())
+    {
+        graphics.setOpacity(0.45f);
+        graphics.drawImageWithin(logo_, brand.getX(), brand.getY(), 120, brand.getHeight(),
+                                 juce::RectanglePlacement::xLeft | juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+        graphics.setOpacity(1.0f);
+    }
+    else
+    {
+        graphics.setColour(theme::text.withAlpha(0.38f));
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
+        graphics.drawText("Ambient Audio Oy", brand, juce::Justification::centredLeft, true);
+    }
+}
+
+void MainComponent::ensureLogo()
+{
+    if (logoTried_)
+        return;
+    logoTried_ = true;
+
+    juce::Array<juce::File> candidates;
+#ifdef YOUHOST_RESOURCE_DIR
+    candidates.add(juce::File(YOUHOST_RESOURCE_DIR).getChildFile("logo.png"));
+#endif
+    candidates.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("logo.png"));
+    candidates.add(juce::File::getSpecialLocation(juce::File::currentApplicationFile).getChildFile("Contents/Resources/logo.png"));
+    for (const auto& file : candidates)
+    {
+        if (! file.existsAsFile())
+            continue;
+        logo_ = juce::ImageFileFormat::loadFrom(file);
+        if (logo_.isValid())
+            return;
+    }
 }
 
 void MainComponent::resized()
@@ -1970,15 +2059,17 @@ void MainComponent::resized()
     allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
-    latencyButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
+    latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
     views.removeFromRight(4);
-    dropoutsButton_.setBounds(views.removeFromRight(96).reduced(0, 2));
+    cpuButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
     views.removeFromRight(4);
-    scannerButton_.setBounds(views.removeFromRight(88).reduced(0, 2));
+    dropoutsButton_.setBounds(views.removeFromRight(124).reduced(0, 2));
     views.removeFromRight(4);
-    pluginsButton_.setBounds(views.removeFromRight(84).reduced(0, 2));
+    pluginsButton_.setBounds(views.removeFromRight(88).reduced(0, 2));
     views.removeFromRight(4);
-    recorderButton_.setBounds(views.removeFromRight(96).reduced(0, 2));
+    recorderButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
+    views.removeFromRight(10);
+    scannerButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
 
     area.removeFromTop(4);
     auto transport = area.removeFromTop(40);

@@ -11,10 +11,17 @@ namespace youhost
 // Two seconds at 96 kHz. Longer look-ahead is clamped so the delay lines stay bounded.
 inline constexpr int kMaxCompensationSamples = 192000;
 
+enum class AlignMode
+{
+    all = 0,
+    group = 1
+};
+
 struct ChannelLatencyInput
 {
     int pluginSamples = 0;
     bool include = false;
+    int group = -1;
 };
 
 struct CompensationPlan
@@ -49,15 +56,47 @@ inline int sumSlotLatency(const int* latencies, const bool* occupied, const bool
     return sum;
 }
 
-// Included channels line up on the slowest included chain. Excluded channels are
-// not delayed and do not pull the alignment later.
-inline CompensationPlan planCompensation(const ChannelLatencyInput* channels, int count)
+// All aligned: every included channel lines up on the slowest included chain.
+// Per group: each group lines up on that group's slowest chain. An ungrouped
+// channel is not delayed. Excluded channels stay at 0 and do not move the max.
+inline CompensationPlan planCompensation(const ChannelLatencyInput* channels, int count, AlignMode mode = AlignMode::all)
 {
     CompensationPlan plan;
     if (channels == nullptr || count <= 0)
         return plan;
 
     const int n = std::min(count, kMaxChannels);
+    if (mode == AlignMode::group)
+    {
+        int groupMax[128] = {};
+        bool groupUsed[128] = {};
+        int slowest = 0;
+        for (int channel = 0; channel < n; ++channel)
+        {
+            if (! channels[channel].include)
+                continue;
+            const int chain = clampLatencySamples(channels[channel].pluginSamples);
+            const int group = channels[channel].group;
+            if (group < 0 || group >= 128)
+                continue;
+            groupUsed[group] = true;
+            groupMax[group] = std::max(groupMax[group], chain);
+            slowest = std::max(slowest, groupMax[group]);
+        }
+        plan.alignmentSamples = slowest;
+        for (int channel = 0; channel < n; ++channel)
+        {
+            if (! channels[channel].include)
+                continue;
+            const int group = channels[channel].group;
+            if (group < 0 || group >= 128 || ! groupUsed[group])
+                continue;
+            const int chain = clampLatencySamples(channels[channel].pluginSamples);
+            plan.delaySamples[static_cast<std::size_t>(channel)] = groupMax[group] - chain;
+        }
+        return plan;
+    }
+
     int slowest = 0;
     for (int channel = 0; channel < n; ++channel)
     {

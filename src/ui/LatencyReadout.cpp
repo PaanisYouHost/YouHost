@@ -53,8 +53,10 @@ LatencyReadout::CardLayout LatencyReadout::layoutCard(juce::Rectangle<float> bou
 {
     auto inner = bounds.reduced(18.0f, 14.0f);
     CardLayout layout;
-    layout.note = inner.removeFromBottom(32.0f);
-    inner.removeFromBottom(8.0f);
+    layout.note = inner.removeFromBottom(36.0f);
+    inner.removeFromBottom(4.0f);
+    layout.modeRow = inner.removeFromBottom(26.0f);
+    inner.removeFromBottom(6.0f);
 
     const bool wide = inner.getWidth() > 640.0f;
     layout.hero = wide ? inner.removeFromLeft(inner.getWidth() * 0.40f) : inner.removeFromTop(inner.getHeight() * 0.46f);
@@ -74,18 +76,48 @@ LatencyReadout::CardLayout LatencyReadout::layoutCard(juce::Rectangle<float> bou
 LatencyReadout::LatencyReadout()
 {
     setOpaque(false);
+    addAndMakeVisible(allButton_);
+    addAndMakeVisible(groupButton_);
     addAndMakeVisible(graphButton_);
     addAndMakeVisible(resetButton_);
-    graphButton_.setTooltip("Open the dropout timeline (4 or D).");
+    allButton_.setTooltip("Line every included channel up on the slowest plugin. A stereo pair stays together.");
+    groupButton_.setTooltip("Each group lines up on its own slowest plugin. Ungrouped channels are not delayed. A pair split across groups can comb.");
+    graphButton_.setTooltip("Open the dropout timeline (3 or D).");
     resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
-    graphButton_.setMouseClickGrabsKeyboardFocus(false);
-    resetButton_.setMouseClickGrabsKeyboardFocus(false);
+    for (auto* button : { &allButton_, &groupButton_, &graphButton_, &resetButton_ })
+        button->setMouseClickGrabsKeyboardFocus(false);
+    allButton_.onClick = [this]
+    {
+        if (onAlign_ != nullptr)
+            onAlign_(0);
+    };
+    groupButton_.onClick = [this]
+    {
+        if (onAlign_ != nullptr)
+            onAlign_(1);
+    };
+    setAlignGroup(0);
 }
 
 void LatencyReadout::setNumbers(const LatencyNumbers& numbers)
 {
     numbers_ = numbers;
     repaint();
+}
+
+void LatencyReadout::setAlignGroup(int perGroup)
+{
+    alignGroup_ = perGroup == 1 ? 1 : 0;
+    allButton_.setToggleState(alignGroup_ == 0, juce::dontSendNotification);
+    groupButton_.setToggleState(alignGroup_ == 1, juce::dontSendNotification);
+    allButton_.setColour(juce::TextButton::buttonColourId, alignGroup_ == 0 ? theme::buttonOn : theme::button);
+    groupButton_.setColour(juce::TextButton::buttonColourId, alignGroup_ == 1 ? theme::buttonOn : theme::button);
+    repaint();
+}
+
+void LatencyReadout::setAlignHandler(std::function<void(int)> handler)
+{
+    onAlign_ = std::move(handler);
 }
 
 void LatencyReadout::setResetHandler(std::function<void()> handler)
@@ -105,6 +137,10 @@ void LatencyReadout::resized()
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
     row.removeFromRight(6);
     graphButton_.setBounds(row.removeFromRight(86).withSizeKeepingCentre(86, 22));
+    auto modes = layout.modeRow.toNearestInt();
+    allButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
+    modes.removeFromLeft(6);
+    groupButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
 }
 
 void LatencyReadout::paint(juce::Graphics& graphics)
@@ -121,7 +157,7 @@ void LatencyReadout::paint(juce::Graphics& graphics)
 
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-    graphics.drawText("USB IN  \u2192  USB OUT", hero.removeFromTop(16.0f), juce::Justification::centredLeft, false);
+    graphics.drawText("USB IN to USB OUT", hero.removeFromTop(16.0f), juce::Justification::centredLeft, false);
 
     hero.removeFromTop(2.0f);
     const bool open = numbers_.deviceOpen && numbers_.sampleRate > 0.0;
@@ -158,10 +194,13 @@ void LatencyReadout::paint(juce::Graphics& graphics)
 
     graphics.setColour(theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-    graphics.drawFittedText(formulaNote(numbers_.formula),
+    const juce::String modeNote = alignGroup_ == 1
+                                      ? "Per group: each group uses its own slowest plugin. Ungrouped channels are not delayed, so a split pair can comb."
+                                      : "All aligned: every included channel ends on the same sample, including a dry channel next to a plugin.";
+    graphics.drawFittedText(modeNote + "  " + formulaNote(numbers_.formula),
                             noteArea.toNearestInt(),
                             juce::Justification::topLeft,
-                            2);
+                            3);
 }
 
 } // namespace youhost

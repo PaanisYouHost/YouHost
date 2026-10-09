@@ -1,6 +1,8 @@
 #include "TimelineView.h"
 #include "Theme.h"
 #include "X32Look.h"
+#include "engine/SignalPath.h"
+#include "engine/WaveformScale.h"
 
 #include <algorithm>
 
@@ -43,22 +45,29 @@ TimelineView::TimelineView()
     addAndMakeVisible(verticalOutButton_);
     addAndMakeVisible(verticalInButton_);
     addAndMakeVisible(fitButton_);
+    addAndMakeVisible(waveOutButton_);
+    addAndMakeVisible(waveInButton_);
     scroll_.addListener(this);
     laneScrollBar_.addListener(this);
     scroll_.setAutoHide(false);
     laneScrollBar_.setAutoHide(true);
-    for (auto* button : { &zoomOutButton_, &zoomInButton_, &verticalOutButton_, &verticalInButton_, &fitButton_ })
+    for (auto* button : { &zoomOutButton_, &zoomInButton_, &verticalOutButton_, &verticalInButton_, &fitButton_,
+                          &waveOutButton_, &waveInButton_ })
         quietButton(*button);
     zoomOutButton_.setTooltip("Zoom out (R). Keeps going until the whole session fits.");
     zoomInButton_.setTooltip("Zoom in (T).");
     verticalOutButton_.setTooltip("Shorter lanes (Cmd+]).");
     verticalInButton_.setTooltip("Taller lanes (Cmd+[).");
     fitButton_.setTooltip("Fit every take across the width and every lane down the height (Option+R).");
+    waveOutButton_.setTooltip("Shorter waveform. Display only. Cmd or Option plus the wheel does this too.");
+    waveInButton_.setTooltip("Taller waveform. Display only. A full-scale peak still fills the lane at the default.");
     zoomOutButton_.onClick = [this] { zoomOut(); };
     zoomInButton_.onClick = [this] { zoomIn(); };
     verticalOutButton_.onClick = [this] { verticalZoomOut(); };
     verticalInButton_.onClick = [this] { verticalZoomIn(); };
     fitButton_.onClick = [this] { fitAll(); };
+    waveOutButton_.onClick = [this] { nudgeWaveformGain(-1); };
+    waveInButton_.onClick = [this] { nudgeWaveformGain(1); };
 }
 
 TimelineView::~TimelineView()
@@ -71,9 +80,9 @@ void TimelineView::setTransport(const TransportView& view)
 {
     const bool moving = view.mode == TransportMode::playing || view.mode == TransportMode::recording;
     view_ = view;
-    if (moving && zoomStep_ > 0)
-        viewStart_ = followPlayhead(fullSpan(), viewStart_, visibleSamples(), view_.position);
     const auto span = fullSpan();
+    if (moving && visibleSamples() < span)
+        viewStart_ = anchorPlayhead(span, visibleSamples(), view_.position);
     const auto visible = visibleSamples();
     const auto maxStart = std::max<std::int64_t>(0, span - visible);
     if (viewStart_ < 0)
@@ -131,6 +140,36 @@ void TimelineView::verticalZoomOut()
     verticalZoomBy(-1);
 }
 
+void TimelineView::setWaveformGain(float gain)
+{
+    const float clamped = clampWaveformGain(gain);
+    if (sameFloatBits(clamped, waveformGain_))
+        return;
+    waveformGain_ = clamped;
+    repaint();
+}
+
+void TimelineView::setWaveformGainHandler(std::function<void(float)> handler)
+{
+    onWaveformGain_ = std::move(handler);
+}
+
+void TimelineView::nudgeWaveformGain(int direction)
+{
+    waveformGain_ = stepWaveformGain(waveformGain_, direction);
+    if (onWaveformGain_ != nullptr)
+        onWaveformGain_(waveformGain_);
+    repaint();
+}
+
+std::int64_t TimelineView::zoomAnchorSample() const
+{
+    const auto position = getMouseXYRelative().toFloat();
+    if (waveformArea().contains(position))
+        return sampleAt(position.x);
+    return view_.position;
+}
+
 void TimelineView::zoomBy(int delta)
 {
     const auto span = fullSpan();
@@ -140,7 +179,7 @@ void TimelineView::zoomBy(int delta)
     if (next == 0)
         viewStart_ = 0;
     else
-        viewStart_ = viewStartKeepingPlayhead(span, viewStart_, oldVisible, newVisible, view_.position);
+        viewStart_ = viewStartKeepingPlayhead(span, viewStart_, oldVisible, newVisible, zoomAnchorSample());
     zoomStep_ = next;
     syncScroll();
     repaint();
@@ -252,6 +291,10 @@ void TimelineView::resized()
     bottom.removeFromRight(3);
     verticalOutButton_.setBounds(bottom.removeFromRight(28));
     bottom.removeFromRight(3);
+    waveInButton_.setBounds(bottom.removeFromRight(32));
+    bottom.removeFromRight(3);
+    waveOutButton_.setBounds(bottom.removeFromRight(32));
+    bottom.removeFromRight(3);
     fitButton_.setBounds(bottom.removeFromRight(40));
     bottom.removeFromRight(6);
     if (laneCount() > lanesShown())
@@ -296,10 +339,17 @@ void TimelineView::mouseWheelMove(const juce::MouseEvent& event, const juce::Mou
 {
     if (event.mods.isAltDown() || event.mods.isCommandDown())
     {
-        if (wheel.deltaY > 0.0f)
-            verticalZoomIn();
-        else if (wheel.deltaY < 0.0f)
-            verticalZoomOut();
+        gainWheel_ += wheel.deltaY;
+        if (gainWheel_ >= 0.45f)
+        {
+            gainWheel_ = 0.0f;
+            nudgeWaveformGain(1);
+        }
+        else if (gainWheel_ <= -0.45f)
+        {
+            gainWheel_ = 0.0f;
+            nudgeWaveformGain(-1);
+        }
         return;
     }
 
@@ -307,7 +357,9 @@ void TimelineView::mouseWheelMove(const juce::MouseEvent& event, const juce::Mou
     {
         const auto span = fullSpan();
         const auto visible = visibleSamples();
-        const auto nudge = static_cast<std::int64_t>(static_cast<double>(-wheel.deltaY) * static_cast<double>(visible) * 0.25);
+        timeWheel_ += static_cast<double>(-wheel.deltaY) * static_cast<double>(visible) * 0.045;
+        const auto nudge = static_cast<std::int64_t>(timeWheel_);
+        timeWheel_ -= static_cast<double>(nudge);
         const auto maxStart = std::max<std::int64_t>(0, span - visible);
         viewStart_ = std::clamp(viewStart_ + nudge, static_cast<std::int64_t>(0), maxStart);
         syncScroll();
@@ -317,8 +369,10 @@ void TimelineView::mouseWheelMove(const juce::MouseEvent& event, const juce::Mou
 
     if (laneCount() > lanesShown())
     {
-        const int steps = wheel.deltaY > 0.0f ? -1 : wheel.deltaY < 0.0f ? 1 : 0;
-        laneScroll_ += steps * std::max(1, lanesShown() / 8);
+        laneWheel_ += wheel.deltaY * 0.85f;
+        const int steps = static_cast<int>(std::trunc(laneWheel_));
+        laneWheel_ -= static_cast<float>(steps);
+        laneScroll_ -= steps;
         clampLaneScroll();
         syncScroll();
         repaint();
@@ -394,8 +448,10 @@ void TimelineView::paint(juce::Graphics& graphics)
                     low = std::min(low, (*peaks)[peak].low);
                     high = std::max(high, (*peaks)[peak].high);
                 }
-                const float y1 = mid - juce::jlimit(-1.0f, 1.0f, high) * half;
-                const float y2 = mid - juce::jlimit(-1.0f, 1.0f, low) * half;
+                const float shownHigh = waveformDisplaySigned(high, waveformGain_);
+                const float shownLow = waveformDisplaySigned(low, waveformGain_);
+                const float y1 = mid - shownHigh * half;
+                const float y2 = mid - shownLow * half;
                 graphics.drawVerticalLine(pixel, std::min(y1, y2), std::max(y1, y2) + 0.5f);
             }
         }

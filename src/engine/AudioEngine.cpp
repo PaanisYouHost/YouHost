@@ -1,5 +1,8 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "OutputGain.h"
+#include "SignalPath.h"
+#include "WaveformScale.h"
 #include "DeviceWatch.h"
 #include "HostLog.h"
 #include "MeterScale.h"
@@ -212,6 +215,9 @@ AudioEngine::AudioEngine(AppSettings& settings)
     : settings_(settings)
 {
     channelGroup_.fill(-1);
+    listen_.fill(ChannelListen::record);
+    for (auto& gain : outputGain_)
+        gain.store(1.0f, std::memory_order_relaxed);
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
@@ -616,6 +622,24 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
     if (rack_ != nullptr)
         rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh);
+
+    if (outputChannelData != nullptr && numSamples > 0)
+    {
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            if (! channelIsOn(enabledLow, enabledHigh, channel))
+                continue;
+            const float gain = outputGain_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
+            if (sameFloatBits(gain, 1.0f))
+                continue;
+            const int packed = config.routing.outputPacked[static_cast<std::size_t>(channel)];
+            if (packed < 0 || packed >= numOutputChannels)
+                continue;
+            float* output = outputChannelData[packed];
+            if (output != nullptr)
+                applyOutputTrim(output, numSamples, gain);
+        }
+    }
 
     if (recorder_ != nullptr)
         recorder_->noteCallback();
@@ -1239,13 +1263,114 @@ bool AudioEngine::isPluginEditorOpen(int channel, int slot) const
 
 void AudioEngine::setRecordArmed(int channel, bool armed)
 {
+    setChannelListen(channel, armed ? ChannelListen::record : ChannelListen::off);
+}
+
+ChannelListen AudioEngine::channelListen(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return ChannelListen::off;
+    return listen_[static_cast<std::size_t>(channel)];
+}
+
+void AudioEngine::setChannelListen(int channel, ChannelListen mode)
+{
     if (channel < 0 || channel >= kMaxChannels)
         return;
+    listen_[static_cast<std::size_t>(channel)] = mode;
     if (recorder_ != nullptr)
-        recorder_->setArmed(channel, armed);
-    storeChannelOn(channel, armed);
+        recorder_->setArmed(channel, channelListenRecords(mode));
+    storeChannelOn(channel, channelListenAudible(mode));
     if (rack_ != nullptr)
-        rack_->setAudible(channel, armed);
+        rack_->setAudible(channel, channelListenAudible(mode));
+    noteSessionEdit();
+}
+
+void AudioEngine::cycleChannelListen(int channel)
+{
+    setChannelListen(channel, youhost::cycleChannelListen(channelListen(channel)));
+}
+
+float AudioEngine::outputDb(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return 0.0f;
+    return outputDb_[static_cast<std::size_t>(channel)];
+}
+
+void AudioEngine::setOutputDb(int channel, float db)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    const float snapped = snapOutputDb(db);
+    if (sameFloatBits(snapped, outputDb_[static_cast<std::size_t>(channel)]))
+        return;
+    outputDb_[static_cast<std::size_t>(channel)] = snapped;
+    outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(snapped), std::memory_order_relaxed);
+    noteSessionEdit();
+}
+
+void AudioEngine::setBypassAll(bool bypass)
+{
+    if (rack_ != nullptr)
+        rack_->setBypassAll(bypass);
+}
+
+bool AudioEngine::bypassAll() const
+{
+    return rack_ != nullptr && rack_->bypassAll();
+}
+
+void AudioEngine::setWaveformGain(float gain)
+{
+    const float clamped = clampWaveformGain(gain);
+    if (sameFloatBits(clamped, waveformGain_))
+        return;
+    waveformGain_ = clamped;
+    noteSessionEdit();
+}
+
+void AudioEngine::nudgeWaveformGain(int direction)
+{
+    setWaveformGain(stepWaveformGain(waveformGain_, direction));
+}
+
+void AudioEngine::setAlignGroup(int perGroup)
+{
+    const int mode = perGroup == 1 ? 1 : 0;
+    if (alignGroup_ == mode)
+        return;
+    alignGroup_ = mode;
+    syncCompensation();
+    noteSessionEdit();
+}
+
+CpuMeters AudioEngine::cpuMeters() const
+{
+    if (rack_ == nullptr)
+        return {};
+    return rack_->cpuMeters();
+}
+
+juce::String AudioEngine::channelPdcText(int channel) const
+{
+    if (rack_ == nullptr || channel < 0 || channel >= kMaxChannels)
+        return {};
+    const auto snap = rack_->snapshot(channel);
+    if (snap.chainSamples <= 0 && snap.delaySamples <= 0)
+        return {};
+    const double rate = sampleRate_.load(std::memory_order_relaxed);
+    const double ms = samplesToMilliseconds(snap.delaySamples, rate > 0.0 ? rate : 48000.0);
+    return "FX " + juce::String(snap.chainSamples) + " smp   PDC " + juce::String(snap.delaySamples)
+           + " smp / " + juce::String(ms, 1) + " ms";
+}
+
+void AudioEngine::syncCompensation()
+{
+    if (rack_ == nullptr)
+        return;
+    rack_->setAlignMode(alignGroup_);
+    rack_->setChannelGroups(channelGroup_.data(), kMaxChannels);
 }
 
 bool AudioEngine::isRecordArmed(int channel) const
@@ -1589,6 +1714,8 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
         recorder_->captureSession(data);
     captureDisplay(data);
     data.page = sessionPage_;
+    data.waveformGain = waveformGain_;
+    data.alignGroup = alignGroup_;
 
     const juce::File file(layout.sessionFile);
     if (! writeSessionFile(file, data))
@@ -1644,7 +1771,10 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
         strips_[static_cast<std::size_t>(channel)].excludeFromCompensation =
             data.channels[static_cast<std::size_t>(channel)].excludeFromCompensation;
 
+    waveformGain_ = clampWaveformGain(data.waveformGain);
+    alignGroup_ = data.alignGroup == 1 ? 1 : 0;
     applyDisplay(data);
+    syncCompensation();
 
     if (microphoneGranted_ && data.device != nullptr)
     {
@@ -1858,8 +1988,12 @@ void AudioEngine::captureDisplay(SessionData& data) const
 {
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
-        data.channels[static_cast<std::size_t>(channel)].color = channelColor_[static_cast<std::size_t>(channel)];
-        data.channels[static_cast<std::size_t>(channel)].group = channelGroup_[static_cast<std::size_t>(channel)];
+        auto& destination = data.channels[static_cast<std::size_t>(channel)];
+        destination.color = channelColor_[static_cast<std::size_t>(channel)];
+        destination.group = channelGroup_[static_cast<std::size_t>(channel)];
+        destination.listen = listen_[static_cast<std::size_t>(channel)];
+        destination.recordEnabled = destination.listen == ChannelListen::record;
+        destination.outputDb = outputDb_[static_cast<std::size_t>(channel)];
     }
     data.groups = groups_;
 }
@@ -1875,8 +2009,13 @@ void AudioEngine::applyDisplay(const SessionData& data)
         channelColor_[static_cast<std::size_t>(channel)] = normaliseX32Colour(source.color);
         const int group = source.group;
         channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
-        audible[static_cast<std::size_t>(channel)] = source.recordEnabled;
-        setChannelOnBit(low, high, channel, source.recordEnabled);
+        listen_[static_cast<std::size_t>(channel)] = source.listen;
+        outputDb_[static_cast<std::size_t>(channel)] = snapOutputDb(source.outputDb);
+        outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(outputDb_[static_cast<std::size_t>(channel)]),
+                                                            std::memory_order_relaxed);
+        const bool live = channelListenAudible(source.listen);
+        audible[static_cast<std::size_t>(channel)] = live;
+        setChannelOnBit(low, high, channel, live);
     }
     channelOnLo_.store(low, std::memory_order_relaxed);
     channelOnHi_.store(high, std::memory_order_relaxed);
@@ -1928,6 +2067,7 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
             continue;
         channelGroup_[static_cast<std::size_t>(channel)] = group;
     }
+    syncCompensation();
     bumpDisplay();
 }
 
@@ -1938,6 +2078,7 @@ void AudioEngine::clearGroup(int group)
     for (int channel = 0; channel < kMaxChannels; ++channel)
         if (channelGroup_[static_cast<std::size_t>(channel)] == group)
             channelGroup_[static_cast<std::size_t>(channel)] = -1;
+    syncCompensation();
     groups_[static_cast<std::size_t>(group)] = {};
     bumpDisplay();
 }

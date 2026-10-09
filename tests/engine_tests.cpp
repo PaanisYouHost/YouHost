@@ -1,4 +1,8 @@
 #include "engine/ChannelEnable.h"
+#include "engine/ChannelListen.h"
+#include "engine/OutputGain.h"
+#include "engine/SignalPath.h"
+#include "engine/WaveformScale.h"
 #include "engine/DisplayLayout.h"
 #include "engine/DropoutDetect.h"
 #include "engine/DropoutLog.h"
@@ -20,6 +24,7 @@
 #include "engine/TimelineZoom.h"
 
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -375,6 +380,25 @@ void testLatencyCompensation()
     const bool occupied[] = { true, true, true, false };
     const bool bypassed[] = { false, true, false, false };
     CHECK(youhost::sumSlotLatency(latencies, occupied, bypassed, 4) == 40);
+
+    youhost::ChannelLatencyInput grouped[4] {};
+    grouped[0] = { 100, true, 0 };
+    grouped[1] = { 300, true, 0 };
+    grouped[2] = { 1000, true, -1 };
+    grouped[3] = { 50, true, 1 };
+    const auto perGroup = youhost::planCompensation(grouped, 4, youhost::AlignMode::group);
+    CHECK(perGroup.delaySamples[0] == 200);
+    CHECK(perGroup.delaySamples[1] == 0);
+    CHECK(perGroup.delaySamples[2] == 0);
+    CHECK(perGroup.delaySamples[3] == 0);
+    CHECK(perGroup.alignmentSamples == 300);
+
+    youhost::ChannelLatencyInput pair[2] {};
+    pair[0] = { 64, true, -1 };
+    pair[1] = { 64, true, -1 };
+    const auto together = youhost::planCompensation(pair, 2, youhost::AlignMode::all);
+    CHECK(together.delaySamples[0] == together.delaySamples[1]);
+    CHECK(together.delaySamples[0] == 0);
 }
 
 void testOffChannelStaysSilent()
@@ -722,6 +746,135 @@ void testMergePeaks()
     CHECK(near(merged[1].high, 0.4f, 0.0001f));
 }
 
+void testDryPathIsBitIdentical()
+{
+    std::array<bool, youhost::kMaxChannels> active {};
+    active[0] = true;
+    active[1] = true;
+    const auto routing = youhost::makeRouting(active, active);
+
+    const float pattern[8] = { 1.0f, -1.0f, 0.0f, 0.1f, -0.25f, 0.0001f, 0.5f, -0.5f };
+    float in0[8];
+    float in1[8];
+    std::memcpy(in0, pattern, sizeof(pattern));
+    std::memcpy(in1, pattern, sizeof(pattern));
+    const float* inputs[2] = { in0, in1 };
+    float out0[8];
+    float out1[8];
+    std::memset(out0, 0x5a, sizeof(out0));
+    std::memset(out1, 0x5a, sizeof(out1));
+    float* outputs[2] = { out0, out1 };
+    std::array<youhost::ChannelStrip, youhost::kMaxChannels> strips {};
+
+    youhost::processPassthrough(inputs, 2, outputs, 2, 8, configAt(48000.0, routing), strips.data(), youhost::kMaxChannels);
+    CHECK(std::memcmp(out0, pattern, sizeof(pattern)) == 0);
+    CHECK(std::memcmp(out1, pattern, sizeof(pattern)) == 0);
+    CHECK(out0[0] == 1.0f);
+    CHECK(out0[1] == -1.0f);
+
+    float same[8];
+    std::memcpy(same, pattern, sizeof(pattern));
+    const float* sameIn[1] = { same };
+    float* sameOut[1] = { same };
+    std::array<bool, youhost::kMaxChannels> one {};
+    one[0] = true;
+    youhost::processPassthrough(sameIn, 1, sameOut, 1, 8, configAt(48000.0, youhost::makeRouting(one, one)), strips.data(), youhost::kMaxChannels);
+    CHECK(std::memcmp(same, pattern, sizeof(pattern)) == 0);
+
+    CHECK(youhost::outputDbToLinear(0.0f) == 1.0f);
+    float trimmed[8];
+    std::memcpy(trimmed, pattern, sizeof(pattern));
+    youhost::applyOutputTrim(trimmed, 8, youhost::outputDbToLinear(0.0f));
+    CHECK(std::memcmp(trimmed, pattern, sizeof(pattern)) == 0);
+
+    float delayed[8];
+    std::memcpy(delayed, pattern, sizeof(pattern));
+    float line[3] {};
+    int write = 0;
+    youhost::delayInPlace(line, 3, write, delayed, 8);
+    CHECK(std::memcmp(delayed + 3, pattern, sizeof(float) * 5) == 0);
+    CHECK(delayed[0] == 0.0f);
+    CHECK(delayed[1] == 0.0f);
+    CHECK(delayed[2] == 0.0f);
+    bool notAHighPass = false;
+    for (int index = 1; index < 8; ++index)
+        if (delayed[index] != pattern[index] - pattern[index - 1])
+            notAHighPass = true;
+    CHECK(notAHighPass);
+
+    float left[4];
+    float right[4] = { 7.0f, 7.0f, 7.0f, 7.0f };
+    float* staged[2] = { left, right };
+    youhost::stagePluginChannels(staged, 1, 2, pattern, 4);
+    CHECK(std::memcmp(left, pattern, sizeof(float) * 4) == 0);
+    CHECK(right[0] == 0.0f);
+    CHECK(right[1] == 0.0f);
+    CHECK(right[2] == 0.0f);
+    CHECK(right[3] == 0.0f);
+
+    youhost::stagePluginChannels(staged, 2, 2, pattern, 4);
+    CHECK(std::memcmp(left, pattern, sizeof(float) * 4) == 0);
+    CHECK(std::memcmp(right, pattern, sizeof(float) * 4) == 0);
+
+    float side[4];
+    side[0] = 0.0f;
+    for (int index = 1; index < 4; ++index)
+        side[index] = -pattern[index - 1];
+    const float* pluginOut[2] = { left, side };
+    float folded[4];
+    std::memcpy(folded, pattern, sizeof(float) * 4);
+    youhost::takePluginChannel(folded, pluginOut, 2, 4);
+    CHECK(std::memcmp(folded, left, sizeof(float) * 4) == 0);
+    bool notADifference = false;
+    for (int index = 0; index < 4; ++index)
+        if (folded[index] != left[index] - side[index])
+            notADifference = true;
+    CHECK(notADifference);
+    bool notASum = false;
+    for (int index = 0; index < 4; ++index)
+        if (folded[index] != (left[index] + side[index]) * 0.5f)
+            notASum = true;
+    CHECK(notASum);
+
+    CHECK(! youhost::pluginSlotRuns(true, true, false));
+    CHECK(! youhost::pluginSlotRuns(true, false, true));
+    CHECK(youhost::pluginSlotRuns(true, false, false));
+    CHECK(! youhost::pluginSlotRuns(false, false, false));
+}
+
+void testOutputGainAndListen()
+{
+    CHECK(youhost::snapOutputDb(0.2f) == 0.0f);
+    CHECK(youhost::snapOutputDb(0.3f) == 0.5f);
+    CHECK(youhost::snapOutputDb(-20.0f) == -9.0f);
+    CHECK(youhost::snapOutputDb(20.0f) == 9.0f);
+    CHECK(youhost::outputDbIsUnity(0.0f));
+    CHECK(near(youhost::outputDbToLinear(6.0f), 1.995262f, 0.001f));
+    CHECK(youhost::channelListenFromName("input") == youhost::ChannelListen::input);
+    CHECK(youhost::channelListenFromName("off") == youhost::ChannelListen::off);
+    CHECK(youhost::channelListenFromName("rec") == youhost::ChannelListen::record);
+    CHECK(std::string(youhost::channelListenLabel(youhost::ChannelListen::input)) == "INPUT");
+    CHECK(youhost::cycleChannelListen(youhost::ChannelListen::record) == youhost::ChannelListen::input);
+    CHECK(youhost::cycleChannelListen(youhost::ChannelListen::input) == youhost::ChannelListen::off);
+    CHECK(youhost::cycleChannelListen(youhost::ChannelListen::off) == youhost::ChannelListen::record);
+    CHECK(youhost::channelListenAudible(youhost::ChannelListen::input));
+    CHECK(! youhost::channelListenRecords(youhost::ChannelListen::input));
+    CHECK(youhost::channelListenRecords(youhost::ChannelListen::record));
+}
+
+void testWaveformAndAnchor()
+{
+    CHECK(youhost::waveformDisplayLevel(1.0f, 1.0f) == 1.0f);
+    CHECK(youhost::waveformDisplayLevel(0.0f, 1.0f) == 0.0f);
+    CHECK(youhost::waveformDisplayLevel(0.1f, 1.0f) > 0.5f);
+    CHECK(youhost::stepWaveformGain(1.0f, 1) > 1.0f);
+    CHECK(youhost::stepWaveformGain(1.0f, -1) < 1.0f);
+    CHECK(youhost::anchorPlayhead(10000, 4000, 0) == 0);
+    CHECK(youhost::anchorPlayhead(10000, 4000, 3000) == 0);
+    CHECK(youhost::anchorPlayhead(10000, 4000, 4000) == 1000);
+    CHECK(youhost::anchorPlayhead(4000, 4000, 2000) == 0);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -733,6 +886,9 @@ void testRaiseUnit()
 
 int main()
 {
+    testDryPathIsBitIdentical();
+    testOutputGainAndListen();
+    testWaveformAndAnchor();
     testRaiseUnit();
     testPassthroughCopiesMatchingChannels();
     testMetersSettleClipAndClear();

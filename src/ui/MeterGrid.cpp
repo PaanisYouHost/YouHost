@@ -2,6 +2,7 @@
 #include "MeterColours.h"
 #include "Theme.h"
 #include "X32Look.h"
+#include "engine/ChannelListen.h"
 #include "engine/MeterScale.h"
 
 #include <cmath>
@@ -24,7 +25,7 @@ struct BarParts
 BarParts splitCell(juce::Rectangle<float> cell)
 {
     const float numberHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.08f);
-    const float nameHeight = juce::jlimit(11.0f, 15.0f, cell.getHeight() * 0.05f);
+    const float nameHeight = juce::jlimit(22.0f, 32.0f, cell.getHeight() * 0.09f);
     const float buttonHeight = juce::jlimit(16.0f, 22.0f, cell.getHeight() * 0.1f);
     auto body = cell.reduced(2.0f, 2.0f);
     auto number = body.removeFromBottom(numberHeight);
@@ -114,7 +115,18 @@ void drawScaleLines(juce::Graphics& graphics, const std::vector<PlacedTick>& tic
 
 juce::String channelButtonText(const MeterReading& reading)
 {
-    return reading.recordArmed ? "REC" : "OFF";
+    const int raw = reading.listen;
+    const auto listen = raw == 0 ? ChannelListen::off : raw == 1 ? ChannelListen::input : ChannelListen::record;
+    return channelListenLabel(listen);
+}
+
+ChannelListen listenOf(const MeterReading& reading)
+{
+    if (reading.listen == 0)
+        return ChannelListen::off;
+    if (reading.listen == 1)
+        return ChannelListen::input;
+    return ChannelListen::record;
 }
 
 } // namespace
@@ -501,10 +513,12 @@ void MeterGrid::paint(juce::Graphics& graphics)
             }
 
             juce::String state = "OFF";
-            if (cell.memberCount > 0 && cell.membersOn == cell.memberCount)
+            if (cell.memberCount > 0 && cell.membersRecord == cell.memberCount)
                 state = "REC";
-            else if (cell.membersOn > 0)
-                state = juce::String(cell.membersOn) + " on";
+            else if (cell.memberCount > 0 && cell.membersInput == cell.memberCount)
+                state = "INPUT";
+            else if (cell.membersRecord + cell.membersInput > 0)
+                state = "mixed";
             if (cell.reading.clipped)
                 state << "  CLIP";
             if (cell.anyPlugin)
@@ -542,7 +556,8 @@ void MeterGrid::paint(juce::Graphics& graphics)
         }
         lastBar = parts.bar;
 
-        const bool on = cell.reading.recordArmed;
+        const auto listen = listenOf(cell.reading);
+        const bool on = channelListenAudible(listen);
         const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
         graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
         graphics.fillRoundedRectangle(parts.bar, 2.0f);
@@ -558,18 +573,31 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
 
         auto button = parts.button.reduced(1.0f, 0.0f);
-        graphics.setColour(on ? (cell.reading.recordLive ? theme::red : juce::Colour(0xff8d2430)) : theme::button);
+        juce::Colour buttonFill = theme::button;
+        if (listen == ChannelListen::record)
+            buttonFill = cell.reading.recordLive ? theme::red : juce::Colour(0xff8d2430);
+        else if (listen == ChannelListen::input)
+            buttonFill = juce::Colour(0xff245a9a);
+        graphics.setColour(buttonFill);
         graphics.fillRoundedRectangle(button, 3.0f);
         graphics.setColour(on ? juce::Colours::white : theme::fainter);
-        const float fontSize = juce::jlimit(8.0f, 11.0f, button.getWidth() * 0.34f);
+        const float fontSize = juce::jlimit(8.0f, 11.0f, button.getWidth() * 0.28f);
         graphics.setFont(juce::Font(juce::FontOptions(fontSize).withStyle("Bold")));
         graphics.drawText(channelButtonText(cell.reading), button, juce::Justification::centred, false);
 
+        auto nameArea = parts.name;
+        if (cell.pdc.isNotEmpty())
+        {
+            auto pdcArea = nameArea.removeFromBottom(nameArea.getHeight() * 0.45f);
+            graphics.setColour(theme::amber);
+            graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(7.0f, 9.0f, width * 0.18f))));
+            graphics.drawText(cell.pdc, pdcArea, juce::Justification::centred, true);
+        }
         if (cell.title.isNotEmpty())
         {
             graphics.setColour(on ? theme::dim : theme::fainter);
             graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 11.0f, width * 0.24f))));
-            graphics.drawText(cell.title, parts.name, juce::Justification::centred, true);
+            graphics.drawText(cell.title, nameArea, juce::Justification::centred, true);
         }
 
         graphics.setColour(theme::text);

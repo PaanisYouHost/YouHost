@@ -30,6 +30,7 @@ struct MeterReading
     bool hasInput = false;
     bool recordArmed = true;
     bool recordLive = false;
+    int listen = 2;
     std::array<SlotMark, kSlotsPerChannel> slots {};
 };
 
@@ -45,7 +46,10 @@ struct BridgeCell
     MeterReading reading {};
     bool anyPlugin = false;
     int membersOn = 0;
+    int membersRecord = 0;
+    int membersInput = 0;
     int memberCount = 0;
+    juce::String pdc;
 };
 
 struct MeterHit
