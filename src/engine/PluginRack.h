@@ -2,6 +2,7 @@
 
 #include "ChannelEnable.h"
 #include "Passthrough.h"
+#include "PluginLoadPace.h"
 #include "SessionDocument.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -128,6 +129,13 @@ public:
     int alignmentSamples() const;
     void captureSession(SessionData& data);
     void restoreSession(const SessionData& data);
+    // Starts the queued session plugins after the device is open again.
+    // One plugin per later message-loop turn. Audio keeps running.
+    void pumpSessionLoads();
+    bool isLoadingPlugins() const noexcept { return ! loadCursor_.done(); }
+    juce::String pluginLoadProgress() const;
+    // channel >= 0: that row changed. -2: batch is about to start. -1: batch finished.
+    void setPluginSlotHandler(std::function<void(int channel)> handler);
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
@@ -177,7 +185,8 @@ private:
                     juce::PluginDescription description,
                     juce::MemoryBlock state,
                     std::unique_ptr<juce::AudioPluginInstance> instance,
-                    const juce::String& error);
+                    const juce::String& error,
+                    std::uint64_t restoreGeneration);
     void publishUnlocked();
     void reapUnlocked();
     std::unique_ptr<LiveGraph> buildGraph();
@@ -200,7 +209,16 @@ private:
                    bool bypassed,
                    bool markDirty,
                    bool openWhenReady,
-                   int stereoFold);
+                   int stereoFold,
+                   std::uint64_t restoreGeneration);
+    void scheduleNextRestore();
+    void startNextRestore();
+    void completeRestoreStep(std::uint64_t generation);
+    void finishRestore();
+    void noteSlot(int channel);
+    void launchBackgroundLoad();
+    void deliverOffThreadInstance();
+    class BackgroundInstantiate;
     void enqueueChannel(int channel, std::function<void()> work, bool asynchronous);
     void pumpChannel(int channel);
     void finishChannelWork(int channel, std::uint64_t ticket);
@@ -244,6 +262,37 @@ private:
     std::atomic<int> reprepareBlock_ { 0 };
     std::uint64_t ticketSource_ = 0;
     bool restoring_ = false;
+    SessionLoadCursor loadCursor_ {};
+    std::uint64_t restoreGeneration_ = 0;
+    bool restorePosted_ = false;
+    bool sessionLoadsReady_ = false;
+    struct RestorePlugin
+    {
+        int channel = 0;
+        int slot = 0;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        bool bypassed = false;
+        int stereoFold = 0;
+    };
+    std::vector<RestorePlugin> restoreQueue_;
+    std::function<void(int)> slotHandler_;
+    std::unique_ptr<BackgroundInstantiate> backgroundInstantiate_;
+    std::mutex offThreadMutex_;
+    std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
+    juce::String offThreadError_;
+    int jobChannel_ = 0;
+    int jobSlot_ = 0;
+    std::uint64_t jobTicket_ = 0;
+    std::uint64_t jobGeneration_ = 0;
+    bool jobMarkDirty_ = false;
+    bool jobBypassed_ = false;
+    bool jobOpen_ = false;
+    int jobStereo_ = 0;
+    juce::PluginDescription jobDescription_;
+    juce::MemoryBlock jobState_;
+    double jobRate_ = 48000.0;
+    int jobBlock_ = 512;
 
     std::unique_ptr<LiveGraph> current_;
     std::vector<std::unique_ptr<LiveGraph>> retired_;

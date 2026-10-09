@@ -437,6 +437,8 @@ public:
     {
     }
 
+    int groupId() const noexcept { return group_; }
+
     void refresh()
     {
         repaint();
@@ -1166,6 +1168,24 @@ void PluginPage::showPluginList(int channel, int slot)
         if (pluginList_ != nullptr)
             pluginList_->setVisible(false);
     });
+}
+
+void PluginPage::refreshChannel(int channel)
+{
+    const int channels = std::max(0, engine_.visibleChannels());
+    if (channels != channels_ || engine_.displayRevision() != revision_)
+        rebuild();
+
+    for (auto& row : rows_)
+        if (row != nullptr && row->isChannel(channel))
+            row->refresh();
+
+    const int group = engine_.channelGroup(channel);
+    if (group < 0)
+        return;
+    for (auto& header : headers_)
+        if (header != nullptr && header->groupId() == group)
+            header->refresh();
 }
 
 void PluginPage::refresh()

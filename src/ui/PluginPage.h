@@ -21,6 +21,7 @@ public:
 
     void setMeterMode(bool peak, int referenceDb);
     void refresh();
+    void refreshChannel(int channel);
     void resized() override;
 
 private:

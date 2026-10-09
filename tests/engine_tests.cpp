@@ -23,6 +23,7 @@
 #include "engine/DeviceWatch.h"
 #include "engine/HostPath.h"
 #include "engine/InsertMenu.h"
+#include "engine/PluginLoadPace.h"
 #include "engine/PluginMoves.h"
 #include "engine/StallWatch.h"
 #include "engine/TimelineLanes.h"
@@ -497,6 +498,38 @@ void testSessionNames()
     CHECK(drop[0] == "old");
     CHECK(youhost::groupFoldLabel(true, 8) == "\u25B8 8 ch");
     CHECK(youhost::groupFoldLabel(false, 8) == "\u25BE 8 ch");
+}
+
+void testPluginLoadPace()
+{
+    using youhost::PluginInstantiateWhere;
+    CHECK(youhost::isAudioUnitFormat("AudioUnit"));
+    CHECK(! youhost::isAudioUnitFormat("VST3"));
+    CHECK(youhost::pluginInstantiateWhere(true, false) == PluginInstantiateWhere::messageAsync);
+    CHECK(youhost::pluginInstantiateWhere(false, true) == PluginInstantiateWhere::messageAsync);
+    CHECK(youhost::pluginInstantiateWhere(false, false) == PluginInstantiateWhere::background);
+
+    char text[64];
+    CHECK(! youhost::formatPluginLoadProgress(0, 0, false, text, sizeof(text)));
+    CHECK(youhost::formatPluginLoadProgress(0, 5, false, text, sizeof(text)));
+    CHECK(std::string(text) == "Loading plugins 1/5\xE2\x80\xA6");
+    CHECK(youhost::formatPluginLoadProgress(2, 5, true, text, sizeof(text)));
+    CHECK(std::string(text) == "Loading plugins 3/5\xE2\x80\xA6");
+    CHECK(! youhost::formatPluginLoadProgress(5, 5, false, text, sizeof(text)));
+
+    youhost::SessionLoadCursor cursor;
+    cursor.total = 5;
+    int started = 0;
+    while (! cursor.done())
+    {
+        CHECK(cursor.startOne());
+        CHECK(! cursor.startOne());
+        ++started;
+        cursor.completeOne();
+    }
+    CHECK(started == 5);
+    CHECK(cursor.done());
+    CHECK(! cursor.startOne());
 }
 
 void testShortcutsMatchTheHelp()
@@ -1196,6 +1229,7 @@ int main()
     testOffChannelStaysSilent();
     testChannelPick();
     testSessionNames();
+    testPluginLoadPace();
     testShortcutsMatchTheHelp();
     testGroupsFoldAndPalette();
 

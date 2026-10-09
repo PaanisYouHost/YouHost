@@ -916,6 +916,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         setPeakMode(peak, false);
     });
     engine_.setPageRestoreHandler([this](int page) { showPage(page); });
+    engine_.setPluginSlotHandler([this](int channel) { onPluginSlot(channel); });
 
     addAndMakeVisible(meterViewport_);
     addAndMakeVisible(leftScale_);
@@ -1159,6 +1160,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
 MainComponent::~MainComponent()
 {
+    engine_.setPluginSlotHandler(nullptr);
     stopTimer();
     copyWindow_.reset();
 #if JUCE_MAC
@@ -1882,55 +1884,29 @@ void MainComponent::timerCallback()
     refresh();
 }
 
-void MainComponent::refresh()
+void MainComponent::onPluginSlot(int channel)
 {
-    latencyReadout_.setNumbers(engine_.latencyNumbers());
-    const auto numbers = engine_.latencyNumbers();
-    if (numbers.deviceOpen)
+    if (channel < 0)
     {
-        latencyLabel_.setText("Delay " + juce::String(samplesToMilliseconds(numbers.compensationSamples, numbers.sampleRate), 1)
-                                  + " ms   USB " + juce::String(samplesToMilliseconds(numbers.roundTripSamples, numbers.sampleRate), 1)
-                                  + " ms",
-                              juce::dontSendNotification);
+        refresh();
     }
     else
     {
-        latencyLabel_.setText("No device", juce::dontSendNotification);
+        pluginPage_.refreshChannel(channel);
+        publishMeters(false);
+        repaint(statusArea_);
+        repaint(hintArea_);
     }
+    // Paint the dirty rows before the next plugin is created. A later
+    // instantiate must not walk a stale full-window repaint.
+    if (auto* peer = getPeer())
+        peer->performAnyPendingRepaintsNow();
+}
 
+void MainComponent::publishMeters(bool repaintLevels)
+{
     auto transport = engine_.transportView();
-    if (transport.naturalEnd || transport.failed)
-    {
-        engine_.transportStop();
-        transport = engine_.transportView();
-    }
-    if (transport.mode == TransportMode::recording)
-        engine_.touchSession();
-    timeline_.setWaveformGain(engine_.waveformGain());
-    timeline_.setTransport(transport);
-    timeLabel_.setText(timecodeText(transport.position, transport.sampleRate), juce::dontSendNotification);
     const bool recording = transport.mode == TransportMode::recording;
-    const bool playing = transport.mode == TransportMode::playing;
-    timeLabel_.setColour(juce::Label::textColourId, recording ? juce::Colours::white : theme::text);
-    timeLabel_.setColour(juce::Label::backgroundColourId, recording ? juce::Colour(0xff8d2430) : theme::panel);
-    modeLabel_.setText(playing ? "PLAYBACK" : recording ? "RECORD" : juce::String(), juce::dontSendNotification);
-    modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
-    const bool blink = engine_.isRecordReady() && ! recording && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
-    recButton_.setToggleState(recording || blink, juce::dontSendNotification);
-    playButton_.setToggleState(playing, juce::dontSendNotification);
-    scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
-    dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
-    cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
-    latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
-    latencyReadout_.setAlignGroup(engine_.alignGroup());
-    setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
-    if (bitDepthSlot_ != nullptr)
-        bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
-    allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
-    hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
-    leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
-    rightScale_.setScale(showPeak_, rmsReferenceDb_, true);
-
     const int channels = engine_.visibleChannels();
     const auto strips = engine_.displayStrips(channels);
     std::vector<BridgeCell> cells;
@@ -1989,7 +1965,75 @@ void MainComponent::refresh()
         }
         cells.push_back(std::move(cell));
     }
-    meterGrid_.setCells(std::move(cells), showPeak_, rmsReferenceDb_);
+    meterGrid_.setCells(std::move(cells), showPeak_, rmsReferenceDb_, repaintLevels);
+}
+
+void MainComponent::refresh()
+{
+    const bool loading = engine_.isLoadingPlugins();
+    if (loading != heavyPaintSuspended_)
+    {
+        heavyPaintSuspended_ = loading;
+        meterGrid_.setBufferedToImage(loading);
+        pluginPage_.setBufferedToImage(loading);
+        timeline_.setBufferedToImage(loading);
+        heavyPaintHeld_ = false;
+    }
+    if (loading && heavyPaintHeld_)
+    {
+        repaint(statusArea_);
+        repaint(hintArea_);
+        return;
+    }
+
+    latencyReadout_.setNumbers(engine_.latencyNumbers());
+    const auto numbers = engine_.latencyNumbers();
+    if (numbers.deviceOpen)
+    {
+        latencyLabel_.setText("Delay " + juce::String(samplesToMilliseconds(numbers.compensationSamples, numbers.sampleRate), 1)
+                                  + " ms   USB " + juce::String(samplesToMilliseconds(numbers.roundTripSamples, numbers.sampleRate), 1)
+                                  + " ms",
+                              juce::dontSendNotification);
+    }
+    else
+    {
+        latencyLabel_.setText("No device", juce::dontSendNotification);
+    }
+
+    auto transport = engine_.transportView();
+    if (transport.naturalEnd || transport.failed)
+    {
+        engine_.transportStop();
+        transport = engine_.transportView();
+    }
+    if (transport.mode == TransportMode::recording)
+        engine_.touchSession();
+    timeline_.setWaveformGain(engine_.waveformGain());
+    timeline_.setTransport(transport);
+    timeLabel_.setText(timecodeText(transport.position, transport.sampleRate), juce::dontSendNotification);
+    const bool recording = transport.mode == TransportMode::recording;
+    const bool playing = transport.mode == TransportMode::playing;
+    timeLabel_.setColour(juce::Label::textColourId, recording ? juce::Colours::white : theme::text);
+    timeLabel_.setColour(juce::Label::backgroundColourId, recording ? juce::Colour(0xff8d2430) : theme::panel);
+    modeLabel_.setText(playing ? "PLAYBACK" : recording ? "RECORD" : juce::String(), juce::dontSendNotification);
+    modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
+    const bool blink = engine_.isRecordReady() && ! recording && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
+    recButton_.setToggleState(recording || blink, juce::dontSendNotification);
+    playButton_.setToggleState(playing, juce::dontSendNotification);
+    scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
+    dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+    cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
+    latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
+    latencyReadout_.setAlignGroup(engine_.alignGroup());
+    setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
+    if (bitDepthSlot_ != nullptr)
+        bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
+    allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
+    hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
+    leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
+    rightScale_.setScale(showPeak_, rmsReferenceDb_, true);
+
+    publishMeters(true);
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
@@ -2005,6 +2049,8 @@ void MainComponent::refresh()
         if (! deviceLostArea_.isEmpty())
             repaint(deviceLostArea_);
     }
+    if (loading)
+        heavyPaintHeld_ = true;
 }
 
 void MainComponent::hideDeviceTestTone()
@@ -2093,6 +2139,9 @@ void MainComponent::paint(juce::Graphics& graphics)
     const auto backup = engine_.backupStatusText();
     if (backup.isNotEmpty())
         status << "   " << backup;
+    const auto loadingPlugins = engine_.pluginLoadProgress();
+    if (loadingPlugins.isNotEmpty())
+        status << "   " << loadingPlugins;
     const auto transport = engine_.transportView();
     if (transport.status.isNotEmpty())
         status << "   " << transport.status;
@@ -2126,7 +2175,9 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
-    juce::String hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
+    juce::String hint = engine_.pluginLoadProgress();
+    if (hint.isEmpty())
+        hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty())
         hint = engine_.rateWarning();
     if (hint.isEmpty() && page_ == 1)

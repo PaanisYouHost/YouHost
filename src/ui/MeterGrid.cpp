@@ -179,13 +179,62 @@ MeterGrid::MeterGrid()
 
 MeterGrid::~MeterGrid() = default;
 
-void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb)
+bool meterChromeChanged(const BridgeCell& before, const BridgeCell& after)
 {
-    cells_ = std::move(cells);
+    if (before.header != after.header || before.channel != after.channel || before.group != after.group)
+        return true;
+    if (before.color != after.color || before.collapsed != after.collapsed || before.selected != after.selected)
+        return true;
+    if (before.title != after.title || before.pdc != after.pdc || before.anyPlugin != after.anyPlugin)
+        return true;
+    if (before.memberCount != after.memberCount || before.membersOn != after.membersOn
+        || before.membersRecord != after.membersRecord || before.membersInput != after.membersInput)
+        return true;
+    const auto& left = before.reading;
+    const auto& right = after.reading;
+    return left.clipped != right.clipped || left.hasInput != right.hasInput || left.recordArmed != right.recordArmed
+           || left.recordLive != right.recordLive || left.listen != right.listen;
+}
+
+void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb, bool repaintLevels)
+{
     showPeak_ = showPeak;
     rmsReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
     placeNameEditor(false);
-    repaint();
+
+    bool sameShape = ! repaintLevels && cells_.size() == cells.size();
+    if (sameShape)
+    {
+        for (std::size_t index = 0; index < cells.size(); ++index)
+            if (cells_[index].header != cells[index].header)
+                sameShape = false;
+    }
+
+    if (! sameShape)
+    {
+        cells_ = std::move(cells);
+        repaint();
+        return;
+    }
+
+    const int fit = fitWidth_ > 0 ? fitWidth_ : getWidth();
+    auto metrics = metricsFor(fit);
+    if (metrics.contentWidth > static_cast<float>(fit))
+        metrics.originX = 0.0f;
+    float x = metrics.originX;
+    std::vector<juce::Rectangle<int>> dirty;
+    for (std::size_t index = 0; index < cells.size(); ++index)
+    {
+        const float width = cells[index].header ? metrics.headerWidth : metrics.channelWidth;
+        if (meterChromeChanged(cells_[index], cells[index]))
+        {
+            dirty.push_back(juce::Rectangle<float>(x, 0.0f, width, static_cast<float>(getHeight())).getSmallestIntegerContainer());
+        }
+        x += width;
+    }
+    cells_ = std::move(cells);
+    for (const auto& area : dirty)
+        repaint(area);
 }
 
 void MeterGrid::setFitWidth(int viewportWidth)

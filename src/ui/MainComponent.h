@@ -36,6 +36,8 @@ private:
     void timerCallback() override;
     bool handleKey(const juce::KeyPress& key, juce::Component* originating);
     void refresh();
+    void publishMeters(bool repaintLevels);
+    void onPluginSlot(int channel);
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
     void hideDeviceTestTone();
@@ -139,6 +141,8 @@ private:
     void chooseSaveAsDestination();
     void syncCopyProgress();
 
+    bool heavyPaintSuspended_ = false;
+    bool heavyPaintHeld_ = false;
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     int page_ = 1;

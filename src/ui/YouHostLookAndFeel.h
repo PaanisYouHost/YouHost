@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include <cstdint>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,7 @@ class YouHostLookAndFeel : public juce::LookAndFeel_V4
 public:
     YouHostLookAndFeel()
     {
+        faces_.reserve(kFaceCap);
         setColourScheme(juce::LookAndFeel_V4::getDarkColourScheme());
 
         setColour(juce::ResizableWindow::backgroundColourId, theme::background);
@@ -104,15 +106,29 @@ private:
         inset
     };
 
-    struct Face
+    struct FaceKey
     {
         int width = 0;
         int height = 0;
         std::uint32_t colour = 0;
-        bool highlighted = false;
-        bool down = false;
-        FaceKind kind = FaceKind::raised;
-        juce::Image image;
+        std::uint8_t flags = 0;
+
+        bool operator==(const FaceKey& other) const noexcept
+        {
+            return width == other.width && height == other.height && colour == other.colour && flags == other.flags;
+        }
+    };
+
+    struct FaceKeyHash
+    {
+        std::size_t operator()(const FaceKey& key) const noexcept
+        {
+            std::size_t hash = static_cast<std::size_t>(key.width) * 1315423911u;
+            hash ^= static_cast<std::size_t>(key.height) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+            hash ^= static_cast<std::size_t>(key.colour) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+            hash ^= static_cast<std::size_t>(key.flags) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+            return hash;
+        }
     };
 
     static void paintRaised(juce::Graphics& graphics, juce::Rectangle<float> bounds, juce::Colour face, bool highlighted, bool down)
@@ -174,34 +190,37 @@ private:
 
     juce::Image cachedFace(int width, int height, juce::Colour face, bool highlighted, bool down, FaceKind kind)
     {
-        const auto colour = face.getARGB();
-        for (const auto& cached : faces_)
-            if (cached.width == width && cached.height == height && cached.colour == colour
-                && cached.highlighted == highlighted && cached.down == down && cached.kind == kind)
-                return cached.image;
+        const FaceKey key { width,
+                            height,
+                            face.getARGB(),
+                            static_cast<std::uint8_t>((highlighted ? 1 : 0) | (down ? 2 : 0) | (kind == FaceKind::inset ? 4 : 0)) };
+        const auto found = faces_.find(key);
+        if (found != faces_.end())
+            return found->second;
 
-        if (faces_.size() > 96)
-            faces_.clear();
+        // Drop the oldest face only. Clearing the map would rebuild every
+        // button inside the same paint.
+        if (faces_.size() >= kFaceCap && ! order_.empty())
+        {
+            faces_.erase(order_.front());
+            order_.erase(order_.begin());
+        }
 
-        Face created;
-        created.width = width;
-        created.height = height;
-        created.colour = colour;
-        created.highlighted = highlighted;
-        created.down = down;
-        created.kind = kind;
-        created.image = juce::Image(juce::Image::ARGB, width, height, true);
-        juce::Graphics imageGraphics(created.image);
+        juce::Image image(juce::Image::ARGB, width, height, true);
+        juce::Graphics imageGraphics(image);
         const auto plate = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
         if (kind == FaceKind::inset)
             paintInset(imageGraphics, plate, face, down);
         else
             paintRaised(imageGraphics, plate, face, highlighted, down);
-        faces_.push_back(created);
-        return created.image;
+        faces_.emplace(key, image);
+        order_.push_back(key);
+        return image;
     }
 
-    std::vector<Face> faces_;
+    static constexpr std::size_t kFaceCap = 512;
+    std::unordered_map<FaceKey, juce::Image, FaceKeyHash> faces_;
+    std::vector<FaceKey> order_;
 };
 
 } // namespace youhost

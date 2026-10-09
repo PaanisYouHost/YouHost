@@ -80,7 +80,10 @@ public:
     MeterGrid();
     ~MeterGrid() override;
 
-    void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb);
+    // repaintLevels false updates the stored cells and repaints only rows whose
+    // chrome changed. Meter levels are left as they are so a plugin load does
+    // not redraw the whole grid.
+    void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb, bool repaintLevels = true);
     void setFitWidth(int viewportWidth);
     int preferredWidth(int viewportWidth) const;
     int naturalContentWidth(int viewportWidth) const;

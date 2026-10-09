@@ -166,6 +166,9 @@ public:
     juce::String backupStatusText() const;
     juce::String takeCopyFailure();
     bool loadSessionFrom(const juce::File& fileOrFolder);
+    bool isLoadingPlugins() const;
+    juce::String pluginLoadProgress() const;
+    void setPluginSlotHandler(std::function<void(int channel)> handler);
     bool importRecordingFolder(const juce::File& folder);
     void clearTimeline();
     juce::StringArray recentSessions() const;
@@ -265,6 +268,7 @@ private:
     juce::uint32 sessionDirtyAtMs_ = 0;
     std::function<void(bool, int)> meterRestoreHandler_;
     std::function<void(int)> pageRestoreHandler_;
+    std::function<void(int)> pluginSlotHandler_;
     std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
     std::array<int, kMaxChannels> channelColor_ {};

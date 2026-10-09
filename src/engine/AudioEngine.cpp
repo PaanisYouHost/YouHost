@@ -1912,7 +1912,28 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     lastBackupMs_ = 0;
     restoringSession_ = false;
     dropoutHeaderWritten_ = false;
+    if (rack_ != nullptr)
+        rack_->pumpSessionLoads();
     return true;
+}
+
+bool AudioEngine::isLoadingPlugins() const
+{
+    return rack_ != nullptr && rack_->isLoadingPlugins();
+}
+
+juce::String AudioEngine::pluginLoadProgress() const
+{
+    if (rack_ == nullptr)
+        return {};
+    return rack_->pluginLoadProgress();
+}
+
+void AudioEngine::setPluginSlotHandler(std::function<void(int)> handler)
+{
+    pluginSlotHandler_ = std::move(handler);
+    if (rack_ != nullptr)
+        rack_->setPluginSlotHandler(pluginSlotHandler_);
 }
 
 bool AudioEngine::saveSessionAs(const juce::File& folder)

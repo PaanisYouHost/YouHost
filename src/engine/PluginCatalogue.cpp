@@ -1,4 +1,5 @@
 #include "PluginCatalogue.h"
+#include "PluginLoadPace.h"
 #include "AppSettings.h"
 #include "ScanJobs.h"
 
@@ -556,6 +557,102 @@ void PluginCatalogue::createInstanceAsync(const juce::PluginDescription& descrip
                                           juce::AudioPluginFormat::PluginCreationCallback callback)
 {
     formats_.createPluginInstanceAsync(description, sampleRate, blockSize, std::move(callback));
+}
+
+bool PluginCatalogue::prefersBackgroundInstance(const juce::PluginDescription& description) const
+{
+    const bool audioUnit = isAudioUnitFormat(description.pluginFormatName.toRawUTF8());
+    bool requiresMessageThread = true;
+    for (int index = 0; index < formats_.getNumFormats(); ++index)
+    {
+        auto* format = formats_.getFormat(index);
+        if (format == nullptr || format->getName() != description.pluginFormatName)
+            continue;
+        requiresMessageThread = format->requiresUnblockedMessageThreadDuringCreation(description);
+        break;
+    }
+    return pluginInstantiateWhere(audioUnit, requiresMessageThread) == PluginInstantiateWhere::background;
+}
+
+namespace
+{
+
+// createPluginInstance is protected. The public helpers always post the work
+// back onto the message thread, which is the freeze we are avoiding.
+struct PluginFormatInstantiate
+{
+    using Signature = void (juce::AudioPluginFormat::*)(const juce::PluginDescription&,
+                                                        double,
+                                                        int,
+                                                        juce::AudioPluginFormat::PluginCreationCallback);
+    friend Signature pluginFormatInstantiate(PluginFormatInstantiate);
+};
+
+template <typename Tag, typename Tag::Signature Member>
+struct ExposePluginFormatInstantiate
+{
+    friend typename Tag::Signature pluginFormatInstantiate(Tag)
+    {
+        return Member;
+    }
+};
+
+template struct ExposePluginFormatInstantiate<PluginFormatInstantiate, &juce::AudioPluginFormat::createPluginInstance>;
+
+} // namespace
+
+bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& description,
+                                             double sampleRate,
+                                             int blockSize,
+                                             std::unique_ptr<juce::AudioPluginInstance>& instance,
+                                             juce::String& error) const
+{
+    instance.reset();
+    error.clear();
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (messages->isThisTheMessageThread())
+        {
+            error = "This plugin is opened on the message thread.";
+            return false;
+        }
+    }
+    if (! prefersBackgroundInstance(description))
+    {
+        error = "This plugin is opened on the message thread.";
+        return false;
+    }
+
+    juce::AudioPluginFormat* format = nullptr;
+    for (int index = 0; index < formats_.getNumFormats(); ++index)
+    {
+        auto* candidate = formats_.getFormat(index);
+        if (candidate != nullptr && candidate->getName() == description.pluginFormatName)
+        {
+            format = candidate;
+            break;
+        }
+    }
+    if (format == nullptr)
+    {
+        error = "Unknown plugin format.";
+        return false;
+    }
+
+    bool called = false;
+    (format->*pluginFormatInstantiate(PluginFormatInstantiate {}))(
+        description,
+        sampleRate,
+        blockSize,
+        [&](std::unique_ptr<juce::AudioPluginInstance> created, const juce::String& message)
+        {
+            called = true;
+            instance = std::move(created);
+            error = message;
+        });
+    if (! called && error.isEmpty())
+        error = "Could not load the plugin.";
+    return instance != nullptr;
 }
 
 bool PluginCatalogue::identifierNeedsScan(const juce::String& formatName, const juce::String& identifier) const
