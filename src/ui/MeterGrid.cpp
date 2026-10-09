@@ -573,6 +573,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
 
         auto button = parts.button.reduced(1.0f, 0.0f);
+        // Flat colour. This is painted with the meters, so it stays a fill.
         juce::Colour buttonFill = theme::button;
         if (listen == ChannelListen::record)
             buttonFill = cell.reading.recordLive ? theme::red : juce::Colour(0xff8d2430);

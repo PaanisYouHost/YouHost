@@ -1912,7 +1912,18 @@ void MainComponent::refresh()
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
-    repaint();
+    // Status text changes with the CPU readout. Buttons, meters, and the
+    // timeline repaint themselves when their own state changes.
+    repaint(statusArea_);
+    if (pollDivider_ == 0 || page_ != hintPage_)
+    {
+        hintPage_ = page_;
+        repaint(hintArea_);
+        if (! bannerArea_.isEmpty())
+            repaint(bannerArea_);
+        if (! deviceLostArea_.isEmpty())
+            repaint(deviceLostArea_);
+    }
 }
 
 void MainComponent::hideDeviceTestTone()
@@ -2192,6 +2203,7 @@ void MainComponent::resized()
         bridgeArea_ = {};
         pluginPage_.setBounds(area);
     }
+    repaint();
 }
 
 } // namespace youhost

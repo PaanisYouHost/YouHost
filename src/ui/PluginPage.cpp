@@ -622,8 +622,13 @@ public:
             return;
         const float db = engine_.outputDb(channel_);
         const bool unity = outputDbIsUnity(db);
+        auto plate = getLocalBounds().toFloat().reduced(1.0f);
         graphics.setColour(unity ? theme::button : juce::Colour(0xff8a6a22));
-        graphics.fillRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 3.0f);
+        graphics.fillRoundedRectangle(plate, 3.0f);
+        graphics.setColour(juce::Colours::white.withAlpha(0.18f));
+        graphics.drawLine(plate.getX() + 2.0f, plate.getY() + 1.0f, plate.getRight() - 2.0f, plate.getY() + 1.0f, 1.0f);
+        graphics.setColour(juce::Colours::black.withAlpha(0.35f));
+        graphics.drawLine(plate.getX() + 2.0f, plate.getBottom() - 1.5f, plate.getRight() - 2.0f, plate.getBottom() - 1.5f, 1.0f);
         graphics.setColour(unity ? theme::text : juce::Colours::white);
         auto font = juce::FontOptions(12.0f);
         if (! unity)
@@ -782,7 +787,13 @@ public:
             arm_.setColour(juce::TextButton::textColourOffId, theme::fainter);
         }
         pdc_.setText(engine_.channelPdcText(channel_), juce::dontSendNotification);
-        gain_.repaint();
+        const float db = engine_.outputDb(channel_);
+        const float dbDelta = db - gainShown_;
+        if (dbDelta > 0.01f || dbDelta < -0.01f)
+        {
+            gainShown_ = db;
+            gain_.repaint();
+        }
         const bool excluded = engine_.channelSnapshot(channel_).excluded;
         exclude_.setColour(juce::TextButton::buttonColourId, excluded ? theme::buttonOn : theme::button);
 
@@ -818,7 +829,18 @@ public:
             }
             button.setTooltip(source.error.isNotEmpty() ? source.error : tip);
         }
-        repaint();
+        const bool selected = engine_.isChannelSelected(channel_);
+        const int color = engine_.channelColor(channel_);
+        if (selected != selectedDrawn_ || color != colorDrawn_)
+        {
+            selectedDrawn_ = selected;
+            colorDrawn_ = color;
+            repaint();
+        }
+        else if (! meterArea_.isEmpty())
+        {
+            repaint(meterArea_);
+        }
     }
 
     void resized() override
@@ -987,6 +1009,9 @@ private:
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
     bool updating_ = false;
+    bool selectedDrawn_ = false;
+    int colorDrawn_ = -1;
+    float gainShown_ = 100.0f;
     juce::Label number_;
     juce::Label name_;
     TabKeys tabKeys_;

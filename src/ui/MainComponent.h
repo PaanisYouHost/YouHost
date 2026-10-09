@@ -137,6 +137,7 @@ private:
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     int page_ = 1;
+    int hintPage_ = -1;
     int pollDivider_ = 0;
     bool logoTried_ = false;
     juce::Image logo_;
