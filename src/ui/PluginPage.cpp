@@ -672,7 +672,6 @@ public:
         addAndMakeVisible(name_);
         addAndMakeVisible(arm_);
         addAndMakeVisible(exclude_);
-        addAndMakeVisible(safe_);
         addAndMakeVisible(pdc_);
         addAndMakeVisible(gain_);
         number_.setInterceptsMouseClicks(false, false);
@@ -699,11 +698,7 @@ public:
 
         arm_.setMouseClickGrabsKeyboardFocus(false);
         exclude_.setMouseClickGrabsKeyboardFocus(false);
-        safe_.setMouseClickGrabsKeyboardFocus(false);
         exclude_.setButtonText("Ex");
-        safe_.setButtonText("SAFE");
-        safe_.setTooltip("Scene safe. Recall leaves this channel as it is.");
-        safe_.onClick = [this] { engine_.setChannelSafe(channel_, ! engine_.channelSafe(channel_)); };
         exclude_.setTooltip("Exclude from alignment. This channel stays undelayed and does not move the others.");
         arm_.onClick = [this] { engine_.cycleChannelListen(channel_); };
         pdc_.setFont(juce::Font(juce::FontOptions(11.0f)));
@@ -801,13 +796,6 @@ public:
         }
         const bool excluded = engine_.channelSnapshot(channel_).excluded;
         exclude_.setColour(juce::TextButton::buttonColourId, excluded ? theme::buttonOn : theme::button);
-        const int safe = engine_.channelSafe(channel_) ? 1 : 0;
-        if (safe != safeShown_)
-        {
-            safeShown_ = safe;
-            safe_.setColour(juce::TextButton::buttonColourId, safe == 1 ? theme::amber : theme::button);
-            safe_.setColour(juce::TextButton::textColourOffId, safe == 1 ? juce::Colour(0xff141414) : theme::dim);
-        }
 
         const auto snap = engine_.channelSnapshot(channel_);
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
@@ -864,7 +852,6 @@ public:
         name_.setBounds(area.removeFromLeft(120));
         meterArea_ = area.removeFromLeft(18).reduced(3, 3);
         exclude_.setBounds(area.removeFromLeft(34).reduced(2, 4));
-        safe_.setBounds(area.removeFromLeft(52).reduced(2, 4));
         gain_.setBounds(area.removeFromRight(72).reduced(2, 4));
         area.removeFromLeft(4);
         const int slotBudget = std::max(0, area.getWidth() - 150);
@@ -1025,13 +1012,11 @@ private:
     bool selectedDrawn_ = false;
     int colorDrawn_ = -1;
     float gainShown_ = 100.0f;
-    int safeShown_ = -1;
     juce::Label number_;
     juce::Label name_;
     TabKeys tabKeys_;
     juce::TextButton arm_;
     juce::TextButton exclude_;
-    juce::TextButton safe_;
     juce::Label pdc_;
     OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;

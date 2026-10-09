@@ -27,7 +27,6 @@ namespace youhost
 {
 
 class AppSettings;
-class MidiFollow;
 
 // Owns the device, the realtime callback, and the in-process plugin rack.
 // Record rings are still later. Order in the callback: meters on the raw input,
@@ -92,32 +91,6 @@ public:
     void setOutputDb(int channel, float db);
     void setBypassAll(bool bypass);
     bool bypassAll() const;
-
-    int sceneCount() const;
-    int sceneRevision() const noexcept { return sceneRevision_; }
-    juce::String sceneName(int index) const;
-    int sceneRemote(int index) const;
-    void setSceneRemote(int index, int program);
-    int recalledScene() const noexcept { return recalledScene_; }
-    bool sceneDrift() const noexcept { return sceneDrift_; }
-    void storeScene(int index);
-    void storeNewScene();
-    void recallScene(int index);
-    void renameScene(int index, const juce::String& name);
-    void deleteScene(int index);
-    bool channelSafe(int channel) const;
-    void setChannelSafe(int channel, bool safe);
-
-    void pollMidiFollow();
-    void setMidiFollow(bool enabled);
-    bool midiFollow() const;
-    void setMidiFollowChannel(int channel);
-    int midiFollowChannel() const;
-    void setMidiFollowDevice(const juce::String& identifier);
-    juce::String midiFollowDevice() const;
-    bool midiFollowOpen() const;
-    bool midiActivityLit() const;
-    juce::Array<juce::MidiDeviceInfo> midiInputs() const;
     float waveformGain() const noexcept { return waveformGain_; }
     void setWaveformGain(float gain);
     void nudgeWaveformGain(int direction);
@@ -227,10 +200,6 @@ private:
     const AudioThreadConfig& currentConfig() const;
     void captureDisplay(SessionData& data) const;
     void applyDisplay(const SessionData& data);
-    void captureScenes(SessionData& data) const;
-    void applyScenes(const SessionData& data);
-    SessionScene captureCurrentScene(const juce::String& name, int remote);
-    void markSceneDrift();
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
@@ -288,13 +257,6 @@ private:
     std::function<void(int)> pageRestoreHandler_;
     std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
-    std::unique_ptr<MidiFollow> midi_;
-    std::vector<SessionScene> scenes_;
-    std::array<bool, kMaxChannels> sceneSafe_ {};
-    int recalledScene_ = -1;
-    bool sceneDrift_ = false;
-    bool recallingScene_ = false;
-    int sceneRevision_ = 0;
     std::array<int, kMaxChannels> channelColor_ {};
     std::array<int, kMaxChannels> channelGroup_ {};
     std::array<ChannelListen, kMaxChannels> listen_ {};

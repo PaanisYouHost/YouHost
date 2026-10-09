@@ -2,7 +2,6 @@
 
 #include "ChannelEnable.h"
 #include "Passthrough.h"
-#include "SceneRecall.h"
 #include "SessionDocument.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -113,15 +112,7 @@ public:
                     int stereoFold = 0);
     void setStereoFold(int channel, int slot, int fold);
     void clearAll(bool markDirty);
-    void removePlugin(int channel, int slot, bool markDirty = true);
-    // Same plugin: write state, bypass, and fold without unloading.
-    // A different plugin uses load or unload, which prepare off the audio thread.
-    // The caller publishes once. This does not run on the audio callback.
-    SlotRecall recallSlot(int channel, int slot, const SessionSlot& wanted);
-    void publishGraph();
-    void clearStateDirty() noexcept;
-    void clearRecallMiss() noexcept { recallMiss_ = false; }
-    bool recallMissed() const noexcept { return recallMiss_; }
+    void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setBypassed(int channel, int slot, bool bypassed);
     void setBypassAll(bool bypass) noexcept;
@@ -138,7 +129,6 @@ public:
     void captureSession(SessionData& data);
     void restoreSession(const SessionData& data);
     void setDirtyHandler(std::function<void()> handler);
-    void setSceneHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)> trace);
@@ -200,8 +190,7 @@ private:
     void addCoreNs(int core, std::uint64_t ns) noexcept;
     bool waitUntilOutsideCallback();
     std::vector<std::shared_ptr<juce::AudioPluginInstance>> collectInstances() const;
-    void removePluginNow(int channel, int slot, bool markDirty);
-    SlotRecall recallSlotNow(int channel, int slot, const SessionSlot& wanted);
+    void removePluginNow(int channel, int slot);
     void closeEditor(int channel, int slot);
     void closeAllEditors();
     void beginLoad(int channel,
@@ -224,7 +213,7 @@ private:
     void scheduleCondemn();
     void pumpCondemned();
     void flushDeferred();
-    void notifyDirty(bool scene = true);
+    void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
     bool validSlot(int channel, int slot) const noexcept;
@@ -233,8 +222,6 @@ private:
     std::atomic<int>& compensationSamples_;
     AppSettings* settings_ = nullptr;
     std::function<void()> dirtyHandler_;
-    std::function<void()> sceneHandler_;
-    bool recallMiss_ = false;
     juce::KeyListener* commandKeys_ = nullptr;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 

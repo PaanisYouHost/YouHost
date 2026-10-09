@@ -70,7 +70,6 @@ constexpr const char* kShortcutHelp =
     "3 or D  Open or close DROPOUTS\n"
     "4  Open or close CPU\n"
     "5  Open or close LATENCY\n"
-    "6  Open or close SCENES\n"
     "S  Open or close SCAN\n"
     "Space  Play, or Stop when already playing or recording\n"
     "Cmd+Space  Record immediately\n"
@@ -108,10 +107,7 @@ constexpr const char* kShortcutHelp =
     "Null test bypasses every plugin and the compensation delay so you can hear the clean input. Click again to restore the plugins.\n"
     "With no plugins, input goes to output unchanged, apart from the device's own delay. YouHost does not filter, flip polarity, or mix a delayed copy back in.\n"
     "FX and PDC on a row are that channel's plugin latency and the extra delay that lines it up. LATENCY chooses All aligned or Per group.\n"
-    "3, 4, 5, 6, D, and S open that window, or close it when it is already open, including when that window is in front.\n"
-    "SCENES stores each channel's plugins and their settings, bypass, output gain, and REC, INPUT, or OFF. Store replaces the selected scene. Store New adds one. Recall puts that scene back. A star means the mix has changed since that scene was recalled.\n"
-    "SAFE on a channel, or Scene safe in the channel menu, is left untouched by Recall. The same plugin stays loaded and only takes the stored settings. A different plugin loads in the background.\n"
-    "OFF is the silent state a scene stores. Follow Program Change listens to one MIDI input and one channel, 1 to 16. Each scene has a Remote number from 0 to 127. The first matching scene is recalled. The dot lights when a Program Change arrives. X32 sends that when its scene changes. WING can send it from a snippet or a user key.\n"
+    "3, 4, 5, D, and S open that window, or close it when it is already open, including when that window is in front.\n"
     "DROPOUTS lists CPU only for channels that have a plugin, and the list scrolls.\n"
     "If YouHost quits unexpectedly, the next launch names the plugin that was loading. Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"
     "Other shortcuts do nothing while a text field has focus.";
@@ -951,7 +947,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
       scanner_(engine, settings),
       dropouts_(engine, settings),
       cpu_(engine, settings),
-      scenes_(engine, settings),
       deviceSelector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false)
 {
     setOpaque(true);
@@ -999,7 +994,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(dropoutsButton_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
-    addAndMakeVisible(scenesButton_);
     addAndMakeVisible(retryButton_);
     addAndMakeVisible(groupButton_);
     addAndMakeVisible(allButton_);
@@ -1014,7 +1008,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         scanner_.addKeyListener(keys_.get());
         dropouts_.addKeyListener(keys_.get());
         cpu_.addKeyListener(keys_.get());
-        scenes_.addKeyListener(keys_.get());
         latencyWindow_->addKeyListener(keys_.get());
     }
     setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
@@ -1033,12 +1026,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
-                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &scenesButton_, &retryButton_, &groupButton_,
+                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
                           &allButton_, &hideButton_ })
         quiet(*button);
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &latencyButton_,
-                          &scenesButton_, &setupButton_, &groupButton_, &allButton_, &hideButton_ })
+                          &setupButton_, &groupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
@@ -1070,8 +1063,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     pluginsButton_.setTooltip("Plugins page (2).");
     dropoutsButton_.setTooltip("Open or close the dropout timeline (4 or D).");
     latencyButton_.setTooltip("Open or close the latency card (5).");
-    scenesButton_.setTooltip("Open or close SCENES (6).");
-    scenesButton_.onClick = [this] { toggleScenes(); };
     fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
     helpButton_.setTooltip("Show keyboard shortcuts.");
     groupButton_.setTooltip("Rename or recolor a group.");
@@ -1313,11 +1304,6 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     if (character == '5' && ! shift && ! command)
     {
         toggleLatency();
-        return true;
-    }
-    if (character == '6' && ! shift && ! command)
-    {
-        toggleScenes();
         return true;
     }
     const bool altEarly = key.getModifiers().isAltDown();
@@ -1607,12 +1593,6 @@ void MainComponent::toggleCpu()
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
 }
 
-void MainComponent::toggleScenes()
-{
-    scenes_.toggle();
-    scenesButton_.setToggleState(scenes_.isVisible(), juce::dontSendNotification);
-}
-
 void MainComponent::toggleLatency()
 {
     if (latencyWindow_ == nullptr)
@@ -1803,7 +1783,6 @@ void MainComponent::openSession()
 
 void MainComponent::timerCallback()
 {
-    engine_.pollMidiFollow();
     if (++pollDivider_ >= 6)
     {
         pollDivider_ = 0;
@@ -1862,7 +1841,6 @@ void MainComponent::refresh()
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
-    scenesButton_.setToggleState(scenes_.isVisible(), juce::dontSendNotification);
     latencyReadout_.setAlignGroup(engine_.alignGroup());
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
     if (bitDepthSlot_ != nullptr)
@@ -1917,7 +1895,6 @@ void MainComponent::refresh()
             cell.channel = item.channel;
             cell.color = engine_.channelColor(item.channel);
             cell.selected = engine_.isChannelSelected(item.channel);
-            cell.sceneSafe = engine_.channelSafe(item.channel);
             cell.title = engine_.channelName(item.channel);
             cell.reading.rms = engine_.rmsFor(item.channel);
             cell.reading.peak = engine_.peakFor(item.channel);
@@ -2132,8 +2109,6 @@ void MainComponent::resized()
     allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
-    scenesButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
-    views.removeFromRight(4);
     latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
     views.removeFromRight(4);
     cpuButton_.setBounds(views.removeFromRight(76).reduced(0, 2));

@@ -21,7 +21,6 @@
 #include "engine/HostPath.h"
 #include "engine/InsertMenu.h"
 #include "engine/PluginMoves.h"
-#include "engine/SceneRecall.h"
 #include "engine/StallWatch.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
@@ -1040,48 +1039,6 @@ void testPluginMovesDoNotReload()
     CHECK(instanceDropped);
 }
 
-void testSceneRecall()
-{
-    CHECK(youhost::decideSlotRecall(false, "", false, "") == youhost::SlotRecall::leave);
-    CHECK(youhost::decideSlotRecall(true, "au:foo", false, "") == youhost::SlotRecall::unload);
-    CHECK(youhost::decideSlotRecall(false, "", true, "au:foo") == youhost::SlotRecall::load);
-    CHECK(youhost::decideSlotRecall(true, "au:foo", true, "au:bar") == youhost::SlotRecall::load);
-    CHECK(youhost::decideSlotRecall(true, "au:foo", true, "au:foo") == youhost::SlotRecall::applyState);
-    CHECK(youhost::decideSlotRecall(true, "", true, "") == youhost::SlotRecall::load);
-    CHECK(youhost::decideSlotRecall(true, "au:foo", true, nullptr) == youhost::SlotRecall::load);
-    CHECK(youhost::recallSkipsChannel(true));
-    CHECK(! youhost::recallSkipsChannel(false));
-    CHECK(youhost::sceneChannelIsDefault(youhost::ChannelListen::record, 0.0f, false));
-    CHECK(! youhost::sceneChannelIsDefault(youhost::ChannelListen::off, 0.0f, false));
-    CHECK(! youhost::sceneChannelIsDefault(youhost::ChannelListen::record, -3.0f, false));
-    CHECK(! youhost::sceneChannelIsDefault(youhost::ChannelListen::record, 0.0f, true));
-
-    int program = -1;
-    CHECK(youhost::takeProgramChange(0xC0, 12, 1, program) && program == 12);
-    CHECK(! youhost::takeProgramChange(0xC1, 12, 1, program));
-    CHECK(youhost::takeProgramChange(0xCF, 0, 16, program) && program == 0);
-    CHECK(! youhost::takeProgramChange(0xB0, 12, 1, program));
-    CHECK(! youhost::takeProgramChange(0xC0, 128, 1, program));
-    CHECK(! youhost::takeProgramChange(0xC0, 1, 0, program));
-
-    const int remotes[] = { -1, 4, 4, 10 };
-    CHECK(youhost::sceneForProgram(remotes, 4, 4) == 1);
-    CHECK(youhost::sceneForProgram(remotes, 4, 10) == 3);
-    CHECK(youhost::sceneForProgram(remotes, 4, 3) == -1);
-    CHECK(youhost::sceneForProgram(nullptr, 4, 4) == -1);
-    CHECK(youhost::clampRemoteProgram(-5) == -1);
-    CHECK(youhost::clampRemoteProgram(200) == 127);
-    CHECK(youhost::clampRemoteProgram(7) == 7);
-    CHECK(youhost::clampMidiChannel(0) == 1);
-    CHECK(youhost::clampMidiChannel(99) == 16);
-    CHECK(youhost::clampMidiChannel(8) == 8);
-
-    const auto same = youhost::hashSceneIdentity("au:foo");
-    CHECK(same == youhost::hashSceneIdentity("au:foo"));
-    CHECK(same != youhost::hashSceneIdentity("au:bar"));
-    CHECK(youhost::hashSceneIdentity(nullptr) == youhost::hashSceneIdentity(""));
-}
-
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -1097,7 +1054,6 @@ int main()
     testOutputGainAndListen();
     testWaveformAndAnchor();
     testRaiseUnit();
-    testSceneRecall();
     testPluginMovesDoNotReload();
     testPassthroughCopiesMatchingChannels();
     testMetersSettleClipAndClear();

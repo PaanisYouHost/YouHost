@@ -1,6 +1,5 @@
 #include "SessionDocument.h"
 #include "MeterScale.h"
-#include "SceneRecall.h"
 #include "SignalPath.h"
 #include "X32Colours.h"
 
@@ -19,51 +18,6 @@ juce::XmlElement* addPlugin(juce::XmlElement& parent, const SessionSlot& slot)
         return nullptr;
     parent.addChildElement(plugin);
     return plugin;
-}
-
-void writeOccupiedSlots(juce::XmlElement& parent, const std::array<SessionSlot, kSlotsPerChannel>& slots)
-{
-    for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-    {
-        const auto& sourceSlot = slots[static_cast<std::size_t>(slot)];
-        if (! sourceSlot.occupied)
-            continue;
-
-        auto* slotElement = parent.createNewChildElement("Slot");
-        slotElement->setAttribute("index", slot);
-        slotElement->setAttribute("bypass", sourceSlot.bypassed);
-        if (sourceSlot.stereoFold != 0)
-            slotElement->setAttribute("fold", stereoFoldToken(stereoFoldFromInt(sourceSlot.stereoFold)));
-        if (addPlugin(*slotElement, sourceSlot) == nullptr)
-            continue;
-
-        if (sourceSlot.state.getSize() > 0)
-            slotElement->createNewChildElement("State")->setAttribute("data", sourceSlot.state.toBase64Encoding());
-    }
-}
-
-void readOccupiedSlots(const juce::XmlElement& parent, std::array<SessionSlot, kSlotsPerChannel>& slots)
-{
-    for (auto* slot = parent.getChildByName("Slot"); slot != nullptr; slot = slot->getNextElementWithTagName("Slot"))
-    {
-        const int slotIndex = slot->getIntAttribute("index", -1);
-        if (slotIndex < 0 || slotIndex >= kSlotsPerChannel)
-            continue;
-
-        auto* plugin = slot->getChildByName("PLUGIN");
-        if (plugin == nullptr)
-            continue;
-
-        auto& destinationSlot = slots[static_cast<std::size_t>(slotIndex)];
-        if (! destinationSlot.description.loadFromXml(*plugin))
-            continue;
-
-        destinationSlot.occupied = true;
-        destinationSlot.bypassed = slot->getBoolAttribute("bypass", false);
-        destinationSlot.stereoFold = static_cast<int>(stereoFoldFromToken(slot->getStringAttribute("fold", "L").toRawUTF8()));
-        if (auto* state = slot->getChildByName("State"))
-            destinationSlot.state.fromBase64Encoding(state->getStringAttribute("data"));
-    }
 }
 
 juce::String encodePeaks(const std::vector<WavePeak>& peaks)
@@ -141,8 +95,7 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         const bool customGain = std::fabs(source.outputDb) > 0.01f;
         const bool coloured = source.color != 0;
         const bool grouped = source.group >= 0;
-        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! customGain && ! coloured
-            && ! grouped && ! source.sceneSafe)
+        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! customGain && ! coloured && ! grouped)
             continue;
 
         auto* element = root.createNewChildElement("Channel");
@@ -153,44 +106,29 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         if (customGain)
             element->setAttribute("outputDb", source.outputDb);
         element->setAttribute("color", source.color);
-        if (source.sceneSafe)
-            element->setAttribute("safe", true);
         if (grouped)
             element->setAttribute("group", source.group);
         if (named)
             element->setAttribute("name", source.name);
 
-        writeOccupiedSlots(*element, source.slots);
-    }
-
-    if (data.recalledScene >= 0 && data.recalledScene < static_cast<int>(data.scenes.size()))
-    {
-        root.setAttribute("recalled", data.recalledScene);
-        if (data.sceneDrift)
-            root.setAttribute("drift", true);
-    }
-
-    int sceneCount = 0;
-    for (const auto& scene : data.scenes)
-    {
-        if (sceneCount >= kMaxScenes)
-            break;
-        auto* element = root.createNewChildElement("Scene");
-        element->setAttribute("name", scene.name);
-        if (scene.remote >= 0)
-            element->setAttribute("remote", clampRemoteProgram(scene.remote));
-        for (const auto& channel : scene.channels)
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
-            if (channel.index < 0 || channel.index >= kMaxChannels)
+            const auto& sourceSlot = source.slots[static_cast<std::size_t>(slot)];
+            if (! sourceSlot.occupied)
                 continue;
-            auto* child = element->createNewChildElement("Channel");
-            child->setAttribute("index", channel.index);
-            child->setAttribute("listen", channelListenName(channel.listen));
-            if (std::fabs(channel.outputDb) > 0.01f)
-                child->setAttribute("outputDb", channel.outputDb);
-            writeOccupiedSlots(*child, channel.slots);
+
+            auto* slotElement = element->createNewChildElement("Slot");
+            slotElement->setAttribute("index", slot);
+            slotElement->setAttribute("bypass", sourceSlot.bypassed);
+            if (sourceSlot.stereoFold != 0)
+                slotElement->setAttribute("fold", stereoFoldToken(stereoFoldFromInt(sourceSlot.stereoFold)));
+            if (addPlugin(*slotElement, sourceSlot) == nullptr)
+                continue;
+
+            if (sourceSlot.state.getSize() > 0)
+                slotElement->createNewChildElement("State")
+                    ->setAttribute("data", sourceSlot.state.toBase64Encoding());
         }
-        ++sceneCount;
     }
 
     for (int group = 0; group < kMaxDisplayGroups; ++group)
@@ -273,44 +211,27 @@ bool readSessionFile(const juce::File& file, SessionData& data)
         if (destination.group < 0 || destination.group >= kMaxDisplayGroups)
             destination.group = -1;
         destination.name = channel->getStringAttribute("name");
-        destination.sceneSafe = channel->getBoolAttribute("safe", false);
-        readOccupiedSlots(*channel, destination.slots);
-    }
 
-    for (auto* scene = root->getChildByName("Scene");
-         scene != nullptr && static_cast<int>(data.scenes.size()) < kMaxScenes;
-         scene = scene->getNextElementWithTagName("Scene"))
-    {
-        SessionScene stored;
-        stored.name = scene->getStringAttribute("name").trim();
-        if (stored.name.length() > 48)
-            stored.name = stored.name.substring(0, 48);
-        if (stored.name.isEmpty())
-            stored.name = "Scene " + juce::String(static_cast<int>(data.scenes.size()) + 1);
-        stored.remote = scene->hasAttribute("remote") ? clampRemoteProgram(scene->getIntAttribute("remote", -1)) : -1;
-        for (auto* channel = scene->getChildByName("Channel"); channel != nullptr; channel = channel->getNextElementWithTagName("Channel"))
+        for (auto* slot = channel->getChildByName("Slot"); slot != nullptr; slot = slot->getNextElementWithTagName("Slot"))
         {
-            const int index = channel->getIntAttribute("index", -1);
-            if (index < 0 || index >= kMaxChannels)
+            const int slotIndex = slot->getIntAttribute("index", -1);
+            if (slotIndex < 0 || slotIndex >= kSlotsPerChannel)
                 continue;
-            SessionSceneChannel destination;
-            destination.index = index;
-            destination.listen = channel->hasAttribute("listen")
-                                     ? channelListenFromName(channel->getStringAttribute("listen").toStdString())
-                                     : ChannelListen::record;
-            destination.outputDb = static_cast<float>(channel->getDoubleAttribute("outputDb", 0.0));
-            readOccupiedSlots(*channel, destination.slots);
-            stored.channels.push_back(std::move(destination));
-        }
-        data.scenes.push_back(std::move(stored));
-    }
 
-    data.recalledScene = root->getIntAttribute("recalled", -1);
-    data.sceneDrift = root->getBoolAttribute("drift", false);
-    if (data.recalledScene < 0 || data.recalledScene >= static_cast<int>(data.scenes.size()))
-    {
-        data.recalledScene = -1;
-        data.sceneDrift = false;
+            auto* plugin = slot->getChildByName("PLUGIN");
+            if (plugin == nullptr)
+                continue;
+
+            auto& destinationSlot = destination.slots[static_cast<std::size_t>(slotIndex)];
+            if (! destinationSlot.description.loadFromXml(*plugin))
+                continue;
+
+            destinationSlot.occupied = true;
+            destinationSlot.bypassed = slot->getBoolAttribute("bypass", false);
+            destinationSlot.stereoFold = static_cast<int>(stereoFoldFromToken(slot->getStringAttribute("fold", "L").toRawUTF8()));
+            if (auto* state = slot->getChildByName("State"))
+                destinationSlot.state.fromBase64Encoding(state->getStringAttribute("data"));
+        }
     }
 
     for (auto* group = root->getChildByName("Group"); group != nullptr; group = group->getNextElementWithTagName("Group"))
