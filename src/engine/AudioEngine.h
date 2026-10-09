@@ -12,6 +12,7 @@
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
 #include "Recorder.h"
+#include "SessionDocument.h"
 #include "TimelineLanes.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -27,6 +28,9 @@ namespace youhost
 {
 
 class AppSettings;
+class SessionDisk;
+
+juce::String suggestedNewSessionName(const juce::File& parent);
 
 // Owns the device, the realtime callback, and the in-process plugin rack.
 // Record rings are still later. Order in the callback: meters on the raw input,
@@ -120,7 +124,7 @@ public:
     int displayRevision() const noexcept { return displayRevision_; }
     std::vector<StripItem> displayStrips(int channelCount) const;
 
-    void selectChannel(int channel, bool extend);
+    void selectChannel(int channel, bool extend, bool toggle = false);
     bool isChannelSelected(int channel) const;
     std::vector<int> selectedChannels() const;
     void toggleRecordReady();
@@ -157,6 +161,10 @@ public:
     bool saveSession();
     bool saveSessionToFolder(const juce::File& folder);
     bool saveSessionAs(const juce::File& folder);
+    bool beginSessionCopy(const juce::File& folder);
+    float sessionCopyProgress() const;
+    juce::String backupStatusText() const;
+    juce::String takeCopyFailure();
     bool loadSessionFrom(const juce::File& fileOrFolder);
     bool importRecordingFolder(const juce::File& folder);
     void clearTimeline();
@@ -199,6 +207,8 @@ private:
     void removeOverloadListener();
     const AudioThreadConfig& currentConfig() const;
     void captureDisplay(SessionData& data) const;
+    SessionData captureSessionData();
+    void maybeBackupSession();
     void applyDisplay(const SessionData& data);
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
@@ -298,6 +308,11 @@ private:
     juce::BigInteger lastOutputMask_;
     CrashJournal journal_;
     std::unique_ptr<juce::Thread> stallThread_;
+    std::unique_ptr<SessionDisk> sessionDisk_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
+    juce::uint32 lastBackupMs_ = 0;
+    bool copyFailed_ = false;
+    juce::String copyFailure_;
 };
 
 } // namespace youhost

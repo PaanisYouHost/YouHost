@@ -11,6 +11,7 @@
 #include "engine/InsertMenu.h"
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
+#include "engine/Shortcuts.h"
 
 namespace youhost
 {
@@ -484,18 +485,11 @@ public:
         bool clip = false;
         bool plugins = false;
         int count = 0;
-        int recording = 0;
-        int inputOnly = 0;
         for (int channel = 0; channel < channels; ++channel)
         {
             if (engine_.channelGroup(channel) != group_)
                 continue;
             ++count;
-            const auto listen = engine_.channelListen(channel);
-            if (listen == ChannelListen::record)
-                ++recording;
-            else if (listen == ChannelListen::input)
-                ++inputOnly;
             level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
             clip = clip || engine_.clipFor(channel);
             if (! plugins)
@@ -506,30 +500,42 @@ public:
             }
         }
 
-        auto area = getLocalBounds().reduced(14, 4);
+        constexpr int nameX = 16;
+        constexpr int nameW = 180;
+        constexpr int foldX = 204;
+        constexpr int foldW = 72;
+        constexpr int clipX = 284;
+        constexpr int clipW = 48;
+        constexpr int fxX = 340;
+        constexpr int fxW = 36;
+        constexpr int meterX = 384;
+
         graphics.setColour(ink);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
-        auto title = engine_.groupName(group_);
-        if (engine_.groupCollapsed(group_))
-            title << "    folded";
-        graphics.drawText(title, area.removeFromLeft(std::min(220, area.getWidth() / 3)), juce::Justification::centredLeft, true);
+        graphics.drawText(engine_.groupName(group_),
+                          nameX,
+                          0,
+                          nameW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
 
-        juce::String state = "OFF";
-        if (count > 0 && recording == count)
-            state = "REC";
-        else if (count > 0 && inputOnly == count)
-            state = "INPUT";
-        else if (recording + inputOnly > 0)
-            state = "mixed";
-        if (clip)
-            state << "   CLIP";
-        if (plugins)
-            state << "   FX";
-        graphics.setColour(ink);
+        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+        graphics.drawText(juce::String(groupFoldLabel(engine_.groupCollapsed(group_), count)),
+                          foldX,
+                          0,
+                          foldW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
+
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText(state, area.removeFromRight(180), juce::Justification::centredRight, true);
+        if (clip)
+            graphics.drawText("CLIP", clipX, 0, clipW, getHeight(), juce::Justification::centredLeft, true);
+        if (plugins)
+            graphics.drawText("FX", fxX, 0, fxW, getHeight(), juce::Justification::centredLeft, true);
 
-        auto meter = area.reduced(8, 6);
+        auto meter = juce::Rectangle<int>(meterX, 6, std::max(0, getWidth() - meterX - 12), std::max(0, getHeight() - 12));
         graphics.setColour(theme::meterTrack);
         graphics.fillRoundedRectangle(meter.toFloat(), 2.0f);
         if (level > 0.0f && meter.getWidth() > 1)
@@ -692,7 +698,19 @@ public:
         name_.onEditorShow = [this]
         {
             if (auto* editor = name_.getCurrentTextEditor())
+            {
+                editor->setSelectAllWhenFocused(true);
                 editor->addKeyListener(&tabKeys_);
+                juce::Component::SafePointer<juce::TextEditor> safe(editor);
+                juce::MessageManager::callAsync([safe]
+                {
+                    if (safe != nullptr)
+                    {
+                        safe->grabKeyboardFocus();
+                        safe->selectAll();
+                    }
+                });
+            }
         };
         name_.addMouseListener(this, false);
 
@@ -881,8 +899,8 @@ public:
 
         if (engine_.isChannelSelected(channel_))
         {
-            graphics.setColour(theme::text.withAlpha(0.85f));
-            graphics.drawRect(getLocalBounds(), 1);
+            graphics.setColour(theme::green);
+            graphics.drawRect(getLocalBounds().reduced(1), 2);
         }
 
         graphics.setColour(juce::Colour(0xff8b95a8));
@@ -912,15 +930,17 @@ public:
             showChannelMenu(engine_, *this, channel_, [this](int) { editName(); });
             return;
         }
-        if (event.mods.isShiftDown())
+        const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
+        const bool extend = event.mods.isShiftDown() && ! toggle;
+        if (toggle || extend)
         {
-            engine_.selectChannel(channel_, true);
+            engine_.selectChannel(channel_, extend, toggle);
             return;
         }
         if (event.eventComponent == this && meterArea_.contains(event.getPosition()) && engine_.clipFor(channel_))
             engine_.requestClipClear(channel_);
         else if (event.eventComponent == this)
-            engine_.selectChannel(channel_, false);
+            engine_.selectChannel(channel_, false, false);
     }
 
 private:
@@ -934,12 +954,18 @@ private:
         bool keyPressed(const juce::KeyPress& key, juce::Component*) override
         {
             const auto mods = key.getModifiers();
-            if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
-                return false;
-            if (key.getKeyCode() != juce::KeyPress::tabKey)
+            const auto code = key.getKeyCode();
+            const auto nameKey = matchNameKey(code == juce::KeyPress::tabKey,
+                                               false,
+                                               false,
+                                               mods.isShiftDown(),
+                                               mods.isCommandDown(),
+                                               mods.isAltDown(),
+                                               mods.isCtrlDown());
+            if (nameKey != NameKey::next && nameKey != NameKey::previous)
                 return false;
 
-            const int direction = mods.isShiftDown() ? -1 : 1;
+            const int direction = nameKey == NameKey::previous ? -1 : 1;
             const int channel = row.channel_;
             juce::Component::SafePointer<Row> safe(&row);
             juce::MessageManager::callAsync([safe, channel, direction]

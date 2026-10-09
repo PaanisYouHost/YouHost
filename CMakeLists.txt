@@ -39,6 +39,7 @@ target_sources(YouHost PRIVATE
     src/engine/PluginCatalogue.cpp
     src/engine/PluginRack.cpp
     src/engine/Recorder.cpp
+    src/engine/SessionDisk.cpp
     src/engine/SessionDocument.cpp
     src/ui/ChannelMenu.cpp
     src/ui/CpuWindow.cpp

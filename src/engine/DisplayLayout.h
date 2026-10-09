@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
 
 namespace youhost
 {
@@ -137,6 +138,14 @@ inline int adjacentVisibleChannel(const StripItem* strips, int count, int curren
             return strips[index].channel;
     }
     return -1;
+}
+
+// Fixed fold mark for a group bar. Collapsed is ▸, open is ▾, then the channel count.
+inline std::string groupFoldLabel(bool collapsed, int channelCount)
+{
+    if (channelCount < 0)
+        channelCount = 0;
+    return std::string(collapsed ? "\u25B8 " : "\u25BE ") + std::to_string(channelCount) + " ch";
 }
 
 } // namespace youhost

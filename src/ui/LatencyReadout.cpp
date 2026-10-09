@@ -1,4 +1,5 @@
 #include "LatencyReadout.h"
+#include "engine/Shortcuts.h"
 #include "Theme.h"
 
 namespace youhost
@@ -82,7 +83,7 @@ LatencyReadout::LatencyReadout()
     addAndMakeVisible(resetButton_);
     allButton_.setTooltip("Line every included channel up on the slowest plugin. A stereo pair stays together.");
     groupButton_.setTooltip("Each group lines up on its own slowest plugin. Ungrouped channels are not delayed. A pair split across groups can comb.");
-    graphButton_.setTooltip("Open the dropout timeline (3 or D).");
+    graphButton_.setTooltip("Open the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
     resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
     for (auto* button : { &allButton_, &groupButton_, &graphButton_, &resetButton_ })
         button->setMouseClickGrabsKeyboardFocus(false);

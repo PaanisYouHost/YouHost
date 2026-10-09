@@ -4,6 +4,7 @@
 #include "X32Look.h"
 #include "engine/ChannelListen.h"
 #include "engine/MeterScale.h"
+#include "engine/Shortcuts.h"
 
 #include <cmath>
 #include <vector>
@@ -234,7 +235,7 @@ void MeterGrid::setGroupRenameHandler(std::function<void(int group)> handler)
     onGroupRename_ = std::move(handler);
 }
 
-void MeterGrid::setSelectHandler(std::function<void(int channel, bool extend)> handler)
+void MeterGrid::setSelectHandler(std::function<void(int channel, bool extend, bool toggle)> handler)
 {
     onSelect_ = std::move(handler);
 }
@@ -354,32 +355,46 @@ void MeterGrid::beginNameEdit(int channel)
     placeNameEditor(true);
     editor_->grabKeyboardFocus();
     editor_->selectAll();
+    juce::Component::SafePointer<juce::TextEditor> safe(editor_.get());
+    juce::MessageManager::callAsync([safe]
+    {
+        if (safe != nullptr)
+        {
+            safe->grabKeyboardFocus();
+            safe->selectAll();
+        }
+    });
 }
 
 bool MeterGrid::handleNameKey(const juce::KeyPress& key)
 {
     const auto mods = key.getModifiers();
-    if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
-        return false;
     if (editingChannel_ < 0 || editor_ == nullptr)
         return false;
 
     const auto code = key.getKeyCode();
-    if (code == juce::KeyPress::escapeKey)
+    const auto nameKey = matchNameKey(code == juce::KeyPress::tabKey,
+                                       code == juce::KeyPress::returnKey,
+                                       code == juce::KeyPress::escapeKey,
+                                       mods.isShiftDown(),
+                                       mods.isCommandDown(),
+                                       mods.isAltDown(),
+                                       mods.isCtrlDown());
+    if (nameKey == NameKey::cancel)
     {
         finishNameEdit(false);
         return true;
     }
-    if (code == juce::KeyPress::returnKey)
+    if (nameKey == NameKey::commit)
     {
         finishNameEdit(true);
         return true;
     }
-    if (code != juce::KeyPress::tabKey)
+    if (nameKey != NameKey::next && nameKey != NameKey::previous)
         return false;
 
     const int channel = editingChannel_;
-    const int direction = mods.isShiftDown() ? -1 : 1;
+    const int direction = nameKey == NameKey::previous ? -1 : 1;
     const auto text = editor_->getText();
     editingChannel_ = -1;
     editor_->setVisible(false);
@@ -466,9 +481,6 @@ void MeterGrid::paint(juce::Graphics& graphics)
 
     const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(rmsReferenceDb_);
     float x = metrics_.originX;
-    juce::Rectangle<float> firstBar;
-    juce::Rectangle<float> lastBar;
-    bool haveBar = false;
 
     for (const auto& cell : cells_)
     {
@@ -495,13 +507,9 @@ void MeterGrid::paint(juce::Graphics& graphics)
                 graphics.setColour(hue);
                 graphics.fillRect(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 7.0f, bounds.getHeight() - 4.0f);
             }
-            auto body = bounds.reduced(8.0f, 8.0f);
-            graphics.setColour(ink);
-            graphics.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
-            graphics.drawFittedText(cell.title, body.removeFromTop(40.0f).toNearestInt(), juce::Justification::centred, 3);
-
+            auto body = bounds.reduced(8.0f, 10.0f);
             const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
-            auto meter = body.removeFromTop(std::min(80.0f, body.getHeight() * 0.45f)).reduced(10.0f, 4.0f);
+            auto meter = body.removeFromBottom(std::min(36.0f, body.getHeight() * 0.22f)).reduced(6.0f, 0.0f);
             graphics.setColour(theme::meterTrack);
             graphics.fillRoundedRectangle(meter, 2.0f);
             if (level > 0.0f && meter.getHeight() > 1.0f)
@@ -512,28 +520,19 @@ void MeterGrid::paint(juce::Graphics& graphics)
                 graphics.fillRoundedRectangle(levelArea, 2.0f);
             }
 
-            juce::String state = "OFF";
-            if (cell.memberCount > 0 && cell.membersRecord == cell.memberCount)
-                state = "REC";
-            else if (cell.memberCount > 0 && cell.membersInput == cell.memberCount)
-                state = "INPUT";
-            else if (cell.membersRecord + cell.membersInput > 0)
-                state = "mixed";
-            if (cell.reading.clipped)
-                state << "  CLIP";
-            if (cell.anyPlugin)
-                state << "  FX";
-            if (cell.collapsed)
-                state << "  folded";
-
             graphics.setColour(ink);
-            graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-            graphics.drawFittedText(state, body.toNearestInt(), juce::Justification::centred, 3);
+            graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
+            graphics.drawFittedText(cell.title, body.toNearestInt(), juce::Justification::centred, 4);
             continue;
         }
 
         graphics.setColour(theme::background);
         graphics.fillRect(bounds);
+        if (cell.selected)
+        {
+            graphics.setColour(theme::green.withAlpha(0.16f));
+            graphics.fillRoundedRectangle(bounds.reduced(1.0f), 3.0f);
+        }
         const auto wash = x32Wash(cell.color);
         if (! wash.isTransparent())
         {
@@ -549,13 +548,6 @@ void MeterGrid::paint(juce::Graphics& graphics)
         }
 
         const auto parts = splitCell(bounds);
-        if (! haveBar)
-        {
-            firstBar = parts.bar;
-            haveBar = true;
-        }
-        lastBar = parts.bar;
-
         const auto listen = listenOf(cell.reading);
         const bool on = channelListenAudible(listen);
         const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
@@ -568,6 +560,8 @@ void MeterGrid::paint(juce::Graphics& graphics)
             graphics.setColour(meterLevelColour(level, rmsReferenceDb_));
             graphics.fillRoundedRectangle(levelArea, 2.0f);
         }
+        const auto ticks = placeTicks(parts.bar, showPeak_, rmsReferenceDb_);
+        drawScaleLines(graphics, ticks, parts.bar.getX(), parts.bar.getRight());
 
         graphics.setColour(! on ? theme::panelEdge : cell.reading.clipped ? theme::red : theme::panelEdge);
         graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
@@ -607,8 +601,8 @@ void MeterGrid::paint(juce::Graphics& graphics)
 
         if (cell.selected)
         {
-            graphics.setColour(theme::text);
-            graphics.drawRoundedRectangle(bounds.reduced(1.0f), 3.0f, 1.5f);
+            graphics.setColour(theme::green);
+            graphics.drawRoundedRectangle(bounds.reduced(1.5f), 3.0f, 2.5f);
         }
 
         if (&cell != &cells_.back())
@@ -616,12 +610,6 @@ void MeterGrid::paint(juce::Graphics& graphics)
             graphics.setColour(juce::Colour(0xff8b95a8));
             graphics.fillRect(bounds.getRight() - 1.0f, 0.0f, 1.0f, bounds.getHeight());
         }
-    }
-
-    if (haveBar)
-    {
-        const auto ticks = placeTicks(firstBar, showPeak_, rmsReferenceDb_);
-        drawScaleLines(graphics, ticks, firstBar.getX(), lastBar.getRight());
     }
 }
 
@@ -639,9 +627,11 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
-    if (event.mods.isShiftDown() && hit.channel >= 0 && onSelect_ != nullptr)
+    const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
+    const bool extend = event.mods.isShiftDown() && ! toggle;
+    if ((toggle || extend) && hit.channel >= 0 && onSelect_ != nullptr)
     {
-        onSelect_(hit.channel, true);
+        onSelect_(hit.channel, extend, toggle);
         return;
     }
 
@@ -666,7 +656,7 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
     else if (hit.clip && onClearClip_ != nullptr)
         onClearClip_(hit.channel);
     else if (hit.channel >= 0 && onSelect_ != nullptr)
-        onSelect_(hit.channel, false);
+        onSelect_(hit.channel, false, false);
 }
 
 } // namespace youhost

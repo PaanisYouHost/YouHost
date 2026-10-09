@@ -6,6 +6,7 @@
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
 #include "engine/SessionFiles.h"
+#include "engine/Shortcuts.h"
 
 #include <vector>
 
@@ -64,53 +65,6 @@ public:
 namespace
 {
 
-constexpr const char* kShortcutHelp =
-    "1  REC page\n"
-    "2  HOST page\n"
-    "3 or D  Open or close DROPOUTS\n"
-    "4  Open or close CPU\n"
-    "5  Open or close LATENCY\n"
-    "S  Open or close SCAN\n"
-    "Space  Play, or Stop when already playing or recording\n"
-    "Cmd+Space  Record immediately\n"
-    "Left / Right  Previous or next take\n"
-    "Shift+Left / Shift+Right  Move 5 seconds\n"
-    "T  Zoom the timeline in\n"
-    "R  Zoom the timeline out until the whole session fits\n"
-    "Option+R  Fit the whole session across and down\n"
-    "W+ / W-  Waveform height. Display only. Cmd or Option plus the wheel over the lanes does the same\n"
-    "Cmd+[  Taller timeline lanes\n"
-    "Cmd+]  Shorter timeline lanes\n"
-    "Tab  Commit the channel name and edit the next visible channel\n"
-    "Shift+Tab  Commit the channel name and edit the previous visible channel\n"
-    "Enter  Commit a channel name and leave the editor\n"
-    "Esc  Cancel a channel name edit\n"
-    "Cmd+S  Save\n"
-    "Cmd+Shift+S  Save a copy of the session folder\n"
-    "Option-drag  Copy a plugin and its settings. A plain drag moves the same plugin.\n"
-    "A drag is ignored while a plugin on that channel is still loading.\n\n"
-    "REC records and plays through the plugins. INPUT plays through and is not recorded. OFF is silent.\n"
-    "Click the channel button to cycle REC, INPUT, OFF. The default is REC.\n"
-    "Audio setup ticks follow that. A tick means the channel is live (REC or INPUT). Untick turns it OFF. Ticking an OFF channel sets REC. The device stays open.\n"
-    "Record arms the take and the button blinks red. Play while armed starts recording.\n"
-    "Play while not armed is the virtual soundcheck. Stop turns record arm off.\n"
-    "Cmd+Space records immediately. Cmd+S also works from the File menu and while a plugin window is in front.\n"
-    "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
-    "The + and - buttons zoom time the same way as T and R. W+ and W- zoom the waveform height. That does not change the audio.\n"
-    "A full-scale peak fills the lane. Quieter audio is drawn on a dB curve so normal levels stay visible.\n"
-    "Fit and Option+R show every take, from 0 to just past the last take, and every visible lane. With no takes yet the timeline shows 60 seconds.\n"
-    "While recording or playing, the cursor sits about three quarters of the way across the view.\n"
-    "A take is a colored block that starts and ends with that take. Empty time stays dark. TAKE and the number mark each start. While recording, the block grows.\n"
-    "The plain wheel scrolls lanes slowly. Shift plus the wheel scrolls time. Drag the timeline's bottom edge to change its height.\n"
-    "v+ and v- zoom the lanes taller or shorter, the same as Cmd+[ and Cmd+].\n"
-    "On HOST, the dB box after the plugins is output gain, -9 to +9. Drag for 0.5 dB steps, double-click to type, Option-click resets to 0. The wheel does not change it. Amber means it is not 0 dB. It is not written to the WAV.\n"
-    "Null test bypasses every plugin and the compensation delay so you can hear the clean input. Click again to restore the plugins.\n"
-    "With no plugins, input goes to output unchanged, apart from the device's own delay. YouHost does not filter, flip polarity, or mix a delayed copy back in.\n"
-    "FX and PDC on a row are that channel's plugin latency and the extra delay that lines it up. LATENCY chooses All aligned or Per group.\n"
-    "3, 4, 5, D, and S open that window, or close it when it is already open, including when that window is in front.\n"
-    "DROPOUTS lists CPU only for channels that have a plugin, and the list scrolls.\n"
-    "If YouHost quits unexpectedly, the next launch names the plugin that was loading. Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"
-    "Other shortcuts do nothing while a text field has focus.";
 
 void hideTestButtons(juce::Component& component)
 {
@@ -364,7 +318,7 @@ private:
             addAndMakeVisible(cancel_);
             nameLabel_.setText("Session name", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
-            name_.setText(juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S"), juce::dontSendNotification);
+            name_.setText(suggestedNewSessionName(parent_), juce::dontSendNotification);
             name_.setSelectAllWhenFocused(true);
             location_.setJustificationType(juce::Justification::centredLeft);
             note_.setJustificationType(juce::Justification::centredLeft);
@@ -560,7 +514,7 @@ private:
             nameLabel_.setText("Session name", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
             recentLabel_.setText("Open recent", juce::dontSendNotification);
-            name_.setText(juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S"), juce::dontSendNotification);
+            name_.setText(suggestedNewSessionName(parent_), juce::dontSendNotification);
             location_.setJustificationType(juce::Justification::centredLeft);
             note_.setColour(juce::Label::textColourId, theme::amber);
             note_.setText(engine_.missingSessionParentNote(), juce::dontSendNotification);
@@ -990,6 +944,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(newButton_);
     addAndMakeVisible(openButton_);
     addAndMakeVisible(saveButton_);
+    addAndMakeVisible(saveAsButton_);
     addAndMakeVisible(fileButton_);
     addAndMakeVisible(dropoutsButton_);
     addAndMakeVisible(setupButton_);
@@ -1025,7 +980,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
-                          &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &fileButton_,
+                          &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_, &fileButton_,
                           &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
                           &allButton_, &hideButton_ })
         quiet(*button);
@@ -1037,9 +992,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     recorderButton_.onClick = [this] { showPage(1); };
     pluginsButton_.onClick = [this] { showPage(2); };
     scannerButton_.onClick = [this] { toggleScanner(); };
-    scannerButton_.setTooltip("SCAN. Press S. Used when new plugins are installed.");
+    scannerButton_.setTooltip("SCAN (" + juce::String(shortcutChord(ShortcutId::scanner))
+                              + "). Used when new plugins are installed.");
     cpuButton_.onClick = [this] { toggleCpu(); };
-    cpuButton_.setTooltip("CPU. Press 4. Per-core usage and the audio callback.");
+    cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu)) + "). Per-core usage and the audio callback.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
     stopButton_.onClick = [this] { engine_.transportStop(); refresh(); };
@@ -1057,19 +1013,21 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     newButton_.onClick = [this] { newSession(); };
     openButton_.onClick = [this] { openSession(); };
     saveButton_.onClick = [this] { saveSession(); };
+    saveAsButton_.onClick = [this] { saveSessionAs(); };
     fileButton_.onClick = [this] { showFileMenu(); };
     dropoutsButton_.onClick = [this] { toggleDropouts(); };
-    recorderButton_.setTooltip("Recorder page (1).");
-    pluginsButton_.setTooltip("Plugins page (2).");
-    dropoutsButton_.setTooltip("Open or close the dropout timeline (4 or D).");
-    latencyButton_.setTooltip("Open or close the latency card (5).");
+    recorderButton_.setTooltip("Recorder page (" + juce::String(shortcutChord(ShortcutId::recPage)) + ").");
+    pluginsButton_.setTooltip("Plugins page (" + juce::String(shortcutChord(ShortcutId::hostPage)) + ").");
+    dropoutsButton_.setTooltip("Open or close the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
+    latencyButton_.setTooltip("Open or close the latency card (" + juce::String(shortcutChord(ShortcutId::latency)) + ").");
     fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
-    helpButton_.setTooltip("Show keyboard shortcuts.");
-    groupButton_.setTooltip("Rename or recolor a group.");
+    groupButton_.setTooltip("Rename or recolor a group, or make a group from the selection.");
     groupButton_.onClick = [this] { showGroupsMenu(); };
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
-    saveButton_.setTooltip("Save session.youhost (Cmd+S).");
+    saveButton_.setTooltip("Save session.youhost (" + juce::String(shortcutChord(ShortcutId::save)) + ").");
+    saveAsButton_.setTooltip("Copy the whole session, including audio, then continue in the new folder ("
+                             + juce::String(shortcutChord(ShortcutId::saveAs)) + "). Not while recording.");
     latencyButton_.onClick = [this] { toggleLatency(); };
 
     prevButton_.setTooltip("Previous take (Left).");
@@ -1077,8 +1035,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     stopButton_.setTooltip("Stop (Space).");
     playButton_.setTooltip("Play the recorded takes (Space). If Record is armed, Play starts the take.");
     recButton_.setTooltip("Arm recording. The button blinks red. Press Play to start, or Cmd+Space to record immediately.");
-    helpButton_.setTooltip(kShortcutHelp);
-    scannerButton_.setTooltip("Open or close the plugin scanner (3).");
+    helpButton_.setTooltip(juce::String(shortcutHelpText()));
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
     recButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8d2430));
@@ -1154,7 +1111,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterGrid_.setGroupMenuHandler([this](int group) { showGroupMenu(engine_, meterGrid_, group); });
     meterGrid_.setGroupRenameHandler([this](int group) { renameGroup(engine_, group); });
     meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
-    meterGrid_.setSelectHandler([this](int channel, bool extend) { engine_.selectChannel(channel, extend); });
+    meterGrid_.setSelectHandler([this](int channel, bool extend, bool toggle)
+    {
+        engine_.selectChannel(channel, extend, toggle);
+    });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
     timeline_.setLaneProvider([this](const std::function<void(const std::vector<TimelineLaneView>&)>& paint)
     {
@@ -1200,6 +1160,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 MainComponent::~MainComponent()
 {
     stopTimer();
+    copyWindow_.reset();
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
@@ -1277,102 +1238,104 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     if (shortcutBlocked(originating))
         return false;
 
-    const auto character = juce::CharacterFunctions::toLowerCase(key.getTextCharacter());
-    const bool shift = key.getModifiers().isShiftDown();
-    const bool command = key.getModifiers().isCommandDown();
-
-    if (character == '1' && ! shift && ! command)
-    {
-        showPage(1);
-        return true;
-    }
-    if (character == '2' && ! shift && ! command)
-    {
-        showPage(2);
-        return true;
-    }
-    if ((character == '3' || character == 'd') && ! shift && ! command)
-    {
-        toggleDropouts();
-        return true;
-    }
-    if (character == '4' && ! shift && ! command)
-    {
-        toggleCpu();
-        return true;
-    }
-    if (character == '5' && ! shift && ! command)
-    {
-        toggleLatency();
-        return true;
-    }
-    const bool altEarly = key.getModifiers().isAltDown();
-    if (character == 's' && ! shift && ! command && ! altEarly)
-    {
-        toggleScanner();
-        return true;
-    }
+    KeyQuery query;
+    query.shift = key.getModifiers().isShiftDown();
+    query.command = key.getModifiers().isCommandDown();
+    query.alt = key.getModifiers().isAltDown();
+    query.character = static_cast<char>(juce::CharacterFunctions::toLowerCase(key.getTextCharacter()));
     const auto code = key.getKeyCode();
-    const bool alt = key.getModifiers().isAltDown();
-    if (alt && ! shift && ! command && (code == 'R' || code == 'r'))
-    {
-        timeline_.fitAll();
-        return true;
-    }
-    if (command && ! shift && code == static_cast<int>('['))
-    {
-        timeline_.verticalZoomIn();
-        return true;
-    }
-    if (command && ! shift && code == static_cast<int>(']'))
-    {
-        timeline_.verticalZoomOut();
-        return true;
-    }
-
-    if ((character == 't' || character == 'r') && ! shift && ! command)
-    {
-        if (character == 't')
-            timeline_.zoomIn();
-        else
-            timeline_.zoomOut();
-        return true;
-    }
-
     if (key.isKeyCode(juce::KeyPress::spaceKey))
+        query.kind = KeyKind::space;
+    else if (key.isKeyCode(juce::KeyPress::leftKey))
+        query.kind = KeyKind::left;
+    else if (key.isKeyCode(juce::KeyPress::rightKey))
+        query.kind = KeyKind::right;
+    else if (code == static_cast<int>('['))
+        query.kind = KeyKind::bracketLeft;
+    else if (code == static_cast<int>(']'))
+        query.kind = KeyKind::bracketRight;
+    else if (code == static_cast<int>('R') || code == static_cast<int>('r') || query.character == 'r')
+        query.kind = KeyKind::letterR;
+    else
+        query.kind = KeyKind::character;
+
+    const auto matched = matchShortcut(query);
+    if (! matched.has_value())
+        return false;
+
+    switch (*matched)
     {
-        const auto mode = engine_.transportView().mode;
-        if (command && ! shift)
+        case ShortcutId::recPage:
+            showPage(1);
+            return true;
+        case ShortcutId::hostPage:
+            showPage(2);
+            return true;
+        case ShortcutId::dropouts:
+            toggleDropouts();
+            return true;
+        case ShortcutId::cpu:
+            toggleCpu();
+            return true;
+        case ShortcutId::latency:
+            toggleLatency();
+            return true;
+        case ShortcutId::scanner:
+            toggleScanner();
+            return true;
+        case ShortcutId::zoomIn:
+            timeline_.zoomIn();
+            return true;
+        case ShortcutId::zoomOut:
+            timeline_.zoomOut();
+            return true;
+        case ShortcutId::fit:
+            timeline_.fitAll();
+            return true;
+        case ShortcutId::lanesTaller:
+            timeline_.verticalZoomIn();
+            return true;
+        case ShortcutId::lanesShorter:
+            timeline_.verticalZoomOut();
+            return true;
+        case ShortcutId::recordNow:
             requestRecord();
-        else if (mode == TransportMode::stopped)
+            return true;
+        case ShortcutId::playOrStop:
         {
-            if (engine_.isRecordReady())
-                requestRecord();
+            const auto mode = engine_.transportView().mode;
+            if (mode == TransportMode::stopped)
+            {
+                if (engine_.isRecordReady())
+                    requestRecord();
+                else
+                    engine_.transportPlay();
+            }
             else
-                engine_.transportPlay();
+                engine_.transportStop();
+            return true;
         }
-        else
-            engine_.transportStop();
-        return true;
-    }
-
-    if (key.isKeyCode(juce::KeyPress::leftKey))
-    {
-        if (shift)
-            engine_.transportNudge(-5.0);
-        else
+        case ShortcutId::previousTake:
             engine_.transportJump(-1);
-        return true;
-    }
-    if (key.isKeyCode(juce::KeyPress::rightKey))
-    {
-        if (shift)
-            engine_.transportNudge(5.0);
-        else
+            return true;
+        case ShortcutId::nextTake:
             engine_.transportJump(1);
-        return true;
+            return true;
+        case ShortcutId::nudgeBack:
+            engine_.transportNudge(-5.0);
+            return true;
+        case ShortcutId::nudgeForward:
+            engine_.transportNudge(5.0);
+            return true;
+        case ShortcutId::save:
+            saveSession();
+            return true;
+        case ShortcutId::saveAs:
+            saveSessionAs();
+            return true;
+        case ShortcutId::count:
+            break;
     }
-
     return false;
 }
 
@@ -1389,15 +1352,32 @@ void MainComponent::getAllCommands(juce::Array<juce::CommandID>& commands)
 
 void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationCommandInfo& result)
 {
+    const auto addKeys = [&result](ShortcutId id)
+    {
+        for (const auto& binding : kBindings)
+        {
+            if (binding.id != id || ! binding.commandBinding)
+                continue;
+            int mods = 0;
+            if (binding.command == 1)
+                mods |= juce::ModifierKeys::commandModifier;
+            if (binding.shift == 1)
+                mods |= juce::ModifierKeys::shiftModifier;
+            if (binding.alt == 1)
+                mods |= juce::ModifierKeys::altModifier;
+            result.addDefaultKeypress(binding.commandCharacter, mods);
+        }
+    };
+
     if (commandID == saveCommand)
     {
-        result.setInfo("Save", "Save session.youhost", "File", 0);
-        result.addDefaultKeypress('s', juce::ModifierKeys::commandModifier);
+        result.setInfo("Save", shortcutMeaning(ShortcutId::save), "File", 0);
+        addKeys(ShortcutId::save);
     }
     else if (commandID == saveAsCommand)
     {
-        result.setInfo("Save As...", "Save a copy of this session", "File", 0);
-        result.addDefaultKeypress('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier);
+        result.setInfo("Save As...", shortcutMeaning(ShortcutId::saveAs), "File", 0);
+        addKeys(ShortcutId::saveAs);
     }
 }
 
@@ -1519,12 +1499,16 @@ void MainComponent::startRecordingIfReady()
 void MainComponent::showGroupsMenu()
 {
     juce::PopupMenu menu;
+    menu.addItem(50, "Make group from selection...", ! engine_.selectedChannels().empty());
+    menu.addSeparator();
     for (int group = 0; group < kMaxDisplayGroups; ++group)
         menu.addItem(group + 1, engine_.groupName(group));
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&groupButton_),
                        [this](int result)
                        {
-                           if (result > 0)
+                           if (result == 50)
+                               showMakeGroupDialog(engine_);
+                           else if (result > 0)
                                showGroupMenu(engine_, groupButton_, result - 1);
                        });
 }
@@ -1622,6 +1606,29 @@ void MainComponent::saveSessionAs()
         saveSession();
         return;
     }
+    if (engine_.transportView().mode == TransportMode::recording)
+    {
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::WarningIcon,
+            "Stop recording first",
+            "Save As copies the whole session, including the audio files. Recording has to stop before the copy starts.",
+            "Stop recording",
+            "Cancel",
+            nullptr,
+            juce::ModalCallbackFunction::create([this](int result)
+            {
+                if (result == 0)
+                    return;
+                engine_.transportStop();
+                chooseSaveAsDestination();
+            }));
+        return;
+    }
+    chooseSaveAsDestination();
+}
+
+void MainComponent::chooseSaveAsDestination()
+{
     if (fileChooser_ != nullptr)
         return;
 
@@ -1638,7 +1645,7 @@ void MainComponent::saveSessionAs()
                                   {
                                       fileChooser_.reset();
                                       if (chosen.getFullPathName().isNotEmpty())
-                                          engine_.saveSessionAs(chosen);
+                                          engine_.beginSessionCopy(chosen);
                                       refresh();
                                   });
                               });
@@ -1718,11 +1725,84 @@ void MainComponent::showFileMenu()
                        });
 }
 
+class CopyProgressWindow : public juce::DocumentWindow,
+                           private juce::Timer
+{
+public:
+    explicit CopyProgressWindow(double& value)
+        : juce::DocumentWindow("Saving a copy", theme::background, 0),
+          value_(value),
+          bar_(value_)
+    {
+        setUsingNativeTitleBar(true);
+        auto* content = new juce::Component();
+        content->addAndMakeVisible(label_);
+        content->addAndMakeVisible(bar_);
+        label_.setJustificationType(juce::Justification::centredLeft);
+        label_.setText("Saving a copy", juce::dontSendNotification);
+        setContentOwned(content, false);
+        centreWithSize(380, 110);
+        startTimerHz(8);
+        setVisible(true);
+        setAlwaysOnTop(true);
+        resized();
+    }
+
+    void closeButtonPressed() override
+    {
+    }
+
+    void resized() override
+    {
+        juce::DocumentWindow::resized();
+        if (auto* content = getContentComponent())
+        {
+            auto area = content->getLocalBounds().reduced(16, 14);
+            label_.setBounds(area.removeFromTop(22));
+            area.removeFromTop(8);
+            bar_.setBounds(area.removeFromTop(18));
+        }
+    }
+
+private:
+    void timerCallback() override
+    {
+        label_.setText("Saving a copy   " + juce::String(juce::roundToInt(value_ * 100.0)) + "%",
+                       juce::dontSendNotification);
+    }
+
+    double& value_;
+    juce::Label label_;
+    juce::ProgressBar bar_;
+};
+
+void MainComponent::syncCopyProgress()
+{
+    const auto failure = engine_.takeCopyFailure();
+    if (failure.isNotEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Could not save the copy",
+                                               failure);
+    }
+
+    const float progress = engine_.sessionCopyProgress();
+    if (progress < 0.0f)
+    {
+        copyWindow_.reset();
+        return;
+    }
+
+    copyProgressValue_ = static_cast<double>(progress);
+    if (copyWindow_ == nullptr)
+        copyWindow_ = std::make_unique<CopyProgressWindow>(copyProgressValue_);
+}
+
 void MainComponent::showHelp()
 {
     juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
                                            "YouHost shortcuts",
-                                           kShortcutHelp);
+                                           juce::String(shortcutHelpText()));
 }
 
 void MainComponent::setPeakMode(bool peak, bool fromUser)
@@ -1789,6 +1869,7 @@ void MainComponent::timerCallback()
         engine_.pollDeviceStats();
         engine_.maintainSession();
     }
+    syncCopyProgress();
 
     if (bitDepthSlot_ != nullptr)
         attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
@@ -2009,6 +2090,9 @@ void MainComponent::paint(juce::Graphics& graphics)
         status << "   " << engine_.sessionName();
     if (engine_.sessionIsOnInternalDisk())
         status << " (internal disk)";
+    const auto backup = engine_.backupStatusText();
+    if (backup.isNotEmpty())
+        status << "   " << backup;
     const auto transport = engine_.transportView();
     if (transport.status.isNotEmpty())
         status << "   " << transport.status;
@@ -2099,6 +2183,8 @@ void MainComponent::resized()
     openButton_.setBounds(views.removeFromLeft(50).reduced(0, 2));
     views.removeFromLeft(4);
     saveButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
+    views.removeFromLeft(4);
+    saveAsButton_.setBounds(views.removeFromLeft(72).reduced(0, 2));
     views.removeFromLeft(4);
     setupButton_.setBounds(views.removeFromLeft(96).reduced(0, 2));
     views.removeFromLeft(4);

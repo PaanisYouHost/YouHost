@@ -91,7 +91,7 @@ public:
     void setGroupToggleHandler(std::function<void(int group)> handler);
     void setGroupMenuHandler(std::function<void(int group)> handler);
     void setGroupRenameHandler(std::function<void(int group)> handler);
-    void setSelectHandler(std::function<void(int channel, bool extend)> handler);
+    void setSelectHandler(std::function<void(int channel, bool extend, bool toggle)> handler);
     void setNameCommitHandler(std::function<void(int channel, juce::String name)> handler);
     void setNameStepHandler(std::function<int(int channel, int direction)> handler);
     void beginNameEdit(int channel);
@@ -120,7 +120,7 @@ private:
     std::function<void(int)> onGroupToggle_;
     std::function<void(int)> onGroupMenu_;
     std::function<void(int)> onGroupRename_;
-    std::function<void(int, bool)> onSelect_;
+    std::function<void(int, bool, bool)> onSelect_;
     std::function<void(int, juce::String)> onNameCommit_;
     std::function<int(int, int)> onNameStep_;
     std::unique_ptr<juce::TextEditor> editor_;

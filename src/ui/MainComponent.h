@@ -109,6 +109,7 @@ private:
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
+    juce::TextButton saveAsButton_ { "Save As" };
     juce::TextButton fileButton_ { "File" };
     juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
     juce::TextButton cpuButton_ { "4 CPU" };
@@ -133,6 +134,10 @@ private:
     juce::ApplicationCommandManager commandManager_;
     std::unique_ptr<juce::DocumentWindow> startupWindow_;
     std::unique_ptr<juce::DocumentWindow> placeWindow_;
+    std::unique_ptr<juce::DocumentWindow> copyWindow_;
+    double copyProgressValue_ = 0.0;
+    void chooseSaveAsDestination();
+    void syncCopyProgress();
 
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;

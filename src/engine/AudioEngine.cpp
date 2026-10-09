@@ -1,13 +1,16 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "ChannelSelect.h"
 #include "OutputGain.h"
 #include "SignalPath.h"
 #include "WaveformScale.h"
 #include "DeviceWatch.h"
 #include "HostLog.h"
 #include "MeterScale.h"
+#include "SessionDisk.h"
 #include "SessionDocument.h"
 #include "SessionFiles.h"
+#include "SessionNames.h"
 #include "StallWatch.h"
 #include "TakeImport.h"
 
@@ -238,10 +241,14 @@ AudioEngine::AudioEngine(AppSettings& settings)
     noteMessageBeat();
     stallThread_ = std::make_unique<StallThread>(settings_);
     stallThread_->startThread();
+    sessionDisk_ = std::make_unique<SessionDisk>();
 }
 
 AudioEngine::~AudioEngine()
 {
+    if (alive_ != nullptr)
+        alive_->store(false);
+    sessionDisk_.reset();
     if (stallThread_ != nullptr)
     {
         stallThread_->stopThread(1000);
@@ -995,6 +1002,18 @@ bool AudioEngine::takeUncleanShutdown()
 
     crashChoicePending_ = true;
     appendHostLog(settings_, "unclean start");
+    const auto last = juce::File(settings_.loadLastSessionFolder());
+    const auto sessionFile = last.getChildFile(kSessionFileName);
+    if (sessionDisk_ != nullptr && sessionFile.existsAsFile())
+    {
+        const auto now = juce::Time::getCurrentTime();
+        const auto name = crashRecoverySessionName(now.getDayOfMonth(),
+                                                    now.getMonth() + 1,
+                                                    now.getYear(),
+                                                    now.getHours(),
+                                                    now.getMinutes());
+        sessionDisk_->startCrashCopy(sessionFile, juce::String(name));
+    }
     return true;
 }
 
@@ -1452,6 +1471,11 @@ void AudioEngine::toggleRecordReady()
 
 void AudioEngine::transportRecord()
 {
+    if (sessionCopyProgress() >= 0.0f)
+    {
+        sessionMessage_ = "Finish saving the copy before recording.";
+        return;
+    }
     recordReady_ = true;
     const auto problem = sessionRecordProblem();
     if (problem.isNotEmpty())
@@ -1599,6 +1623,7 @@ bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk)
         recorder_->clearTakes();
 
     sessionOnInternalDisk_ = internalDisk;
+    lastBackupMs_ = 0;
     if (! saveSessionToFolder(folder))
         return false;
 
@@ -1622,11 +1647,7 @@ bool AudioEngine::createInternalSession()
         return false;
     }
 
-    const auto stamp = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S");
-    auto folder = root.getChildFile(stamp);
-    int suffix = 2;
-    while (folder.exists())
-        folder = root.getChildFile(stamp + "-" + juce::String(suffix++));
+    auto folder = root.getChildFile(suggestedNewSessionName(root));
 
     if (! placeNewSession(folder, true))
         return false;
@@ -1717,13 +1738,66 @@ void AudioEngine::maintainSession()
         catalogue_->flushSave();
     drainDropoutLog();
 
-    if (! sessionDirty_ || sessionFolder_ == juce::File())
+    if (sessionDirty_ && sessionFolder_ != juce::File()
+        && juce::Time::getMillisecondCounter() - sessionDirtyAtMs_ >= 1500u)
+    {
+        sessionDirty_ = false;
+        saveSession();
+    }
+    maybeBackupSession();
+}
+
+void AudioEngine::maybeBackupSession()
+{
+    if (sessionFolder_ == juce::File() || sessionDisk_ == nullptr)
         return;
-    if (juce::Time::getMillisecondCounter() - sessionDirtyAtMs_ < 1500u)
+    const auto now = juce::Time::getMillisecondCounter();
+    if (lastBackupMs_ == 0)
+    {
+        lastBackupMs_ = now;
+        return;
+    }
+    if (now - lastBackupMs_ < static_cast<juce::uint32>(kSessionBackupIntervalMs))
+        return;
+    if (recorder_ != nullptr && recorder_->isRecording())
+        return;
+    if (sessionDisk_->busy() || sessionCopyProgress() >= 0.0f)
         return;
 
-    sessionDirty_ = false;
-    saveSession();
+    const auto clock = juce::Time::getCurrentTime();
+    const auto stem = europeanSessionDate(clock.getDayOfMonth(), clock.getMonth() + 1, clock.getYear());
+    if (! sessionDisk_->startBackup(captureSessionData(), sessionFolder_, juce::String(stem)))
+        return;
+    lastBackupMs_ = now;
+}
+
+juce::String suggestedNewSessionName(const juce::File& parent)
+{
+    const auto now = juce::Time::getCurrentTime();
+    const auto base = europeanSessionDate(now.getDayOfMonth(), now.getMonth() + 1, now.getYear());
+    return juce::String(nextFreeSessionName(base, [&parent](const std::string& name)
+    {
+        return parent.getChildFile(juce::String(name)).exists();
+    }));
+}
+
+SessionData AudioEngine::captureSessionData()
+{
+    SessionData data;
+    data.peakMeter = sessionPeak_;
+    data.rmsReferenceDb = sessionReferenceDb_;
+    data.wavBitDepth = wavBitDepth_;
+    if (persistSetup_)
+        data.device = deviceManager_.createStateXml();
+    if (rack_ != nullptr)
+        rack_->captureSession(data);
+    if (recorder_ != nullptr)
+        recorder_->captureSession(data);
+    captureDisplay(data);
+    data.page = sessionPage_;
+    data.waveformGain = waveformGain_;
+    data.alignGroup = alignGroup_;
+    return data;
 }
 
 juce::File AudioEngine::suggestedSessionFolder() const
@@ -1756,20 +1830,7 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
     sessionFolder_.createDirectory();
     juce::File(layout.audioFolder).createDirectory();
 
-    SessionData data;
-    data.peakMeter = sessionPeak_;
-    data.rmsReferenceDb = sessionReferenceDb_;
-    data.wavBitDepth = wavBitDepth_;
-    if (persistSetup_)
-        data.device = deviceManager_.createStateXml();
-    if (rack_ != nullptr)
-        rack_->captureSession(data);
-    if (recorder_ != nullptr)
-        recorder_->captureSession(data);
-    captureDisplay(data);
-    data.page = sessionPage_;
-    data.waveformGain = waveformGain_;
-    data.alignGroup = alignGroup_;
+    const SessionData data = captureSessionData();
 
     const juce::File file(layout.sessionFile);
     if (! writeSessionFile(file, data))
@@ -1848,6 +1909,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     recordReady_ = false;
     sessionMessage_ = "Opened " + sessionFolder_.getFileName();
     sessionDirty_ = false;
+    lastBackupMs_ = 0;
     restoringSession_ = false;
     dropoutHeaderWritten_ = false;
     return true;
@@ -1855,11 +1917,23 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
 bool AudioEngine::saveSessionAs(const juce::File& folder)
 {
+    return beginSessionCopy(folder);
+}
+
+bool AudioEngine::beginSessionCopy(const juce::File& folder)
+{
     if (folder.getFullPathName().isEmpty())
         return false;
-
-    if (recorder_ != nullptr)
-        recorder_->stop();
+    if (recorder_ != nullptr && recorder_->isRecording())
+    {
+        sessionMessage_ = "Stop recording before saving a copy.";
+        return false;
+    }
+    if (sessionCopyProgress() >= 0.0f)
+    {
+        sessionMessage_ = "A copy is already being saved.";
+        return false;
+    }
     if (sessionFolder_ == juce::File())
     {
         sessionOnInternalDisk_ = false;
@@ -1871,38 +1945,69 @@ bool AudioEngine::saveSessionAs(const juce::File& folder)
     }
     if (! saveSession())
         return false;
-
     if (folder.getFullPathName() == sessionFolder_.getFullPathName())
         return true;
-
-    folder.createDirectory();
-    for (const auto& child : sessionFolder_.findChildFiles(juce::File::findFiles, false))
-        child.copyFileTo(folder.getChildFile(child.getFileName()));
-
-    const auto audio = sessionFolder_.getChildFile(kAudioFolderName);
-    const auto destinationAudio = folder.getChildFile(kAudioFolderName);
-    destinationAudio.createDirectory();
-    if (audio.isDirectory())
+    if (folder.isAChildOf(sessionFolder_) || sessionFolder_.isAChildOf(folder))
     {
-        for (const auto& wav : audio.findChildFiles(juce::File::findFiles, false))
-        {
-            if (! wav.copyFileTo(destinationAudio.getChildFile(wav.getFileName())))
-            {
-                sessionMessage_ = "Could not copy " + wav.getFileName();
-                return false;
-            }
-        }
-    }
-
-    sessionFolder_ = folder;
-    dropoutHeaderWritten_ = false;
-    syncRecorderFolder();
-    if (! saveSession())
+        sessionMessage_ = "Choose a folder that is not inside this session.";
         return false;
-    rememberSessionParent(sessionFolder_);
-    sessionOnInternalDisk_ = isInternalFallback(sessionFolder_);
-    sessionMessage_ = "Saved a copy in " + folder.getFullPathName() + ". The original folder is unchanged.";
+    }
+    if (sessionDisk_ == nullptr)
+        return false;
+
+    auto life = alive_;
+    const auto destination = folder;
+    if (! sessionDisk_->startCopy(sessionFolder_, destination, [life, this, destination](bool ok, juce::String message)
+    {
+        if (life == nullptr || ! life->load())
+            return;
+        if (! ok)
+        {
+            copyFailed_ = true;
+            copyFailure_ = message.isNotEmpty() ? message : juce::String("Could not save the copy.");
+            sessionMessage_ = copyFailure_;
+            return;
+        }
+        sessionFolder_ = destination;
+        dropoutHeaderWritten_ = false;
+        lastBackupMs_ = 0;
+        syncRecorderFolder();
+        rememberSessionParent(sessionFolder_);
+        sessionOnInternalDisk_ = isInternalFallback(sessionFolder_);
+        settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
+        settings_.rememberRecentSession(sessionFolder_.getFullPathName());
+        sessionMessage_ = "Continuing in " + sessionFolder_.getFullPathName() + ". The original folder is unchanged.";
+    }))
+    {
+        sessionMessage_ = "A copy is already being saved.";
+        return false;
+    }
+    sessionMessage_ = "Saving a copy…";
     return true;
+}
+
+float AudioEngine::sessionCopyProgress() const
+{
+    return sessionDisk_ != nullptr ? sessionDisk_->copyProgress() : -1.0f;
+}
+
+juce::String AudioEngine::backupStatusText() const
+{
+    if (sessionDisk_ == nullptr)
+        return {};
+    const int hour = sessionDisk_->backupHour();
+    const int minute = sessionDisk_->backupMinute();
+    if (hour < 0 || minute < 0)
+        return {};
+    return juce::String::formatted("Backup %02d:%02d", hour, minute);
+}
+
+juce::String AudioEngine::takeCopyFailure()
+{
+    if (! copyFailed_)
+        return {};
+    copyFailed_ = false;
+    return copyFailure_;
 }
 
 bool AudioEngine::importRecordingFolder(const juce::File& folder)
@@ -2111,6 +2216,7 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
     {
         auto& stored = groups_[static_cast<std::size_t>(group)];
         stored.used = true;
+        stored.collapsed = true;
         if (stored.name.isEmpty())
             stored.name = "Group " + juce::String(group + 1);
     }
@@ -2254,23 +2360,15 @@ std::vector<StripItem> AudioEngine::displayStrips(int channelCount) const
     return items;
 }
 
-void AudioEngine::selectChannel(int channel, bool extend)
+void AudioEngine::selectChannel(int channel, bool extend, bool toggle)
 {
-    if (channel < 0 || channel >= kMaxChannels)
-        return;
-    if (! extend)
-    {
-        selection_.clear();
-        selection_.push_back(channel);
-        selectionAnchor_ = channel;
-        return;
-    }
-
-    selection_.clear();
-    const int first = std::min(selectionAnchor_, channel);
-    const int last = std::max(selectionAnchor_, channel);
-    for (int index = first; index <= last; ++index)
-        selection_.push_back(index);
+    ChannelSelection current;
+    current.channels = selection_;
+    current.anchor = selectionAnchor_;
+    const auto pick = toggle ? ChannelPick::toggle : extend ? ChannelPick::range : ChannelPick::replace;
+    current = pickChannels(current, channel, kMaxChannels, pick);
+    selection_ = std::move(current.channels);
+    selectionAnchor_ = current.anchor;
 }
 
 bool AudioEngine::isChannelSelected(int channel) const

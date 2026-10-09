@@ -1,4 +1,7 @@
 #include "engine/ChannelEnable.h"
+#include "engine/ChannelSelect.h"
+#include "engine/SessionNames.h"
+#include "engine/Shortcuts.h"
 #include "engine/ChannelListen.h"
 #include "engine/OutputGain.h"
 #include "engine/SignalPath.h"
@@ -443,6 +446,120 @@ void testOffChannelStaysSilent()
     CHECK(near(out2[0], -0.25f, 0.0001f));
     CHECK(strips[0].meter.rms.load() == 0.0f);
     CHECK(strips[2].meter.rms.load() > 0.0f);
+}
+
+void testChannelPick()
+{
+    youhost::ChannelSelection selection;
+    selection = youhost::pickChannels(selection, 4, 32, youhost::ChannelPick::replace);
+    CHECK(selection.channels.size() == 1);
+    CHECK(selection.channels[0] == 4);
+    CHECK(selection.anchor == 4);
+
+    selection = youhost::pickChannels(selection, 8, 32, youhost::ChannelPick::range);
+    CHECK(selection.channels.size() == 5);
+    CHECK(selection.channels.front() == 4);
+    CHECK(selection.channels.back() == 8);
+    CHECK(selection.anchor == 4);
+
+    selection = youhost::pickChannels(selection, 6, 32, youhost::ChannelPick::toggle);
+    CHECK(std::find(selection.channels.begin(), selection.channels.end(), 6) == selection.channels.end());
+    CHECK(selection.anchor == 6);
+    selection = youhost::pickChannels(selection, 6, 32, youhost::ChannelPick::toggle);
+    CHECK(std::find(selection.channels.begin(), selection.channels.end(), 6) != selection.channels.end());
+
+    youhost::ChannelSelection sparse;
+    sparse = youhost::pickChannels(sparse, 1, 32, youhost::ChannelPick::replace);
+    sparse = youhost::pickChannels(sparse, 3, 32, youhost::ChannelPick::toggle);
+    sparse = youhost::pickChannels(sparse, 7, 32, youhost::ChannelPick::toggle);
+    sparse = youhost::pickChannels(sparse, 9, 32, youhost::ChannelPick::toggle);
+    CHECK(sparse.channels.size() == 4);
+}
+
+void testSessionNames()
+{
+    CHECK(youhost::europeanSessionDate(9, 10, 2026) == "09.10.2026");
+    CHECK(youhost::crashRecoverySessionName(9, 10, 2026, 14, 32) == "09.10.2026_crash_14-32");
+    CHECK(youhost::nextFreeSessionName("09.10.2026", std::vector<std::string> {}) == "09.10.2026");
+    CHECK(youhost::nextFreeSessionName("09.10.2026", std::vector<std::string> { "09.10.2026" }) == "09.10.2026_1");
+    CHECK(youhost::nextFreeSessionName("09.10.2026", std::vector<std::string> { "09.10.2026", "09.10.2026_1" })
+          == "09.10.2026_2");
+    CHECK(youhost::kSessionBackupIntervalMs == 5 * 60 * 1000);
+    CHECK(youhost::kSessionBackupsToKeep == 10);
+
+    std::vector<youhost::BackupStamp> stamps {
+        { "old", 10 },
+        { "newer", 50 },
+        { "mid", 30 },
+    };
+    const auto drop = youhost::backupsToRemove(stamps, 2);
+    CHECK(drop.size() == 1);
+    CHECK(drop[0] == "old");
+    CHECK(youhost::groupFoldLabel(true, 8) == "\u25B8 8 ch");
+    CHECK(youhost::groupFoldLabel(false, 8) == "\u25BE 8 ch");
+}
+
+void testShortcutsMatchTheHelp()
+{
+    const auto help = youhost::shortcutHelpText();
+    const auto expect = [&help](youhost::ShortcutId id, char character, youhost::KeyKind kind, bool shift, bool command, bool alt)
+    {
+        youhost::KeyQuery query;
+        query.kind = kind;
+        query.character = character;
+        query.shift = shift;
+        query.command = command;
+        query.alt = alt;
+        const auto matched = youhost::matchShortcut(query);
+        CHECK(matched.has_value());
+        if (matched.has_value())
+            CHECK(*matched == id);
+        const auto line = youhost::shortcutChord(id) + "  " + youhost::shortcutMeaning(id);
+        CHECK(help.find(line) != std::string::npos);
+    };
+
+    expect(youhost::ShortcutId::recPage, '1', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::hostPage, '2', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::dropouts, '3', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::dropouts, 'd', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::cpu, '4', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::latency, '5', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::scanner, 's', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::zoomIn, 't', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::zoomOut, 0, youhost::KeyKind::letterR, false, false, false);
+    expect(youhost::ShortcutId::fit, 0, youhost::KeyKind::letterR, false, false, true);
+    expect(youhost::ShortcutId::lanesTaller, 0, youhost::KeyKind::bracketLeft, false, true, false);
+    expect(youhost::ShortcutId::lanesShorter, 0, youhost::KeyKind::bracketRight, false, true, false);
+    expect(youhost::ShortcutId::playOrStop, 0, youhost::KeyKind::space, false, false, false);
+    expect(youhost::ShortcutId::recordNow, 0, youhost::KeyKind::space, false, true, false);
+    expect(youhost::ShortcutId::previousTake, 0, youhost::KeyKind::left, false, false, false);
+    expect(youhost::ShortcutId::nextTake, 0, youhost::KeyKind::right, false, false, false);
+    expect(youhost::ShortcutId::nudgeBack, 0, youhost::KeyKind::left, true, false, false);
+    expect(youhost::ShortcutId::nudgeForward, 0, youhost::KeyKind::right, true, false, false);
+    expect(youhost::ShortcutId::save, 's', youhost::KeyKind::character, false, true, false);
+    expect(youhost::ShortcutId::saveAs, 's', youhost::KeyKind::character, true, true, false);
+
+    CHECK(help.find("5  Open or close SCAN") == std::string::npos);
+    CHECK(help.find("5  Open or close LATENCY") != std::string::npos);
+    CHECK(help.find("S  Open or close SCAN") != std::string::npos);
+    CHECK(help.find("3 or D  Open or close DROPOUTS") != std::string::npos);
+    CHECK(help.find("W+") != std::string::npos);
+    CHECK(help.find("Null test") != std::string::npos);
+    CHECK(help.find("Save As") != std::string::npos);
+    CHECK(help.find("Backup") != std::string::npos);
+    CHECK(help.find("Shift+click") != std::string::npos);
+    CHECK(help.find("Cmd+click") != std::string::npos);
+    CHECK(help.find("Option-drag") != std::string::npos);
+
+    CHECK(youhost::matchNameKey(false, true, false, false, false, false, false) == youhost::NameKey::commit);
+    CHECK(youhost::matchNameKey(false, false, true, false, false, false, false) == youhost::NameKey::cancel);
+    CHECK(youhost::matchNameKey(true, false, false, false, false, false, false) == youhost::NameKey::next);
+    CHECK(youhost::matchNameKey(true, false, false, true, false, false, false) == youhost::NameKey::previous);
+    CHECK(youhost::matchNameKey(true, false, false, false, true, false, false) == youhost::NameKey::none);
+    for (const auto& nameKey : youhost::kNameKeyHelp)
+        CHECK(help.find(nameKey.line) != std::string::npos);
+    CHECK(std::string(youhost::kNameKeyHelp[0].line).find("Enter") == 0);
+    CHECK(std::string(youhost::kNameKeyHelp[1].line).find("Esc") == 0);
 }
 
 void testGroupsFoldAndPalette()
@@ -1077,6 +1194,9 @@ int main()
     testTakePlan();
     testMeterLayoutScales();
     testOffChannelStaysSilent();
+    testChannelPick();
+    testSessionNames();
+    testShortcutsMatchTheHelp();
     testGroupsFoldAndPalette();
 
     if (failures != 0)
