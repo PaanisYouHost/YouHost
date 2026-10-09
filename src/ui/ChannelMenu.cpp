@@ -91,8 +91,13 @@ void showChannelMenu(AudioEngine& engine,
         groups.addItem(20 + group, engine.groupName(group), true, oneGroup == group);
     menu.addSubMenu("Group", groups);
 
+    bool allSafe = ! channels.empty();
+    for (int chosen : channels)
+        allSafe = allSafe && engine.channelSafe(chosen);
+    menu.addItem(4, "Scene safe", true, allSafe);
+
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&target),
-                       [&engine, channels, beginRename = std::move(beginRename)](int result)
+                       [&engine, channels, allSafe, beginRename = std::move(beginRename)](int result)
                        {
                            if (result == 300 && channels.size() == 1)
                            {
@@ -112,6 +117,12 @@ void showChannelMenu(AudioEngine& engine,
                            else if (result >= 20 && result < 20 + kMaxDisplayGroups)
                            {
                                engine.assignChannelsToGroup(channels, result - 20);
+                           }
+                           else if (result == 4)
+                           {
+                               const bool next = ! allSafe;
+                               for (int chosen : channels)
+                                   engine.setChannelSafe(chosen, next);
                            }
                            else if (result >= 200 && result < 200 + kX32ColourCount)
                            {

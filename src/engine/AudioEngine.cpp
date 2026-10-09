@@ -1,6 +1,8 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "MidiFollow.h"
 #include "OutputGain.h"
+#include "SceneRecall.h"
 #include "SignalPath.h"
 #include "WaveformScale.h"
 #include "DeviceWatch.h"
@@ -221,6 +223,7 @@ AudioEngine::AudioEngine(AppSettings& settings)
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
+    rack_->setSceneHandler([this] { markSceneDrift(); });
     rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)
     {
         notePluginTrace(channel, slot, phase, name, identifier);
@@ -238,10 +241,12 @@ AudioEngine::AudioEngine(AppSettings& settings)
     noteMessageBeat();
     stallThread_ = std::make_unique<StallThread>(settings_);
     stallThread_->startThread();
+    midi_ = std::make_unique<MidiFollow>(settings_);
 }
 
 AudioEngine::~AudioEngine()
 {
+    midi_.reset();
     if (stallThread_ != nullptr)
     {
         stallThread_->stopThread(1000);
@@ -1331,13 +1336,17 @@ void AudioEngine::setChannelListen(int channel, ChannelListen mode)
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
+    if (listen_[static_cast<std::size_t>(channel)] == mode)
+        return;
     listen_[static_cast<std::size_t>(channel)] = mode;
     if (recorder_ != nullptr)
         recorder_->setArmed(channel, channelListenRecords(mode));
     storeChannelOn(channel, channelListenAudible(mode));
     if (rack_ != nullptr)
         rack_->setAudible(channel, channelListenAudible(mode));
-    noteSessionEdit();
+    if (! recallingScene_)
+        noteSessionEdit();
+    markSceneDrift();
 }
 
 void AudioEngine::cycleChannelListen(int channel)
@@ -1361,7 +1370,9 @@ void AudioEngine::setOutputDb(int channel, float db)
         return;
     outputDb_[static_cast<std::size_t>(channel)] = snapped;
     outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(snapped), std::memory_order_relaxed);
-    noteSessionEdit();
+    if (! recallingScene_)
+        noteSessionEdit();
+    markSceneDrift();
 }
 
 void AudioEngine::setBypassAll(bool bypass)
@@ -1767,6 +1778,7 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
     if (recorder_ != nullptr)
         recorder_->captureSession(data);
     captureDisplay(data);
+    captureScenes(data);
     data.page = sessionPage_;
     data.waveformGain = waveformGain_;
     data.alignGroup = alignGroup_;
@@ -1828,6 +1840,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     waveformGain_ = clampWaveformGain(data.waveformGain);
     alignGroup_ = data.alignGroup == 1 ? 1 : 0;
     applyDisplay(data);
+    applyScenes(data);
     syncCompensation();
 
     if (microphoneGranted_ && data.device != nullptr)
@@ -2038,6 +2051,291 @@ void AudioEngine::bumpDisplay()
     noteSessionEdit();
 }
 
+void AudioEngine::markSceneDrift()
+{
+    if (restoringSession_ || recallingScene_)
+        return;
+    if (recalledScene_ < 0 || sceneDrift_)
+        return;
+    sceneDrift_ = true;
+    ++sceneRevision_;
+}
+
+void AudioEngine::captureScenes(SessionData& data) const
+{
+    data.scenes = scenes_;
+    data.recalledScene = recalledScene_;
+    data.sceneDrift = sceneDrift_;
+}
+
+void AudioEngine::applyScenes(const SessionData& data)
+{
+    scenes_ = data.scenes;
+    if (static_cast<int>(scenes_.size()) > kMaxScenes)
+        scenes_.resize(static_cast<std::size_t>(kMaxScenes));
+    recalledScene_ = data.recalledScene;
+    if (recalledScene_ < 0 || recalledScene_ >= static_cast<int>(scenes_.size()))
+        recalledScene_ = -1;
+    sceneDrift_ = data.sceneDrift && recalledScene_ >= 0;
+    ++sceneRevision_;
+}
+
+SessionScene AudioEngine::captureCurrentScene(const juce::String& name, int remote)
+{
+    SessionScene scene;
+    scene.name = name;
+    scene.remote = clampRemoteProgram(remote);
+    SessionData data;
+    if (rack_ != nullptr)
+        rack_->captureSession(data);
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        SessionSceneChannel stored;
+        stored.index = channel;
+        stored.listen = listen_[static_cast<std::size_t>(channel)];
+        stored.outputDb = outputDb_[static_cast<std::size_t>(channel)];
+        stored.slots = data.channels[static_cast<std::size_t>(channel)].slots;
+        bool anyPlugin = false;
+        for (const auto& slot : stored.slots)
+            anyPlugin = anyPlugin || slot.occupied;
+        if (! sceneChannelIsDefault(stored.listen, stored.outputDb, anyPlugin))
+            scene.channels.push_back(std::move(stored));
+    }
+    return scene;
+}
+
+int AudioEngine::sceneCount() const
+{
+    return static_cast<int>(scenes_.size());
+}
+
+juce::String AudioEngine::sceneName(int index) const
+{
+    if (index < 0 || index >= sceneCount())
+        return {};
+    return scenes_[static_cast<std::size_t>(index)].name;
+}
+
+int AudioEngine::sceneRemote(int index) const
+{
+    if (index < 0 || index >= sceneCount())
+        return -1;
+    return scenes_[static_cast<std::size_t>(index)].remote;
+}
+
+void AudioEngine::setSceneRemote(int index, int program)
+{
+    if (index < 0 || index >= sceneCount())
+        return;
+    const int next = clampRemoteProgram(program);
+    if (scenes_[static_cast<std::size_t>(index)].remote == next)
+        return;
+    scenes_[static_cast<std::size_t>(index)].remote = next;
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+void AudioEngine::storeScene(int index)
+{
+    if (index < 0 || index >= sceneCount())
+        return;
+    const auto name = scenes_[static_cast<std::size_t>(index)].name;
+    const int remote = scenes_[static_cast<std::size_t>(index)].remote;
+    scenes_[static_cast<std::size_t>(index)] = captureCurrentScene(name, remote);
+    if (index == recalledScene_)
+        sceneDrift_ = false;
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+void AudioEngine::storeNewScene()
+{
+    if (sceneCount() >= kMaxScenes)
+        return;
+    const auto name = "Scene " + juce::String(sceneCount() + 1);
+    scenes_.push_back(captureCurrentScene(name, -1));
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+void AudioEngine::recallScene(int index)
+{
+    if (index < 0 || index >= sceneCount() || rack_ == nullptr)
+        return;
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (! messages->isThisTheMessageThread())
+            return;
+    }
+
+    recallingScene_ = true;
+    rack_->clearStateDirty();
+    rack_->clearRecallMiss();
+    const auto& scene = scenes_[static_cast<std::size_t>(index)];
+    std::array<const SessionSceneChannel*, kMaxChannels> stored {};
+    for (const auto& channel : scene.channels)
+        if (channel.index >= 0 && channel.index < kMaxChannels)
+            stored[static_cast<std::size_t>(channel.index)] = &channel;
+
+    bool touchRack = false;
+    std::array<bool, kMaxChannels> audible {};
+    const SessionSlot emptySlot;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        if (recallSkipsChannel(sceneSafe_[static_cast<std::size_t>(channel)]))
+        {
+            audible[static_cast<std::size_t>(channel)] = channelListenAudible(listen_[static_cast<std::size_t>(channel)]);
+            continue;
+        }
+
+        touchRack = true;
+        const auto* source = stored[static_cast<std::size_t>(channel)];
+        const auto listen = source != nullptr ? source->listen : ChannelListen::record;
+        const float db = snapOutputDb(source != nullptr ? source->outputDb : 0.0f);
+        listen_[static_cast<std::size_t>(channel)] = listen;
+        if (recorder_ != nullptr)
+            recorder_->setArmed(channel, channelListenRecords(listen));
+        storeChannelOn(channel, channelListenAudible(listen));
+        audible[static_cast<std::size_t>(channel)] = channelListenAudible(listen);
+        outputDb_[static_cast<std::size_t>(channel)] = db;
+        outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(db), std::memory_order_relaxed);
+
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& wanted = source != nullptr ? source->slots[static_cast<std::size_t>(slot)] : emptySlot;
+            rack_->recallSlot(channel, slot, wanted);
+        }
+    }
+
+    if (touchRack)
+        rack_->setAudibleAll(audible);
+
+    recalledScene_ = index;
+    sceneDrift_ = rack_->recallMissed();
+    recallingScene_ = false;
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+void AudioEngine::renameScene(int index, const juce::String& name)
+{
+    if (index < 0 || index >= sceneCount())
+        return;
+    auto trimmed = name.trim();
+    if (trimmed.isEmpty())
+        return;
+    if (trimmed.length() > 48)
+        trimmed = trimmed.substring(0, 48);
+    if (scenes_[static_cast<std::size_t>(index)].name == trimmed)
+        return;
+    scenes_[static_cast<std::size_t>(index)].name = trimmed;
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+void AudioEngine::deleteScene(int index)
+{
+    if (index < 0 || index >= sceneCount())
+        return;
+    scenes_.erase(scenes_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (recalledScene_ == index)
+    {
+        recalledScene_ = -1;
+        sceneDrift_ = false;
+    }
+    else if (recalledScene_ > index)
+        --recalledScene_;
+    noteSessionEdit();
+    ++sceneRevision_;
+}
+
+bool AudioEngine::channelSafe(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return false;
+    return sceneSafe_[static_cast<std::size_t>(channel)];
+}
+
+void AudioEngine::setChannelSafe(int channel, bool safe)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    if (sceneSafe_[static_cast<std::size_t>(channel)] == safe)
+        return;
+    sceneSafe_[static_cast<std::size_t>(channel)] = safe;
+    noteSessionEdit();
+}
+
+void AudioEngine::pollMidiFollow()
+{
+    if (midi_ == nullptr || recallingScene_ || ! midi_->enabled())
+        return;
+    const int program = midi_->takePending();
+    if (program < 0)
+        return;
+
+    int remotes[kMaxScenes];
+    const int count = std::min(sceneCount(), kMaxScenes);
+    for (int index = 0; index < count; ++index)
+        remotes[index] = scenes_[static_cast<std::size_t>(index)].remote;
+    const int scene = sceneForProgram(remotes, count, program);
+    if (scene < 0)
+        return;
+    if (scene == recalledScene_ && ! sceneDrift_)
+        return;
+    recallScene(scene);
+}
+
+void AudioEngine::setMidiFollow(bool enabled)
+{
+    if (midi_ != nullptr)
+        midi_->setEnabled(enabled);
+}
+
+bool AudioEngine::midiFollow() const
+{
+    return midi_ != nullptr && midi_->enabled();
+}
+
+void AudioEngine::setMidiFollowChannel(int channel)
+{
+    if (midi_ != nullptr)
+        midi_->setChannel(channel);
+}
+
+int AudioEngine::midiFollowChannel() const
+{
+    return midi_ != nullptr ? midi_->channel() : 1;
+}
+
+void AudioEngine::setMidiFollowDevice(const juce::String& identifier)
+{
+    if (midi_ != nullptr)
+        midi_->setDevice(identifier);
+}
+
+juce::String AudioEngine::midiFollowDevice() const
+{
+    return midi_ != nullptr ? midi_->device() : juce::String();
+}
+
+bool AudioEngine::midiFollowOpen() const
+{
+    return midi_ != nullptr && midi_->isOpen();
+}
+
+bool AudioEngine::midiActivityLit() const
+{
+    return midi_ != nullptr && midi_->activityLit();
+}
+
+juce::Array<juce::MidiDeviceInfo> AudioEngine::midiInputs() const
+{
+    if (midi_ == nullptr)
+        return {};
+    return midi_->devices();
+}
+
 void AudioEngine::captureDisplay(SessionData& data) const
 {
     for (int channel = 0; channel < kMaxChannels; ++channel)
@@ -2048,6 +2346,7 @@ void AudioEngine::captureDisplay(SessionData& data) const
         destination.listen = listen_[static_cast<std::size_t>(channel)];
         destination.recordEnabled = destination.listen == ChannelListen::record;
         destination.outputDb = outputDb_[static_cast<std::size_t>(channel)];
+        destination.sceneSafe = sceneSafe_[static_cast<std::size_t>(channel)];
     }
     data.groups = groups_;
 }
@@ -2064,6 +2363,7 @@ void AudioEngine::applyDisplay(const SessionData& data)
         const int group = source.group;
         channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
         listen_[static_cast<std::size_t>(channel)] = source.listen;
+        sceneSafe_[static_cast<std::size_t>(channel)] = source.sceneSafe;
         outputDb_[static_cast<std::size_t>(channel)] = snapOutputDb(source.outputDb);
         outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(outputDb_[static_cast<std::size_t>(channel)]),
                                                             std::memory_order_relaxed);

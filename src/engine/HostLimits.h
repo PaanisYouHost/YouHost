@@ -7,6 +7,7 @@ namespace youhost
 // use this same channel count. They do not grow this array.
 inline constexpr int kMaxChannels = 128;
 inline constexpr int kSlotsPerChannel = 4;
+inline constexpr int kMaxScenes = 64;
 
 inline constexpr float kRmsWindowSeconds = 0.300f;
 inline constexpr float kPeakHoldSeconds = 1.5f;

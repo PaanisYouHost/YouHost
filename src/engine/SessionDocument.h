@@ -36,12 +36,30 @@ struct SessionChannel
 {
     bool excludeFromCompensation = false;
     bool recordEnabled = true;
+    bool sceneSafe = false;
     ChannelListen listen = ChannelListen::record;
     float outputDb = 0.0f;
     int color = 0;
     int group = -1;
     juce::String name;
     std::array<SessionSlot, kSlotsPerChannel> slots {};
+};
+
+// One stored channel inside a scene. Name, colour, group, exclude, and SAFE
+// stay on the live channel. An omitted channel means REC, 0 dB, empty slots.
+struct SessionSceneChannel
+{
+    int index = 0;
+    ChannelListen listen = ChannelListen::record;
+    float outputDb = 0.0f;
+    std::array<SessionSlot, kSlotsPerChannel> slots {};
+};
+
+struct SessionScene
+{
+    juce::String name;
+    int remote = -1;
+    std::vector<SessionSceneChannel> channels;
 };
 
 struct SessionTake
@@ -66,6 +84,9 @@ struct SessionData
     std::array<SessionChannel, kMaxChannels> channels {};
     std::array<SessionGroup, kMaxDisplayGroups> groups {};
     std::vector<SessionTake> takes;
+    std::vector<SessionScene> scenes;
+    int recalledScene = -1;
+    bool sceneDrift = false;
 };
 
 // Writes session.youhost. The caller creates the sibling audio/ folder.

@@ -1207,7 +1207,11 @@ void PluginRack::finishLoad(int channel,
     {
         instance->addListener(this);
         if (state.getSize() > 0)
+        {
+            const bool wasCapturing = capturing_.exchange(true, std::memory_order_relaxed);
             instance->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            capturing_.store(wasCapturing, std::memory_order_relaxed);
+        }
 
         double rate = 48000.0;
         int block = 512;
@@ -1351,7 +1355,7 @@ void PluginRack::clearAll(bool markDirty)
         notifyDirty();
 }
 
-void PluginRack::removePlugin(int channel, int slot)
+void PluginRack::removePlugin(int channel, int slot, bool markDirty)
 {
     if (! validSlot(channel, slot))
         return;
@@ -1361,17 +1365,17 @@ void PluginRack::removePlugin(int channel, int slot)
         if (! messages->isThisTheMessageThread())
         {
             auto alive = alive_;
-            juce::MessageManager::callAsync([this, alive, channel, slot]
+            juce::MessageManager::callAsync([this, alive, channel, slot, markDirty]
             {
                 if (! alive->load(std::memory_order_acquire))
                     return;
-                removePlugin(channel, slot);
+                removePlugin(channel, slot, markDirty);
             });
             return;
         }
     }
 
-    enqueueChannel(channel, [this, channel, slot] { removePluginNow(channel, slot); }, false);
+    enqueueChannel(channel, [this, channel, slot, markDirty] { removePluginNow(channel, slot, markDirty); }, false);
 }
 
 void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
@@ -1519,7 +1523,7 @@ void PluginRack::setExcluded(int channel, bool excluded)
         excluded_[static_cast<std::size_t>(channel)] = excluded;
         publishUnlocked();
     }
-    notifyDirty();
+    notifyDirty(false);
 }
 
 void PluginRack::setAudible(int channel, bool audible)
@@ -1756,6 +1760,98 @@ void PluginRack::setDirtyHandler(std::function<void()> handler)
     dirtyHandler_ = std::move(handler);
 }
 
+void PluginRack::setSceneHandler(std::function<void()> handler)
+{
+    sceneHandler_ = std::move(handler);
+}
+
+void PluginRack::clearStateDirty() noexcept
+{
+    stateDirty_.store(false, std::memory_order_relaxed);
+}
+
+void PluginRack::publishGraph()
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    publishUnlocked();
+}
+
+SlotRecall PluginRack::recallSlot(int channel, int slot, const SessionSlot& wanted)
+{
+    if (! validSlot(channel, slot))
+        return SlotRecall::leave;
+
+    // A load already in flight owns this channel. Run the recall after it,
+    // still on the message thread, then swap one snapshot.
+    if (channelBusy(channel))
+    {
+        enqueueChannel(channel,
+                       [this, channel, slot, wanted]
+                       {
+                           recallSlotNow(channel, slot, wanted);
+                           std::lock_guard<std::mutex> lock(lifeLock_);
+                           publishUnlocked();
+                       },
+                       false);
+        return SlotRecall::load;
+    }
+    return recallSlotNow(channel, slot, wanted);
+}
+
+SlotRecall PluginRack::recallSlotNow(int channel, int slot, const SessionSlot& wanted)
+{
+    bool occupied = false;
+    juce::String currentId;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin != nullptr && model.plugin->instance != nullptr)
+        {
+            occupied = true;
+            currentId = pluginIdentifier(model.plugin->description);
+        }
+    }
+
+    const juce::String wantedId = wanted.occupied ? pluginIdentifier(wanted.description) : juce::String();
+    const auto action = decideSlotRecall(occupied, currentId.toRawUTF8(), wanted.occupied, wantedId.toRawUTF8());
+    if (action == SlotRecall::leave)
+        return action;
+    if (action == SlotRecall::unload)
+    {
+        removePlugin(channel, slot, false);
+        return action;
+    }
+    if (action == SlotRecall::load)
+    {
+        loadPlugin(channel, slot, wanted.description, wanted.state, wanted.bypassed, false, false, wanted.stereoFold);
+        return action;
+    }
+
+    std::shared_ptr<HostedPlugin> plugin;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        plugin = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin;
+    }
+    if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr || ! pauseGate(*plugin->gate))
+    {
+        recallMiss_ = true;
+        if (sceneHandler_ != nullptr)
+            sceneHandler_();
+        return action;
+    }
+
+    const bool wasCapturing = capturing_.exchange(true, std::memory_order_relaxed);
+    if (wanted.state.getSize() > 0)
+        plugin->instance->setStateInformation(wanted.state.getData(), static_cast<int>(wanted.state.getSize()));
+    plugin->state = wanted.state;
+    plugin->bypassed = wanted.bypassed;
+    plugin->stereoFold = static_cast<int>(stereoFoldFromInt(wanted.stereoFold));
+    plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
+    capturing_.store(wasCapturing, std::memory_order_relaxed);
+    resumeGate(*plugin->gate);
+    return action;
+}
+
 void PluginRack::publishUnlocked()
 {
     auto graph = buildGraph();
@@ -1902,10 +1998,14 @@ std::vector<std::shared_ptr<juce::AudioPluginInstance>> PluginRack::collectInsta
     return instances;
 }
 
-void PluginRack::notifyDirty()
+void PluginRack::notifyDirty(bool scene)
 {
-    if (! restoring_ && dirtyHandler_ != nullptr)
+    if (restoring_)
+        return;
+    if (dirtyHandler_ != nullptr)
         dirtyHandler_();
+    if (scene && sceneHandler_ != nullptr)
+        sceneHandler_();
 }
 
 bool PluginRack::validSlot(int channel, int slot) const noexcept
@@ -1994,7 +2094,7 @@ void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, c
         trace_(channel, slot, phase, name, identifier);
 }
 
-void PluginRack::removePluginNow(int channel, int slot)
+void PluginRack::removePluginNow(int channel, int slot, bool markDirty)
 {
     if (! validSlot(channel, slot))
         return;
@@ -2026,7 +2126,8 @@ void PluginRack::removePluginNow(int channel, int slot)
     bury(std::move(plugin), std::move(window));
     if (identifier.isNotEmpty() || name.isNotEmpty())
         tracePlugin(channel, slot, "unload", name, identifier);
-    notifyDirty();
+    if (markDirty)
+        notifyDirty();
 }
 
 void PluginRack::enqueueChannel(int channel, std::function<void()> work, bool asynchronous)

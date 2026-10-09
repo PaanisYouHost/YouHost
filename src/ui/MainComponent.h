@@ -8,6 +8,7 @@
 #include "ui/MeterGrid.h"
 #include "ui/PluginPage.h"
 #include "ui/ScannerWindow.h"
+#include "ui/ScenesWindow.h"
 #include "ui/TimelineView.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -46,6 +47,7 @@ private:
     void toggleDropouts();
     void toggleCpu();
     void toggleLatency();
+    void toggleScenes();
     void ensureLogo();
     class BrandMark;
     void openSession();
@@ -86,6 +88,7 @@ private:
     ScannerWindow scanner_;
     DropoutWindow dropouts_;
     CpuWindow cpu_;
+    ScenesWindow scenes_;
     class FileMenu;
     std::unique_ptr<FileMenu> fileMenu_;
     juce::TooltipWindow tooltipWindow_ { this, 700 };
@@ -114,6 +117,7 @@ private:
     juce::TextButton cpuButton_ { "4 CPU" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "5 LATENCY" };
+    juce::TextButton scenesButton_ { "6 SCENES" };
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };

@@ -280,6 +280,54 @@ public:
         }
     }
 
+    bool loadMidiFollow()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getBoolValue("midiFollow", false);
+        return false;
+    }
+
+    void saveMidiFollow(bool enabled)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("midiFollow", enabled);
+            settings->saveIfNeeded();
+        }
+    }
+
+    int loadMidiFollowChannel()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getIntValue("midiFollowChannel", 1);
+        return 1;
+    }
+
+    void saveMidiFollowChannel(int channel)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("midiFollowChannel", channel);
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::String loadMidiFollowDevice()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("midiFollowDevice");
+        return {};
+    }
+
+    void saveMidiFollowDevice(const juce::String& identifier)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("midiFollowDevice", identifier);
+            settings->saveIfNeeded();
+        }
+    }
+
     int loadTimelineHeight()
     {
         if (auto* settings = properties_.getUserSettings())

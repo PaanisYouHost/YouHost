@@ -37,6 +37,7 @@ target_sources(YouHost PRIVATE
     src/YouHostApplication.cpp
     src/engine/AudioEngine.cpp
     src/engine/PluginCatalogue.cpp
+    src/engine/MidiFollow.cpp
     src/engine/PluginRack.cpp
     src/engine/Recorder.cpp
     src/engine/SessionDocument.cpp
@@ -48,6 +49,7 @@ target_sources(YouHost PRIVATE
     src/ui/MainComponent.cpp
     src/ui/PluginPage.cpp
     src/ui/ScannerWindow.cpp
+    src/ui/ScenesWindow.cpp
     src/ui/TimelineView.cpp)
 
 target_include_directories(YouHost PRIVATE src)

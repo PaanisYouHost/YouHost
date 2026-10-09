@@ -604,6 +604,11 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.setColour(theme::text);
         graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(12.0f, 16.0f, width * 0.42f)).withStyle("Bold")));
         graphics.drawText(juce::String(cell.channel + 1), parts.number, juce::Justification::centred, false);
+        if (cell.sceneSafe)
+        {
+            graphics.setColour(theme::amber);
+            graphics.fillRect(parts.number.getRight() - 6.0f, parts.number.getY() + 2.0f, 4.0f, 4.0f);
+        }
 
         if (cell.selected)
         {
