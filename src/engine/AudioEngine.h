@@ -76,6 +76,7 @@ public:
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setSlotBypassed(int channel, int slot, bool bypassed);
+    void setStereoFold(int channel, int slot, int fold);
     void setChannelExcluded(int channel, bool excluded);
     void openPluginEditor(int channel, int slot);
     void togglePluginEditor(int channel, int slot);
@@ -202,6 +203,7 @@ private:
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
+    void noteChannelMasks(juce::AudioIODevice& device);
     void handleDeviceDown();
     void tryReopenWanted();
     bool deviceNameListed(const juce::String& name);
@@ -280,6 +282,7 @@ private:
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool awaitingSavedDevice_ = false;
+    bool wideningOutputs_ = false;
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;

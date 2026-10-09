@@ -899,6 +899,47 @@ private:
     MainComponent& owner;
 };
 
+class MainComponent::BrandMark : public juce::Component,
+                                 public juce::SettableTooltipClient
+{
+public:
+    BrandMark()
+    {
+        setTooltip("Email Ambient Audio");
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    }
+
+    void setLogo(const juce::Image& image)
+    {
+        logo_ = image;
+        repaint();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (logo_.isValid())
+        {
+            graphics.setOpacity(0.45f);
+            graphics.drawImageWithin(logo_, 0, 0, 120, getHeight(),
+                                     juce::RectanglePlacement::xLeft | juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+            return;
+        }
+        graphics.setColour(theme::text.withAlpha(0.38f));
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
+        graphics.drawText("Ambient Audio Oy", getLocalBounds(), juce::Justification::centredLeft, true);
+    }
+
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        if (! event.mouseWasClicked())
+            return;
+        juce::URL("mailto:mika.paananen@ambientaudio.fi?subject=YouHost").launchInDefaultBrowser();
+    }
+
+private:
+    juce::Image logo_;
+};
+
 MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     : engine_(engine),
       settings_(settings),
@@ -939,6 +980,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(timeLabel_);
     addAndMakeVisible(modeLabel_);
     addAndMakeVisible(helpButton_);
+    brand_ = std::make_unique<BrandMark>();
+    addAndMakeVisible(*brand_);
     addAndMakeVisible(rmsButton_);
     addAndMakeVisible(peakButton_);
     addAndMakeVisible(referenceLabel_);
@@ -1932,6 +1975,10 @@ void MainComponent::mirrorSetupToggles()
 void MainComponent::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(theme::background);
+    graphics.setColour(juce::Colour(0xff5c677c));
+    graphics.fillRect(fileRule_);
+    graphics.fillRect(transportRule_);
+    graphics.fillRect(scanTick_);
     graphics.setColour(theme::text);
     graphics.setFont(juce::Font(juce::FontOptions(18.0f)));
     graphics.drawText("YouHost", titleArea_, juce::Justification::centredLeft, false);
@@ -1995,23 +2042,10 @@ void MainComponent::paint(juce::Graphics& graphics)
     graphics.setColour(engine_.openError().isNotEmpty() || engine_.rateWarning().isNotEmpty() ? theme::red : theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
     auto hintBounds = hintArea_;
-    auto brand = hintBounds.removeFromLeft(148);
+    hintBounds.removeFromLeft(148);
     graphics.drawFittedText(hint, hintBounds, juce::Justification::centredLeft, 2);
 
     ensureLogo();
-    if (logo_.isValid())
-    {
-        graphics.setOpacity(0.45f);
-        graphics.drawImageWithin(logo_, brand.getX(), brand.getY(), 120, brand.getHeight(),
-                                 juce::RectanglePlacement::xLeft | juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
-        graphics.setOpacity(1.0f);
-    }
-    else
-    {
-        graphics.setColour(theme::text.withAlpha(0.38f));
-        graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-        graphics.drawText("Ambient Audio Oy", brand, juce::Justification::centredLeft, true);
-    }
 }
 
 void MainComponent::ensureLogo()
@@ -2032,7 +2066,11 @@ void MainComponent::ensureLogo()
             continue;
         logo_ = juce::ImageFileFormat::loadFrom(file);
         if (logo_.isValid())
+        {
+            if (brand_ != nullptr)
+                brand_->setLogo(logo_);
             return;
+        }
     }
 }
 
@@ -2069,10 +2107,12 @@ void MainComponent::resized()
     pluginsButton_.setBounds(views.removeFromRight(88).reduced(0, 2));
     views.removeFromRight(4);
     recorderButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
-    views.removeFromRight(10);
+    auto scanGap = views.removeFromRight(28);
+    scanTick_ = juce::Rectangle<int>(scanGap.getCentreX(), scanGap.getY() + 6, 1, std::max(8, scanGap.getHeight() - 12));
     scannerButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
 
-    area.removeFromTop(4);
+    auto fileGap = area.removeFromTop(4);
+    fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
     auto transport = area.removeFromTop(40);
     constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + 8 + 148 + 96;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
@@ -2085,7 +2125,8 @@ void MainComponent::resized()
     timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
     modeLabel_.setBounds(cluster.reduced(4, 8));
 
-    area.removeFromTop(4);
+    auto transportGap = area.removeFromTop(4);
+    transportRule_ = transportGap.withSizeKeepingCentre(transportGap.getWidth(), 1);
     auto tools = area.removeFromTop(32);
     rmsButton_.setBounds(tools.removeFromLeft(52).reduced(0, 2));
     peakButton_.setBounds(tools.removeFromLeft(58).reduced(0, 2));
@@ -2121,6 +2162,8 @@ void MainComponent::resized()
 
     area.removeFromTop(8);
     hintArea_ = area.removeFromBottom(32);
+    if (brand_ != nullptr)
+        brand_->setBounds(hintArea_.getX(), hintArea_.getY(), 148, hintArea_.getHeight());
     helpButton_.setBounds(getWidth() - 40, getHeight() - 36, 28, 28);
     hintArea_.removeFromRight(36);
     area.removeFromBottom(6);

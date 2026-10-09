@@ -70,20 +70,48 @@ inline bool isAppleBuiltIn(std::string_view manufacturer, std::string_view ident
            || containsFold(identifier, "\\system\\library\\");
 }
 
-// Insert list defaults: hide Apple's built-in Audio Units, and hide instruments
-// or anything with no audio input. Effects such as De-Feedback stay visible.
-inline bool showInInsertList(std::string_view manufacturer,
-                             std::string_view identifier,
+// A VST3 scan from moduleinfo stores 0 inputs for every plugin, including effects.
+// Channel count is not a substitute for "this is an instrument".
+inline bool categoryTokenIsInstrument(std::string_view category)
+{
+    std::size_t index = 0;
+    while (index <= category.size())
+    {
+        const auto separator = category.find_first_of("|,", index);
+        const auto tokenEnd = separator == std::string_view::npos ? category.size() : separator;
+        auto token = category.substr(index, tokenEnd - index);
+        while (! token.empty() && (token.front() == ' ' || token.front() == '\t'))
+            token.remove_prefix(1);
+        while (! token.empty() && (token.back() == ' ' || token.back() == '\t'))
+            token.remove_suffix(1);
+        if (equalsFold(token, "instrument") || equalsFold(token, "generator") || equalsFold(token, "synth"))
+            return true;
+        if (separator == std::string_view::npos)
+            break;
+        index = separator + 1;
+    }
+    return false;
+}
+
+inline bool isAudioUnitInstrumentOrGenerator(std::string_view identifier)
+{
+    return containsFold(identifier, "audiounit:generators/")
+           || containsFold(identifier, "audiounit:synths/");
+}
+
+// Every scanned effect stays in the insert list, including Apple Audio Units and
+// VST3 plugins that reported no channel count. Instruments and generators are the
+// only plugins left out, and only while showInstruments is off.
+inline bool showInInsertList(std::string_view identifier,
+                             std::string_view category,
                              bool instrument,
-                             int numInputChannels,
-                             bool showApple,
                              bool showInstruments)
 {
-    if (! showApple && isAppleBuiltIn(manufacturer, identifier))
-        return false;
-    if (! showInstruments && (instrument || numInputChannels <= 0))
-        return false;
-    return true;
+    if (showInstruments)
+        return true;
+    return ! instrument
+           && ! categoryTokenIsInstrument(category)
+           && ! isAudioUnitInstrumentOrGenerator(identifier);
 }
 
 struct ScanCandidate

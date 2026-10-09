@@ -72,10 +72,9 @@ public:
 
     bool scanWavesShells() const;
     void setScanWavesShells(bool enabled);
-    bool showAppleInInserts() const;
-    void setShowAppleInInserts(bool enabled);
     bool showInstrumentsInInserts() const;
     void setShowInstrumentsInInserts(bool enabled);
+    void setDeviceOpen(bool open) noexcept;
 
     juce::Array<juce::PluginDescription> types() const;
     juce::Array<juce::PluginDescription> insertTypes() const;
@@ -117,6 +116,7 @@ private:
     std::vector<ForcedJob> forced_;
 
     std::atomic<bool> cancel_ { false };
+    std::atomic<bool> deviceOpen_ { false };
     std::atomic<bool> scanning_ { false };
     std::atomic<bool> rescanKnown_ { false };
     std::atomic<bool> listDirty_ { false };

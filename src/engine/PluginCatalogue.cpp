@@ -7,7 +7,14 @@
 
 #if defined(__APPLE__) || defined(__linux__)
  #include <signal.h>
+ #include <sys/resource.h>
  #include <unistd.h>
+#endif
+#if JUCE_MAC
+ #include <pthread/qos.h>
+ #include <objc/message.h>
+ #include <objc/objc.h>
+ #include <objc/runtime.h>
 #endif
 
 namespace youhost
@@ -57,6 +64,21 @@ struct Outcome
     juce::String reason;
     juce::OwnedArray<juce::PluginDescription> found;
 };
+
+void lowerScannerPriority()
+{
+#if JUCE_MAC
+    (void) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    auto* shared = sel_registerName("sharedApplication");
+    auto* policy = sel_registerName("setActivationPolicy:");
+    id app = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(reinterpret_cast<id>(objc_getClass("NSApplication")), shared);
+    if (app != nil)
+        reinterpret_cast<void (*)(id, SEL, long)>(objc_msgSend)(app, policy, 2);
+#endif
+#if defined(__APPLE__) || defined(__linux__)
+    (void) setpriority(PRIO_PROCESS, 0, 10);
+#endif
+}
 
 void killSlot(Slot& slot)
 {
@@ -134,6 +156,7 @@ void ScanWorker::startFromCommandLine(const juce::String& commandLine)
     }
 
     directory_.createDirectory();
+    lowerScannerPriority();
 
 #if defined(__APPLE__) || defined(__linux__)
     setpgid(0, 0);
@@ -146,6 +169,7 @@ void ScanWorker::startFromCommandLine(const juce::String& commandLine)
 
 void ScanWorker::run()
 {
+    lowerScannerPriority();
     if (directory_.getFullPathName().isEmpty())
     {
         if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating())
@@ -446,17 +470,6 @@ void PluginCatalogue::setScanWavesShells(bool enabled)
     token_.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool PluginCatalogue::showAppleInInserts() const
-{
-    return settings_.loadShowAppleInserts();
-}
-
-void PluginCatalogue::setShowAppleInInserts(bool enabled)
-{
-    settings_.saveShowAppleInserts(enabled);
-    token_.fetch_add(1, std::memory_order_relaxed);
-}
-
 bool PluginCatalogue::showInstrumentsInInserts() const
 {
     return settings_.loadShowInstrumentInserts();
@@ -468,6 +481,11 @@ void PluginCatalogue::setShowInstrumentsInInserts(bool enabled)
     token_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void PluginCatalogue::setDeviceOpen(bool open) noexcept
+{
+    deviceOpen_.store(open, std::memory_order_relaxed);
+}
+
 juce::Array<juce::PluginDescription> PluginCatalogue::types() const
 {
     return list_.getTypes();
@@ -475,16 +493,13 @@ juce::Array<juce::PluginDescription> PluginCatalogue::types() const
 
 juce::Array<juce::PluginDescription> PluginCatalogue::insertTypes() const
 {
-    const bool showApple = showAppleInInserts();
     const bool showInstruments = showInstrumentsInInserts();
     juce::Array<juce::PluginDescription> visible;
     for (const auto& type : list_.getTypes())
     {
-        if (showInInsertList(type.manufacturerName.toStdString(),
-                             type.fileOrIdentifier.toStdString(),
+        if (showInInsertList(type.fileOrIdentifier.toStdString(),
+                             type.category.toStdString(),
                              type.isInstrument,
-                             type.numInputChannels,
-                             showApple,
                              showInstruments))
             visible.add(type);
     }
@@ -748,9 +763,10 @@ void PluginCatalogue::runScan()
                           .getChildFile("youhost-scan-" + juce::String(juce::Time::currentTimeMillis()));
     root.createDirectory();
 
+    const int workerCount = deviceOpen_.load(std::memory_order_relaxed) ? 1 : kWorkers;
     std::vector<std::shared_ptr<Slot>> slots;
-    slots.reserve(static_cast<std::size_t>(kWorkers));
-    for (int index = 0; index < kWorkers; ++index)
+    slots.reserve(static_cast<std::size_t>(workerCount));
+    for (int index = 0; index < workerCount; ++index)
     {
         auto slot = std::make_shared<Slot>();
         slot->directory = root.getChildFile(juce::String(index));
@@ -882,7 +898,8 @@ void PluginCatalogue::runScan()
         }
 
         outcome.killed = true;
-        outcome.reason = slotRunning(slot) ? "Timed out" : "Plugin crashed the scanner";
+        outcome.reason = slotRunning(slot) ? "Timed out. A plugin window may have been waiting, so the scanner was closed."
+                                           : "Plugin crashed the scanner";
         killSlot(slot);
         return outcome;
     };

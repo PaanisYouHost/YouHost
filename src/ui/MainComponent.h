@@ -47,6 +47,7 @@ private:
     void toggleCpu();
     void toggleLatency();
     void ensureLogo();
+    class BrandMark;
     void openSession();
     void saveSession();
     void saveSessionAs();
@@ -139,6 +140,10 @@ private:
     int pollDivider_ = 0;
     bool logoTried_ = false;
     juce::Image logo_;
+    std::unique_ptr<BrandMark> brand_;
+    juce::Rectangle<int> fileRule_;
+    juce::Rectangle<int> transportRule_;
+    juce::Rectangle<int> scanTick_;
 
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;

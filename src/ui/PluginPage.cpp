@@ -6,6 +6,7 @@
 #include "WindowMemory.h"
 #include "X32Look.h"
 #include "engine/ChannelListen.h"
+#include "engine/SignalPath.h"
 #include "engine/DisplayLayout.h"
 #include "engine/InsertMenu.h"
 #include "engine/MeterScale.h"
@@ -35,12 +36,51 @@ public:
         : engine_(engine),
           onChoose_(std::move(onChoose))
     {
+        addAndMakeVisible(allButton_);
+        addAndMakeVisible(auButton_);
+        addAndMakeVisible(vstButton_);
         addAndMakeVisible(search_);
+        addAndMakeVisible(hiddenNote_);
         addAndMakeVisible(tree_);
         addAndMakeVisible(empty_);
+        allButton_.setButtonText("All");
+        auButton_.setButtonText("AU");
+        vstButton_.setButtonText("VST3");
+        for (auto* button : { &allButton_, &auButton_, &vstButton_ })
+        {
+            button->setRadioGroupId(1);
+            button->setClickingTogglesState(true);
+            button->setMouseClickGrabsKeyboardFocus(false);
+            button->setColour(juce::TextButton::buttonColourId, theme::button);
+            button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
+            button->setColour(juce::TextButton::textColourOffId, theme::text);
+            button->setColour(juce::TextButton::textColourOnId, theme::text);
+        }
+        allButton_.setToggleState(true, juce::dontSendNotification);
+        allButton_.onClick = [this]
+        {
+            if (allButton_.getToggleState())
+                setFormat(InsertFormatFilter::all);
+        };
+        auButton_.onClick = [this]
+        {
+            if (auButton_.getToggleState())
+                setFormat(InsertFormatFilter::audioUnit);
+        };
+        vstButton_.onClick = [this]
+        {
+            if (vstButton_.getToggleState())
+                setFormat(InsertFormatFilter::vst3);
+        };
         search_.setTextToShowWhenEmpty("Search name or maker", theme::fainter);
         search_.onTextChange = [this] { rebuild(); };
         search_.onReturnKey = [this] { chooseSource(firstMatch_); };
+        hiddenNote_.setText(juce::String(kInstrumentsHiddenNote.data(), kInstrumentsHiddenNote.size()),
+                            juce::dontSendNotification);
+        hiddenNote_.setFont(juce::Font(juce::FontOptions(12.0f)));
+        hiddenNote_.setColour(juce::Label::textColourId, theme::dim);
+        hiddenNote_.setJustificationType(juce::Justification::centredLeft);
+        hiddenNote_.setInterceptsMouseClicks(false, false);
         tree_.setColour(juce::TreeView::backgroundColourId, theme::background);
         tree_.setColour(juce::TreeView::linesColourId, theme::dim);
         tree_.setDefaultOpenness(false);
@@ -61,7 +101,19 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(8);
+        auto formats = area.removeFromTop(26);
+        allButton_.setBounds(formats.removeFromLeft(64));
+        formats.removeFromLeft(6);
+        auButton_.setBounds(formats.removeFromLeft(64));
+        formats.removeFromLeft(6);
+        vstButton_.setBounds(formats.removeFromLeft(72));
+        area.removeFromTop(6);
         search_.setBounds(area.removeFromTop(28));
+        if (hiddenNote_.isVisible())
+        {
+            area.removeFromTop(4);
+            hiddenNote_.setBounds(area.removeFromTop(18));
+        }
         area.removeFromTop(6);
         tree_.setBounds(area);
         empty_.setBounds(area.reduced(12));
@@ -79,7 +131,10 @@ public:
 
     void reload()
     {
+        knownCount_ = engine_.pluginCatalogue().types().size();
         types_ = engine_.pluginCatalogue().insertTypes();
+        hideInstruments_ = ! engine_.pluginCatalogue().showInstrumentsInInserts();
+        hiddenNote_.setVisible(hideInstruments_);
         rebuild();
         search_.grabKeyboardFocus();
     }
@@ -168,7 +223,7 @@ private:
         }
 
         const auto query = search_.getText().trim().toStdString();
-        const auto groups = groupInsertPlugins(catalog, query);
+        const auto groups = groupInsertPlugins(catalog, query, format_);
         const bool searching = ! textIsBlank(query);
         firstMatch_ = -1;
 
@@ -190,17 +245,35 @@ private:
         }
 
         empty_.setVisible(groups.empty());
-        empty_.setText(types_.isEmpty() ? "No plugins yet. Open the scanner and scan."
-                                        : "No plugins match.",
-                       juce::dontSendNotification);
+        juce::String emptyText = "No plugins match.";
+        if (types_.isEmpty())
+            emptyText = knownCount_ == 0 ? "No plugins yet. Open the scanner and scan."
+                                         : "No effects in this list. Instruments and generators are hidden.";
+        empty_.setText(emptyText, juce::dontSendNotification);
+        resized();
         tree_.repaint();
+    }
+
+    void setFormat(InsertFormatFilter format)
+    {
+        if (format_ == format)
+            return;
+        format_ = format;
+        rebuild();
     }
 
     AudioEngine& engine_;
     std::function<void(const juce::PluginDescription&)> onChoose_;
     juce::Array<juce::PluginDescription> types_;
+    int knownCount_ = 0;
     int firstMatch_ = -1;
+    bool hideInstruments_ = true;
+    InsertFormatFilter format_ = InsertFormatFilter::all;
+    juce::TextButton allButton_;
+    juce::TextButton auButton_;
+    juce::TextButton vstButton_;
     juce::TextEditor search_;
+    juce::Label hiddenNote_;
     juce::TreeView tree_;
     juce::Label empty_;
 };
@@ -735,9 +808,15 @@ public:
                 fill = fill.interpolatedWith(x32Hue(color), 0.28f);
             button.setColour(juce::TextButton::buttonColourId, fill);
             button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
-            button.setTooltip(source.error.isNotEmpty()
-                                  ? source.error
-                                  : "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.");
+            juce::String tip = "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.";
+            if (source.occupied)
+            {
+                tip << "\n" << source.inputChannels << " in / " << source.outputChannels << " out, latency "
+                    << source.latencySamples << " samples";
+                if (source.outputChannels > 1)
+                    tip << ", stereo on mono: " << stereoFoldToken(stereoFoldFromInt(source.stereoFold));
+            }
+            button.setTooltip(source.error.isNotEmpty() ? source.error : tip);
         }
         repaint();
     }
@@ -880,6 +959,14 @@ private:
         menu.addItem(1, "Open");
         menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
         menu.addItem(3, "Remove");
+        if (snap.outputChannels > 1)
+        {
+            juce::PopupMenu fold;
+            fold.addItem(10, "Use L", true, snap.stereoFold == 0);
+            fold.addItem(11, "Use R", true, snap.stereoFold == 1);
+            fold.addItem(12, "Sum (L+R)/2", true, snap.stereoFold == 2);
+            menu.addSubMenu("Stereo plugin on mono channel", fold);
+        }
         menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&slots_[static_cast<std::size_t>(slot)]),
                            [this, slot](int result)
                            {
@@ -890,6 +977,8 @@ private:
                                    engine_.setSlotBypassed(channel_, slot, ! current.bypassed);
                                else if (result == 3)
                                    engine_.removePlugin(channel_, slot);
+                               else if (result >= 10 && result <= 12)
+                                   engine_.setStereoFold(channel_, slot, result - 10);
                            });
     }
 

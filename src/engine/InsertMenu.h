@@ -29,6 +29,15 @@ struct InsertGroup
     std::vector<InsertPluginRow> plugins;
 };
 
+enum class InsertFormatFilter
+{
+    all,
+    audioUnit,
+    vst3
+};
+
+inline constexpr std::string_view kInstrumentsHiddenNote = "Instruments and generators are hidden.";
+
 inline bool textIsBlank(std::string_view text)
 {
     for (char character : text)
@@ -47,6 +56,16 @@ inline std::string shortPluginFormat(std::string_view format)
     if (containsFold(format, "vst3"))
         return "VST3";
     return std::string(format);
+}
+
+inline bool matchesInsertFormat(std::string_view format, InsertFormatFilter filter)
+{
+    if (filter == InsertFormatFilter::all)
+        return true;
+    const auto shortName = shortPluginFormat(format);
+    if (filter == InsertFormatFilter::audioUnit)
+        return shortName == "AU";
+    return shortName == "VST3";
 }
 
 inline std::string foldedKey(std::string_view text)
@@ -101,10 +120,13 @@ inline bool pluginShowsFormat(const std::vector<CatalogPlugin>& plugins, std::si
     return false;
 }
 
-// Manufacturers and plugins are alphabetical. The format is shown only when the
-// full catalogue has the same plugin in more than one format. An empty query
-// returns every plugin. Each word of a query must appear in the maker, name, or format.
-inline std::vector<InsertGroup> groupInsertPlugins(const std::vector<CatalogPlugin>& plugins, std::string_view query)
+// Manufacturers and plugins are alphabetical. When the full catalogue has the same
+// plugin as both AU and VST3, each row is tagged "(AU)" or "(VST3)". An empty query
+// returns every plugin that matches the format filter. Each word of a query must
+// appear in the maker, name, or format.
+inline std::vector<InsertGroup> groupInsertPlugins(const std::vector<CatalogPlugin>& plugins,
+                                                   std::string_view query,
+                                                   InsertFormatFilter formatFilter = InsertFormatFilter::all)
 {
     struct Pending
     {
@@ -117,6 +139,8 @@ inline std::vector<InsertGroup> groupInsertPlugins(const std::vector<CatalogPlug
     for (int index = 0; index < static_cast<int>(plugins.size()); ++index)
     {
         const auto& plugin = plugins[static_cast<std::size_t>(index)];
+        if (! matchesInsertFormat(plugin.format, formatFilter))
+            continue;
         const std::string haystack = plugin.manufacturer + " " + plugin.name + " " + plugin.format;
         if (! textIsBlank(query) && ! queryTokensMatch(haystack, query))
             continue;
@@ -172,7 +196,7 @@ inline std::vector<InsertGroup> groupInsertPlugins(const std::vector<CatalogPlug
             row.source = source;
             row.label = plugin.name;
             if (pluginShowsFormat(plugins, static_cast<std::size_t>(source)))
-                row.label += "  " + shortPluginFormat(plugin.format);
+                row.label += " (" + shortPluginFormat(plugin.format) + ")";
             built.plugins.push_back(std::move(row));
         }
         groups.push_back(std::move(built));

@@ -69,6 +69,72 @@ inline void takePluginChannel(float* mono,
     std::memcpy(mono, first, sizeof(float) * static_cast<std::size_t>(numSamples));
 }
 
+// Stereo plugin on a mono channel. Use L matches a mono destination in REAPER.
+// Sum is (L+R)/2, so identical sides stay at full level and inverted sides cancel.
+enum class StereoFold
+{
+    left = 0,
+    right = 1,
+    sum = 2
+};
+
+inline StereoFold stereoFoldFromInt(int value) noexcept
+{
+    if (value == static_cast<int>(StereoFold::right))
+        return StereoFold::right;
+    if (value == static_cast<int>(StereoFold::sum))
+        return StereoFold::sum;
+    return StereoFold::left;
+}
+
+inline const char* stereoFoldToken(StereoFold fold) noexcept
+{
+    if (fold == StereoFold::right)
+        return "R";
+    if (fold == StereoFold::sum)
+        return "sum";
+    return "L";
+}
+
+inline StereoFold stereoFoldFromToken(const char* token) noexcept
+{
+    if (token == nullptr)
+        return StereoFold::left;
+    if (token[0] == 'R' && token[1] == '\0')
+        return StereoFold::right;
+    if (token[0] == 's')
+        return StereoFold::sum;
+    return StereoFold::left;
+}
+
+inline void takeFoldedChannel(float* mono,
+                              const float* const* plugin,
+                              int outputChannels,
+                              int numSamples,
+                              StereoFold fold) noexcept
+{
+    if (mono == nullptr || plugin == nullptr || outputChannels <= 1 || numSamples <= 0)
+        return;
+    if (fold == StereoFold::left || plugin[1] == nullptr)
+    {
+        takePluginChannel(mono, plugin, outputChannels, numSamples);
+        return;
+    }
+    const float* right = plugin[1];
+    if (fold == StereoFold::right)
+    {
+        if (right != mono)
+            std::memcpy(mono, right, sizeof(float) * static_cast<std::size_t>(numSamples));
+        return;
+    }
+    const float* left = plugin[0];
+    for (int index = 0; index < numSamples; ++index)
+    {
+        const float leftSample = left != nullptr ? left[index] : 0.0f;
+        mono[index] = (leftSample + right[index]) * 0.5f;
+    }
+}
+
 inline bool sameFloatBits(float left, float right) noexcept
 {
     std::uint32_t a = 0;

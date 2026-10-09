@@ -26,6 +26,9 @@ struct SlotSnapshot
     bool bypassed = false;
     bool loading = false;
     int latencySamples = 0;
+    int inputChannels = 0;
+    int outputChannels = 0;
+    int stereoFold = 0;
     juce::String name;
     juce::String error;
 };
@@ -105,7 +108,9 @@ public:
                     const juce::MemoryBlock& state,
                     bool bypassed,
                     bool markDirty,
-                    bool openWhenReady = false);
+                    bool openWhenReady = false,
+                    int stereoFold = 0);
+    void setStereoFold(int channel, int slot, int fold);
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
@@ -147,6 +152,7 @@ private:
         int processChannels = 1;
         bool prepared = false;
         int latencySamples = 0;
+        int stereoFold = 0;
     };
 
     struct SlotModel
@@ -167,6 +173,7 @@ private:
                     bool markDirty,
                     bool bypassed,
                     bool openWhenReady,
+                    int stereoFold,
                     juce::PluginDescription description,
                     juce::MemoryBlock state,
                     std::unique_ptr<juce::AudioPluginInstance> instance,
@@ -192,7 +199,8 @@ private:
                    juce::MemoryBlock state,
                    bool bypassed,
                    bool markDirty,
-                   bool openWhenReady);
+                   bool openWhenReady,
+                   int stereoFold);
     void enqueueChannel(int channel, std::function<void()> work, bool asynchronous);
     void pumpChannel(int channel);
     void finishChannelWork(int channel, std::uint64_t ticket);
@@ -231,6 +239,9 @@ private:
     Routing routing_ {};
     double sampleRate_ = 48000.0;
     int blockSize_ = 512;
+    std::atomic<int> seenCallback_ { 0 };
+    std::atomic<int> seenStreak_ { 0 };
+    std::atomic<int> reprepareBlock_ { 0 };
     std::uint64_t ticketSource_ = 0;
     bool restoring_ = false;
 

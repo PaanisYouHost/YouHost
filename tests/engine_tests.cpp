@@ -18,6 +18,7 @@
 #include "engine/TakePlan.h"
 #include "engine/CrashJournal.h"
 #include "engine/DeviceWatch.h"
+#include "engine/HostPath.h"
 #include "engine/InsertMenu.h"
 #include "engine/PluginMoves.h"
 #include "engine/StallWatch.h"
@@ -555,10 +556,14 @@ void testScanOrderSkipsWavesAndHidesBuiltIns()
     youhost::orderScanCandidates(jobs);
     CHECK(jobs[0].identifier.find("Defeedback") != std::string::npos);
 
-    CHECK(! youhost::showInInsertList("Apple", "AudioUnit:Effects/aufx,appl", false, 2, false, false));
-    CHECK(youhost::showInInsertList("Apple", "AudioUnit:Effects/aufx,appl", false, 2, true, false));
-    CHECK(! youhost::showInInsertList("Alpha Labs", "Defeedback", true, 0, false, false));
-    CHECK(youhost::showInInsertList("Alpha Labs", "/Library/Audio/Plug-Ins/VST3/Defeedback.vst3", false, 1, false, false));
+    CHECK(youhost::isAppleBuiltIn("Apple", "AudioUnit:Effects/aufx,greq,appl"));
+    CHECK(youhost::showInInsertList("AudioUnit:Effects/aufx,greq,appl", "Effect", false, false));
+    CHECK(! youhost::showInInsertList("AudioUnit:Synths/aumu,dls ,appl", "Synth", true, false));
+    CHECK(youhost::showInInsertList("AudioUnit:Synths/aumu,dls ,appl", "Synth", true, true));
+    CHECK(! youhost::showInInsertList("AudioUnit:Generators/augn,afil,appl", "Generator", false, false));
+    CHECK(youhost::showInInsertList("/Library/Audio/Plug-Ins/VST3/Defeedback.vst3", "Fx|Delay", false, false));
+    CHECK(youhost::showInInsertList("/Library/Audio/Plug-Ins/VST3/Defeedback.vst3", "", false, false));
+    CHECK(! youhost::showInInsertList("/Library/Audio/Plug-Ins/VST3/Synth.vst3", "Instrument|Synth", false, false));
 }
 
 void testTakeImportGroups()
@@ -677,12 +682,11 @@ void testInsertMenuAndStall()
     CHECK(all.size() == 2);
     CHECK(all[0].manufacturer == "Alpha Labs");
     CHECK(all[0].plugins.size() == 1);
-    CHECK(all[0].plugins[0].label.find("AU") == std::string::npos);
+    CHECK(all[0].plugins[0].label == "De-Feedback");
     CHECK(all[1].manufacturer == "FabFilter");
     CHECK(all[1].plugins.size() == 3);
-    CHECK(all[1].plugins[0].label.find("Pro-Q 3") != std::string::npos);
-    CHECK(all[1].plugins[0].label.find("AU") != std::string::npos);
-    CHECK(all[1].plugins[1].label.find("VST3") != std::string::npos);
+    CHECK(all[1].plugins[0].label == "Pro-Q 3 (AU)");
+    CHECK(all[1].plugins[1].label == "Pro-Q 3 (VST3)");
     CHECK(all[1].plugins[2].label.find("Saturn") != std::string::npos);
 
     const auto fab = youhost::groupInsertPlugins(plugins, "FAB");
@@ -696,6 +700,15 @@ void testInsertMenuAndStall()
     const auto grouped = youhost::groupInsertPlugins(unknown, "");
     CHECK(grouped.size() == 1);
     CHECK(grouped[0].manufacturer == "Unknown");
+
+    const auto auOnly = youhost::groupInsertPlugins(plugins, "", youhost::InsertFormatFilter::audioUnit);
+    CHECK(auOnly.size() == 2);
+    CHECK(auOnly[1].plugins.size() == 1);
+    CHECK(auOnly[1].plugins[0].label == "Pro-Q 3 (AU)");
+    const auto vstOnly = youhost::groupInsertPlugins(plugins, "", youhost::InsertFormatFilter::vst3);
+    CHECK(vstOnly.size() == 1);
+    CHECK(vstOnly[0].plugins.size() == 2);
+    CHECK(vstOnly[0].plugins[0].label == "Pro-Q 3 (VST3)");
 }
 
 void testCrashJournal()
@@ -733,6 +746,25 @@ void testDeviceWatch()
     CHECK(youhost::usableChannelCount(256) == 128);
     CHECK(youhost::usableChannelCount(48) == 48);
     CHECK(youhost::usableChannelCount(-1) == 0);
+
+    bool wing[48];
+    for (int index = 0; index < 48; ++index)
+        wing[index] = index < 47;
+    const auto shortOut = youhost::inspectChannelMask(wing, 48);
+    CHECK(shortOut.reported == 48);
+    CHECK(shortOut.active == 47);
+    CHECK(shortOut.solidPrefix);
+    CHECK(youhost::trailingOutputMissing(shortOut));
+    wing[10] = false;
+    const auto hole = youhost::inspectChannelMask(wing, 48);
+    CHECK(! hole.solidPrefix);
+    CHECK(! youhost::trailingOutputMissing(hole));
+    bool full[48];
+    for (bool& bit : full)
+        bit = true;
+    const auto allOut = youhost::inspectChannelMask(full, 48);
+    CHECK(allOut.active == 48);
+    CHECK(! youhost::trailingOutputMissing(allOut));
 }
 
 void testMergePeaks()
@@ -841,6 +873,61 @@ void testDryPathIsBitIdentical()
     CHECK(! youhost::pluginSlotRuns(true, false, true));
     CHECK(youhost::pluginSlotRuns(true, false, false));
     CHECK(! youhost::pluginSlotRuns(false, false, false));
+
+    float signal[4] = { 1.0f, 0.5f, -0.25f, 0.0f };
+    float silent[4] = {};
+    float inverted[4] = { -1.0f, -0.5f, 0.25f, 0.0f };
+    const float* identical[2] = { signal, signal };
+    float foldedStereo[4];
+    youhost::takeFoldedChannel(foldedStereo, identical, 2, 4, youhost::StereoFold::left);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 1.0f));
+    CHECK(youhost::sameFloatBits(foldedStereo[1], 0.5f));
+    youhost::takeFoldedChannel(foldedStereo, identical, 2, 4, youhost::StereoFold::sum);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 1.0f));
+    const float* half[2] = { signal, silent };
+    youhost::takeFoldedChannel(foldedStereo, half, 2, 4, youhost::StereoFold::left);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 1.0f));
+    youhost::takeFoldedChannel(foldedStereo, half, 2, 4, youhost::StereoFold::sum);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 0.5f));
+    const float* opposite[2] = { signal, inverted };
+    youhost::takeFoldedChannel(foldedStereo, opposite, 2, 4, youhost::StereoFold::left);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 1.0f));
+    youhost::takeFoldedChannel(foldedStereo, opposite, 2, 4, youhost::StereoFold::sum);
+    CHECK(youhost::sameFloatBits(foldedStereo[0], 0.0f));
+
+    youhost::OpenedLayout opened;
+    opened.openInputs = 2;
+    opened.openOutputs = 2;
+    opened.mono = true;
+    opened.side = true;
+    opened.stereo = true;
+    CHECK(youhost::chooseOpenedLayout(opened) == youhost::ChosenLayout::stereo);
+    opened.openInputs = 1;
+    opened.openOutputs = 1;
+    CHECK(youhost::chooseOpenedLayout(opened) == youhost::ChosenLayout::mono);
+    opened.openInputs = 0;
+    opened.openOutputs = 0;
+    opened.mono = false;
+    CHECK(youhost::chooseOpenedLayout(opened) == youhost::ChosenLayout::stereo);
+
+    CHECK(youhost::pluginBlockFeedsDirect(128, 128));
+    CHECK(youhost::pluginBlockFeedsDirect(256, 128));
+    CHECK(! youhost::pluginBlockFeedsDirect(64, 128));
+    CHECK(youhost::fedSamplesAfter(128, 64, 1) == 0);
+    CHECK(youhost::fedSamplesAfter(128, 64, 2) == 64);
+    CHECK(youhost::fedSamplesAfter(128, 64, 4) == 192);
+
+    float ring[4] = {};
+    int ringWrite = 0;
+    int count = 0;
+    const float pushed[3] = { 1.0f, 2.0f, 3.0f };
+    youhost::ringPush(ring, 4, ringWrite, count, pushed, 3);
+    float popped[3] = {};
+    int read = 0;
+    CHECK(youhost::ringPop(ring, 4, read, count, popped, 2) == 2);
+    CHECK(youhost::sameFloatBits(popped[0], 1.0f));
+    CHECK(youhost::sameFloatBits(popped[1], 2.0f));
+    CHECK(count == 1);
 }
 
 void testOutputGainAndListen()

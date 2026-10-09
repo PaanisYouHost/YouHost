@@ -671,6 +671,8 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
 
 void AudioEngine::audioDeviceStopped()
 {
+    if (catalogue_ != nullptr)
+        catalogue_->setDeviceOpen(false);
     deviceOpen_.store(false, std::memory_order_relaxed);
     StallClock::get().audioLive.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
@@ -761,6 +763,49 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     pollDeviceStats();
 }
 
+void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
+{
+    if (catalogue_ != nullptr)
+        catalogue_->setDeviceOpen(true);
+    if (wideningOutputs_)
+        return;
+
+    const auto inputNames = device.getInputChannelNames();
+    const auto outputNames = device.getOutputChannelNames();
+    const auto inputMask = device.getActiveInputChannels();
+    const auto outputMask = device.getActiveOutputChannels();
+    const int reported = std::min(outputNames.size(), kMaxChannels);
+    bool open[kMaxChannels] {};
+    for (int index = 0; index < reported; ++index)
+        open[index] = outputMask[index];
+    const auto view = inspectChannelMask(open, reported);
+
+    juce::String line;
+    line << "device " << device.getName()
+         << " inputs reported " << inputNames.size()
+         << " active " << inputMask.countNumberOfSetBits()
+         << " outputs reported " << outputNames.size()
+         << " active " << outputMask.countNumberOfSetBits();
+    if (inputNames.size() > 0)
+        line << " in0 \"" << inputNames[0] << "\" inLast \"" << inputNames[inputNames.size() - 1] << "\"";
+    if (outputNames.size() > 0)
+        line << " out0 \"" << outputNames[0] << "\" outLast \"" << outputNames[outputNames.size() - 1] << "\"";
+    appendHostLog(settings_, line);
+
+    if (! trailingOutputMissing(view) || settings_.outputMaskWasWidened(device.getName(), view.reported))
+        return;
+
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup(setup);
+    setup.outputChannels.setBit(view.reported - 1, true);
+    setup.useDefaultOutputChannels = false;
+    settings_.rememberWidenedOutput(device.getName(), view.reported);
+    appendHostLog(settings_, "opened trailing output " + juce::String(view.reported) + " on " + device.getName());
+    wideningOutputs_ = true;
+    deviceManager_.setAudioDeviceSetup(setup, true);
+    wideningOutputs_ = false;
+}
+
 void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 {
     deviceName_ = device.getName();
@@ -777,7 +822,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const bool needPrepare = starting || rateChanged || bufferChanged;
 
     if (needPrepare || masksChanged)
+    {
         publishConfig(device);
+        noteChannelMasks(device);
+    }
     else
     {
         sampleRate_.store(rate, std::memory_order_relaxed);
@@ -1228,6 +1276,12 @@ void AudioEngine::transferPlugin(int fromChannel, int fromSlot, int toChannel, i
 {
     if (rack_ != nullptr)
         rack_->transferPlugin(fromChannel, fromSlot, toChannel, toSlot, copy);
+}
+
+void AudioEngine::setStereoFold(int channel, int slot, int fold)
+{
+    if (rack_ != nullptr)
+        rack_->setStereoFold(channel, slot, fold);
 }
 
 void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)

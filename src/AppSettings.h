@@ -183,22 +183,6 @@ public:
         }
     }
 
-    bool loadShowAppleInserts()
-    {
-        if (auto* settings = properties_.getUserSettings())
-            return settings->getBoolValue("showAppleInserts", false);
-        return false;
-    }
-
-    void saveShowAppleInserts(bool enabled)
-    {
-        if (auto* settings = properties_.getUserSettings())
-        {
-            settings->setValue("showAppleInserts", enabled);
-            settings->saveIfNeeded();
-        }
-    }
-
     bool loadShowInstrumentInserts()
     {
         if (auto* settings = properties_.getUserSettings())
@@ -211,6 +195,25 @@ public:
         if (auto* settings = properties_.getUserSettings())
         {
             settings->setValue("showInstrumentInserts", enabled);
+            settings->saveIfNeeded();
+        }
+    }
+
+    bool outputMaskWasWidened(const juce::String& device, int reported)
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("widenedOutputs").contains(device + "|" + juce::String(reported));
+        return false;
+    }
+
+    void rememberWidenedOutput(const juce::String& device, int reported)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            const auto key = device + "|" + juce::String(reported);
+            auto existing = settings->getValue("widenedOutputs");
+            if (! existing.contains(key))
+                settings->setValue("widenedOutputs", existing.isEmpty() ? key : existing + "," + key);
             settings->saveIfNeeded();
         }
     }

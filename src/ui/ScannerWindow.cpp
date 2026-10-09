@@ -59,8 +59,8 @@ public:
         addAndMakeVisible(fileButton_);
         addAndMakeVisible(selectedButton_);
         addAndMakeVisible(wavesButton_);
-        addAndMakeVisible(appleButton_);
         addAndMakeVisible(instrumentButton_);
+        addAndMakeVisible(scanHint_);
         addAndMakeVisible(status_);
         addAndMakeVisible(knownTitle_);
         addAndMakeVisible(failedTitle_);
@@ -76,11 +76,9 @@ public:
         fileButton_.setButtonText("Scan file...");
         selectedButton_.setButtonText("Rescan selected");
         wavesButton_.setButtonText("Scan Waves shells");
-        appleButton_.setButtonText("Show Apple Audio Units in inserts");
         instrumentButton_.setButtonText("Show instruments in inserts");
 
         wavesButton_.setToggleState(engine_.pluginCatalogue().scanWavesShells(), juce::dontSendNotification);
-        appleButton_.setToggleState(engine_.pluginCatalogue().showAppleInInserts(), juce::dontSendNotification);
         instrumentButton_.setToggleState(engine_.pluginCatalogue().showInstrumentsInInserts(), juce::dontSendNotification);
 
         scanButton_.onClick = [this] { engine_.pluginCatalogue().scanNew(); };
@@ -98,10 +96,6 @@ public:
         {
             engine_.pluginCatalogue().setScanWavesShells(wavesButton_.getToggleState());
         };
-        appleButton_.onClick = [this]
-        {
-            engine_.pluginCatalogue().setShowAppleInInserts(appleButton_.getToggleState());
-        };
         instrumentButton_.onClick = [this]
         {
             engine_.pluginCatalogue().setShowInstrumentsInInserts(instrumentButton_.getToggleState());
@@ -109,7 +103,7 @@ public:
 
         for (auto* button : { &scanButton_, &rescanButton_, &stopButton_, &clearButton_, &fileButton_, &selectedButton_ })
             button->setMouseClickGrabsKeyboardFocus(false);
-        for (auto* toggle : { &wavesButton_, &appleButton_, &instrumentButton_ })
+        for (auto* toggle : { &wavesButton_, &instrumentButton_ })
         {
             toggle->setMouseClickGrabsKeyboardFocus(false);
             toggle->setClickingTogglesState(true);
@@ -133,8 +127,11 @@ public:
         suspiciousList_.setColour(juce::ListBox::backgroundColourId, theme::background);
 
         wavesButton_.setTooltip("Off by default. A Waves shell lists hundreds of plugins and is scanned last when this is on.");
-        appleButton_.setTooltip("Apple's built-in Audio Units stay out of the insert list until this is on.");
-        instrumentButton_.setTooltip("Instruments and plugins with no audio input stay out of the insert list until this is on.");
+        instrumentButton_.setTooltip("Effects are always listed, including Apple Audio Units and VST3. Instruments and generators stay out of the chooser until this is on.");
+        scanHint_.setText("Scanning may cause dropouts - don't scan during a show.", juce::dontSendNotification);
+        scanHint_.setFont(juce::Font(juce::FontOptions(12.0f)));
+        scanHint_.setColour(juce::Label::textColourId, theme::amber);
+        scanHint_.setJustificationType(juce::Justification::centredLeft);
     }
 
     void refresh()
@@ -234,8 +231,8 @@ public:
         }
         area.removeFromTop(6);
         wavesButton_.setBounds(area.removeFromTop(22));
-        appleButton_.setBounds(area.removeFromTop(22));
         instrumentButton_.setBounds(area.removeFromTop(22));
+        scanHint_.setBounds(area.removeFromTop(22));
         area.removeFromTop(6);
         progressArea_ = area.removeFromTop(14);
         area.removeFromTop(6);
@@ -304,8 +301,8 @@ private:
     juce::TextButton fileButton_;
     juce::TextButton selectedButton_;
     juce::ToggleButton wavesButton_;
-    juce::ToggleButton appleButton_;
     juce::ToggleButton instrumentButton_;
+    juce::Label scanHint_;
     juce::Label status_;
     juce::Label knownTitle_;
     juce::Label failedTitle_;

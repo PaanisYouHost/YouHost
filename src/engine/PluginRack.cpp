@@ -1,5 +1,7 @@
 #include "PluginRack.h"
 #include "AppSettings.h"
+#include "HostLog.h"
+#include "HostPath.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
 #include "PluginMoves.h"
@@ -63,43 +65,218 @@ struct BusChoice
     int inputChannels = 0;
     int outputChannels = 0;
     bool ok = false;
+    bool supportMono = false;
+    bool supportSide = false;
+    bool supportStereo = false;
+    int openInputs = 0;
+    int openOutputs = 0;
+    ChosenLayout chosen = ChosenLayout::none;
 };
 
-// Mono in/out first, then mono in with a stereo out, then stereo in/out.
-// A mono channel must not be forced into a stereo input: that duplicates the
-// signal, and a plugin which then subtracts or offsets the two sides high-passes it.
+bool busesMatch(juce::AudioPluginInstance& instance, int inCh, int outCh)
+{
+    juce::AudioProcessor::BusesLayout layout;
+    const int inputs = instance.getBusCount(true);
+    const int outputs = instance.getBusCount(false);
+    layout.inputBuses.resize(inputs);
+    layout.outputBuses.resize(outputs);
+    const auto inSet = inCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    const auto outSet = outCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    for (int bus = 0; bus < inputs; ++bus)
+        layout.inputBuses.getReference(bus) = bus == 0 ? inSet : juce::AudioChannelSet::disabled();
+    for (int bus = 0; bus < outputs; ++bus)
+        layout.outputBuses.getReference(bus) = bus == 0 ? outSet : juce::AudioChannelSet::disabled();
+    if (! instance.checkBusesLayoutSupported(layout))
+        return false;
+    if (! instance.setBusesLayout(layout))
+        return false;
+    int width = 0;
+    if (! layoutStaysSafe(instance, width))
+        return false;
+    return instance.getTotalNumInputChannels() == inCh
+           && instance.getTotalNumOutputChannels() == outCh
+           && width == std::max(inCh, outCh);
+}
+
+// Keep the layout the plugin opened with. A stereo effect that also accepts
+// mono stays stereo: both inputs get the same samples and the mono output is L.
+// Fallback, when that layout cannot be set, is stereo, then mono, then 1-in/2-out.
 BusChoice configureBuses(juce::AudioPluginInstance& instance)
 {
-    auto tryLayout = [&instance](int inCh, int outCh)
+    BusChoice choice;
+    choice.openInputs = instance.getTotalNumInputChannels();
+    choice.openOutputs = instance.getTotalNumOutputChannels();
+
+    auto remember = instance.getBusesLayout();
+    choice.supportMono = busesMatch(instance, 1, 1);
+    instance.setBusesLayout(remember);
+    choice.supportSide = busesMatch(instance, 1, 2);
+    instance.setBusesLayout(remember);
+    choice.supportStereo = busesMatch(instance, 2, 2);
+    instance.setBusesLayout(remember);
+
+    OpenedLayout offer;
+    offer.openInputs = choice.openInputs;
+    offer.openOutputs = choice.openOutputs;
+    offer.mono = choice.supportMono;
+    offer.side = choice.supportSide;
+    offer.stereo = choice.supportStereo;
+    const ChosenLayout preferred = chooseOpenedLayout(offer);
+
+    auto apply = [&](ChosenLayout layout)
     {
-        juce::AudioProcessor::BusesLayout layout;
-        const int inputs = instance.getBusCount(true);
-        const int outputs = instance.getBusCount(false);
-        layout.inputBuses.resize(inputs);
-        layout.outputBuses.resize(outputs);
-        const auto inSet = inCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
-        const auto outSet = outCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
-        for (int bus = 0; bus < inputs; ++bus)
-            layout.inputBuses.getReference(bus) = bus == 0 ? inSet : juce::AudioChannelSet::disabled();
-        for (int bus = 0; bus < outputs; ++bus)
-            layout.outputBuses.getReference(bus) = bus == 0 ? outSet : juce::AudioChannelSet::disabled();
-        if (! instance.checkBusesLayoutSupported(layout) || ! instance.setBusesLayout(layout))
+        int inCh = 0;
+        int outCh = 0;
+        if (layout == ChosenLayout::mono)
+        {
+            inCh = 1;
+            outCh = 1;
+        }
+        else if (layout == ChosenLayout::side)
+        {
+            inCh = 1;
+            outCh = 2;
+        }
+        else if (layout == ChosenLayout::stereo)
+        {
+            inCh = 2;
+            outCh = 2;
+        }
+        else
+        {
             return false;
-        int width = 0;
-        if (! layoutStaysSafe(instance, width))
+        }
+        if (! busesMatch(instance, inCh, outCh))
             return false;
-        return instance.getTotalNumInputChannels() == inCh
-               && instance.getTotalNumOutputChannels() == outCh
-               && width == std::max(inCh, outCh);
+        choice.inputChannels = inCh;
+        choice.outputChannels = outCh;
+        choice.chosen = layout;
+        choice.ok = true;
+        return true;
     };
 
-    if (tryLayout(1, 1))
-        return { 1, 1, true };
-    if (tryLayout(1, 2))
-        return { 1, 2, true };
-    if (tryLayout(2, 2))
-        return { 2, 2, true };
-    return {};
+    if (apply(preferred))
+        return choice;
+    if (apply(ChosenLayout::stereo) || apply(ChosenLayout::mono) || apply(ChosenLayout::side))
+        return choice;
+    instance.setBusesLayout(remember);
+    return choice;
+}
+
+juce::String dbText(float db)
+{
+    return juce::String(db, 1);
+}
+
+void logHostedPlugin(AppSettings* settings,
+                     juce::AudioPluginInstance& instance,
+                     const juce::PluginDescription& description,
+                     const BusChoice& buses,
+                     StereoFold fold,
+                     double rate,
+                     int block)
+{
+    if (settings == nullptr || block <= 0)
+        return;
+
+    juce::MemoryBlock saved;
+    instance.getStateInformation(saved);
+
+    constexpr int cap = 8192;
+    const int latency = instance.getLatencySamples();
+    const int skip = probeSkipSamples(latency, cap);
+    const int tone = std::min(block * 4, std::max(64, cap - skip));
+    const int total = skip + tone;
+    const int padded = ((total + block - 1) / block) * block;
+    std::vector<float> mono(static_cast<std::size_t>(padded), 0.0f);
+    std::vector<float> left(mono.size(), 0.0f);
+    std::vector<float> right(mono.size(), 0.0f);
+    float* pointers[2] = { left.data(), right.data() };
+    juce::MidiBuffer midi;
+    const int width = std::max(buses.inputChannels, buses.outputChannels);
+
+    auto render = [&](float frequency)
+    {
+        std::fill(mono.begin(), mono.end(), 0.0f);
+        fillProbeTone(mono.data(), total, rate, frequency, 0.25f);
+        for (int offset = 0; offset < padded; offset += block)
+        {
+            if (width <= 1)
+            {
+                std::memcpy(left.data(), mono.data() + offset, sizeof(float) * static_cast<std::size_t>(block));
+                juce::AudioBuffer<float> view(pointers, 1, block);
+                midi.clear();
+                instance.processBlock(view, midi);
+                std::memcpy(mono.data() + offset, left.data(), sizeof(float) * static_cast<std::size_t>(block));
+            }
+            else
+            {
+                stagePluginChannels(pointers, buses.inputChannels, buses.outputChannels, mono.data() + offset, block);
+                juce::AudioBuffer<float> view(pointers, width, block);
+                midi.clear();
+                instance.processBlock(view, midi);
+                takeFoldedChannel(mono.data() + offset, pointers, buses.outputChannels, block, fold);
+            }
+        }
+        const float* tail = mono.data() + skip;
+        return amplitudeDb(meanSquare(tail, tone));
+    };
+
+    const float lowDb = render(80.0f);
+    const float highDb = render(6000.0f);
+    float leftDb = lowDb;
+    float rightDb = lowDb;
+    float sumDb = lowDb;
+    if (width > 1)
+    {
+        std::fill(mono.begin(), mono.end(), 0.0f);
+        std::fill(left.begin(), left.end(), 0.0f);
+        std::fill(right.begin(), right.end(), 0.0f);
+        fillProbeTone(mono.data(), total, rate, 1000.0f, 0.25f);
+        std::memcpy(left.data(), mono.data(), sizeof(float) * static_cast<std::size_t>(total));
+        std::memcpy(right.data(), mono.data(), sizeof(float) * static_cast<std::size_t>(total));
+        for (int offset = 0; offset < padded; offset += block)
+        {
+            float* pair[2] = { left.data() + offset, right.data() + offset };
+            juce::AudioBuffer<float> view(pair, width, block);
+            midi.clear();
+            instance.processBlock(view, midi);
+        }
+        const float* leftTail = left.data() + skip;
+        const float* rightTail = right.data() + skip;
+        leftDb = amplitudeDb(meanSquare(leftTail, tone));
+        rightDb = amplitudeDb(meanSquare(rightTail, tone));
+        std::vector<float> summed(static_cast<std::size_t>(tone), 0.0f);
+        for (int index = 0; index < tone; ++index)
+            summed[static_cast<std::size_t>(index)] = (leftTail[index] + rightTail[index]) * 0.5f;
+        sumDb = amplitudeDb(meanSquare(summed.data(), tone));
+    }
+
+    instance.reset();
+    if (saved.getSize() > 0)
+        instance.setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+    instance.reset();
+
+    const auto inDb = amplitudeDb(0.25f * 0.25f * 0.5f);
+    juce::String line;
+    line << "plugin " << description.name
+         << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
+         << " opened " << buses.openInputs << "/" << buses.openOutputs
+         << " supports 1/1=" << (buses.supportMono ? "yes" : "no")
+         << " 1/2=" << (buses.supportSide ? "yes" : "no")
+         << " 2/2=" << (buses.supportStereo ? "yes" : "no")
+         << " chose " << chosenLayoutName(buses.chosen)
+         << " fold " << stereoFoldToken(fold)
+         << " rate " << juce::String(rate, 0)
+         << " block " << block
+         << " latency " << instance.getLatencySamples()
+         << " probe in " << dbText(inDb)
+         << " dB low " << dbText(lowDb)
+         << " dB high " << dbText(highDb)
+         << " dB L " << dbText(leftDb)
+         << " dB R " << dbText(rightDb)
+         << " dB sum " << dbText(sumDb) << " dB";
+    appendHostLog(*settings, line);
 }
 
 } // namespace
@@ -113,6 +290,7 @@ struct PluginRack::LiveGraph
         int inputChannels = 1;
         int outputChannels = 1;
         int processChannels = 1;
+        int stereoFold = 0;
         bool prepared = false;
     };
 
@@ -126,6 +304,16 @@ struct PluginRack::LiveGraph
     std::array<std::array<float*, kScratchCap>, kMaxChannels> scratchPtrs {};
     std::array<juce::MidiBuffer, kMaxChannels> midi {};
     int maxBlock = 0;
+    int feedCapacity = 0;
+    std::vector<float> feedIn;
+    std::vector<float> feedOut;
+    std::vector<float> blockWork;
+    std::array<int, kMaxChannels> inCount {};
+    std::array<int, kMaxChannels> inRead {};
+    std::array<int, kMaxChannels> inWrite {};
+    std::array<int, kMaxChannels> outCount {};
+    std::array<int, kMaxChannels> outRead {};
+    std::array<int, kMaxChannels> outWrite {};
     std::vector<std::shared_ptr<HostedPlugin>> keepAlive;
 };
 
@@ -380,6 +568,13 @@ void PluginRack::timerCallback()
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
+    const int wantBlock = reprepareBlock_.exchange(0, std::memory_order_relaxed);
+    if (wantBlock > 0 && wantBlock != blockSize_ && wantBlock <= 8192)
+    {
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "callback " + juce::String(wantBlock) + " samples, prepared " + juce::String(blockSize_) + ", re-preparing plugins");
+        prepare(sampleRate_, wantBlock, routing_, workgroup_);
+    }
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         reapUnlocked();
@@ -409,6 +604,24 @@ void PluginRack::process(float* const* outputs,
                          std::uint64_t enabledLow,
                          std::uint64_t enabledHigh)
 {
+    if (numSamples > 0 && blockSize_ > 0 && numSamples != blockSize_)
+    {
+        const int previous = seenCallback_.load(std::memory_order_relaxed);
+        if (previous == numSamples)
+            seenStreak_.fetch_add(1, std::memory_order_relaxed);
+        else
+        {
+            seenCallback_.store(numSamples, std::memory_order_relaxed);
+            seenStreak_.store(1, std::memory_order_relaxed);
+        }
+        if (seenStreak_.load(std::memory_order_relaxed) >= 6)
+            reprepareBlock_.store(numSamples, std::memory_order_relaxed);
+    }
+    else if (numSamples == blockSize_)
+    {
+        seenStreak_.store(0, std::memory_order_relaxed);
+    }
+
     StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
     const auto started = steadyNs();
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
@@ -478,9 +691,11 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
     if (output == nullptr || channel < 0 || channel >= kMaxChannels)
         return;
 
-    const bool canProcess = numSamples > 0 && numSamples <= graph.maxBlock;
-    if (canProcess)
+    const int prepared = graph.maxBlock;
+    auto runPlugins = [&graph, channel](float* buffer, int count)
     {
+        if (buffer == nullptr || count <= 0)
+            return;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& live = graph.slots[channel][slot];
@@ -505,7 +720,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             float* pointers[LiveGraph::kScratchCap] {};
             if (width == 1)
             {
-                pointers[0] = output;
+                pointers[0] = buffer;
             }
             else
             {
@@ -524,17 +739,16 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 }
                 // Stereo-in gets two identical copies (no sample offset).
                 // Mono-in/stereo-out gets one copy and a silent second channel.
-                // The second output is never added or subtracted afterwards.
-                stagePluginChannels(pointers, inputs, outputsN, output, numSamples);
+                stagePluginChannels(pointers, inputs, outputsN, buffer, count);
             }
 
             const auto began = steadyNs();
-            juce::AudioBuffer<float> view(pointers, width, numSamples);
+            juce::AudioBuffer<float> view(pointers, width, count);
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
             midi.clear();
             instance->processBlock(view, midi);
             if (width != 1)
-                takePluginChannel(output, pointers, outputsN, numSamples);
+                takeFoldedChannel(buffer, pointers, outputsN, count, stereoFoldFromInt(live.stereoFold));
             if (gate != nullptr)
             {
                 gate->cpuNs.fetch_add(steadyNs() - began, std::memory_order_relaxed);
@@ -542,6 +756,44 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 gate->depth.fetch_sub(1, std::memory_order_release);
             }
         }
+    };
+
+    if (prepared > 0 && pluginBlockFeedsDirect(numSamples, prepared))
+    {
+        const int chunks = numSamples / prepared;
+        for (int chunk = 0; chunk < chunks; ++chunk)
+            runPlugins(output + static_cast<std::ptrdiff_t>(chunk * prepared), prepared);
+    }
+    else if (prepared > 0 && numSamples > 0 && numSamples < prepared && graph.feedCapacity >= prepared)
+    {
+        const int channelIndex = channel;
+        float* inRing = graph.feedIn.data() + static_cast<std::size_t>(channelIndex * graph.feedCapacity);
+        float* outRing = graph.feedOut.data() + static_cast<std::size_t>(channelIndex * graph.feedCapacity);
+        float* work = graph.blockWork.data() + static_cast<std::size_t>(channelIndex * prepared);
+        auto& inCount = graph.inCount[static_cast<std::size_t>(channelIndex)];
+        auto& inRead = graph.inRead[static_cast<std::size_t>(channelIndex)];
+        auto& inWrite = graph.inWrite[static_cast<std::size_t>(channelIndex)];
+        auto& outCount = graph.outCount[static_cast<std::size_t>(channelIndex)];
+        auto& outRead = graph.outRead[static_cast<std::size_t>(channelIndex)];
+        auto& outWrite = graph.outWrite[static_cast<std::size_t>(channelIndex)];
+        ringPush(inRing, graph.feedCapacity, inWrite, inCount, output, numSamples);
+        while (inCount >= prepared)
+        {
+            if (ringRead(inRing, graph.feedCapacity, inRead, inCount, work, prepared) != prepared)
+                break;
+            ringDrop(graph.feedCapacity, inRead, inCount, prepared);
+            runPlugins(work, prepared);
+            ringPush(outRing, graph.feedCapacity, outWrite, outCount, work, prepared);
+        }
+        const int got = ringPop(outRing, graph.feedCapacity, outRead, outCount, output, numSamples);
+        if (got < numSamples)
+            std::memset(output + got, 0, sizeof(float) * static_cast<std::size_t>(numSamples - got));
+    }
+    else if (prepared > 0 && numSamples > prepared)
+    {
+        const int chunks = numSamples / prepared;
+        for (int chunk = 0; chunk < chunks; ++chunk)
+            runPlugins(output + static_cast<std::ptrdiff_t>(chunk * prepared), prepared);
     }
 
     auto& line = graph.delay[static_cast<std::size_t>(channel)];
@@ -763,8 +1015,13 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         for (auto& plugin : hosted)
-            if (plugin != nullptr)
-                plugin->prepared = plugin->instance != nullptr;
+        {
+            if (plugin == nullptr)
+                continue;
+            plugin->prepared = plugin->instance != nullptr;
+            if (plugin->instance != nullptr)
+                plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
+        }
         publishUnlocked();
     }
     blockProcessing_.store(false, std::memory_order_release);
@@ -789,7 +1046,8 @@ void PluginRack::loadPlugin(int channel,
                             const juce::MemoryBlock& state,
                             bool bypassed,
                             bool markDirty,
-                            bool openWhenReady)
+                            bool openWhenReady,
+                            int stereoFold)
 {
     if (! validSlot(channel, slot))
         return;
@@ -800,11 +1058,11 @@ void PluginRack::loadPlugin(int channel,
         {
             auto alive = alive_;
             juce::MessageManager::callAsync(
-                [this, alive, channel, slot, description, state, bypassed, markDirty, openWhenReady]
+                [this, alive, channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold]
                 {
                     if (! alive->load(std::memory_order_acquire))
                         return;
-                    loadPlugin(channel, slot, description, state, bypassed, markDirty, openWhenReady);
+                    loadPlugin(channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold);
                 });
             return;
         }
@@ -812,9 +1070,9 @@ void PluginRack::loadPlugin(int channel,
 
     // Loads on one channel run one at a time. A second load waits behind this one.
     enqueueChannel(channel,
-                   [this, channel, slot, description, state, bypassed, markDirty, openWhenReady]
+                   [this, channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold]
                    {
-                       beginLoad(channel, slot, description, state, bypassed, markDirty, openWhenReady);
+                       beginLoad(channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold);
                    },
                    true);
 }
@@ -825,7 +1083,8 @@ void PluginRack::beginLoad(int channel,
                            juce::MemoryBlock state,
                            bool bypassed,
                            bool markDirty,
-                           bool openWhenReady)
+                           bool openWhenReady,
+                           int stereoFold)
 {
     if (! validSlot(channel, slot))
     {
@@ -881,7 +1140,7 @@ void PluginRack::beginLoad(int channel,
         description,
         rate,
         block,
-        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, description, state](
+        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state](
             std::unique_ptr<juce::AudioPluginInstance> instance,
             const juce::String& error)
         {
@@ -891,7 +1150,7 @@ void PluginRack::beginLoad(int channel,
                     destroyInstance(nullptr, instance.release());
                 return;
             }
-            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, description, state, std::move(instance), error);
+            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, std::move(instance), error);
         });
 }
 
@@ -901,6 +1160,7 @@ void PluginRack::finishLoad(int channel,
                             bool markDirty,
                             bool bypassed,
                             bool openWhenReady,
+                            int stereoFold,
                             juce::PluginDescription description,
                             juce::MemoryBlock state,
                             std::unique_ptr<juce::AudioPluginInstance> instance,
@@ -970,7 +1230,9 @@ void PluginRack::finishLoad(int channel,
         hosted->outputChannels = buses.outputChannels;
         hosted->processChannels = std::max(buses.inputChannels, buses.outputChannels);
         hosted->prepared = true;
+        hosted->stereoFold = static_cast<int>(stereoFoldFromInt(stereoFold));
         hosted->latencySamples = clampLatencySamples(hosted->instance->getLatencySamples());
+        logHostedPlugin(settings_, *hosted->instance, hosted->description, buses, stereoFoldFromInt(hosted->stereoFold), rate, block);
     }
     else if (problem.isEmpty())
     {
@@ -1200,7 +1462,25 @@ void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, in
     sourcePlugin->instance->getStateInformation(sourcePlugin->state);
     state = sourcePlugin->state;
     resumeGate(*sourcePlugin->gate);
-    loadPlugin(toChannel, toSlot, description, state, bypassed, true, false);
+    loadPlugin(toChannel, toSlot, description, state, bypassed, true, false, sourcePlugin->stereoFold);
+}
+
+void PluginRack::setStereoFold(int channel, int slot, int fold)
+{
+    if (! validSlot(channel, slot))
+        return;
+    const int stored = static_cast<int>(stereoFoldFromInt(fold));
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin == nullptr)
+            return;
+        if (model.plugin->stereoFold == stored)
+            return;
+        model.plugin->stereoFold = stored;
+        publishUnlocked();
+    }
+    notifyDirty();
 }
 
 void PluginRack::setBypassAll(bool bypass) noexcept
@@ -1386,6 +1666,9 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         destination.occupied = model.plugin->instance != nullptr;
         destination.bypassed = model.plugin->bypassed;
         destination.latencySamples = model.plugin->latencySamples;
+        destination.inputChannels = model.plugin->inputChannels;
+        destination.outputChannels = model.plugin->outputChannels;
+        destination.stereoFold = model.plugin->stereoFold;
         destination.name = model.plugin->description.name;
     }
     return snap;
@@ -1433,6 +1716,7 @@ void PluginRack::captureSession(SessionData& data)
                     continue;
                 slotOut.occupied = true;
                 slotOut.bypassed = source.plugin->bypassed;
+                slotOut.stereoFold = source.plugin->stereoFold;
                 slotOut.description = source.plugin->description;
                 slotOut.state = source.plugin->state;
             }
@@ -1457,7 +1741,7 @@ void PluginRack::restoreSession(const SessionData& data)
             const auto& sourceSlot = source.slots[static_cast<std::size_t>(slot)];
             if (! sourceSlot.occupied)
                 continue;
-            loadPlugin(channel, slot, sourceSlot.description, sourceSlot.state, sourceSlot.bypassed, false);
+            loadPlugin(channel, slot, sourceSlot.description, sourceSlot.state, sourceSlot.bypassed, false, false, sourceSlot.stereoFold);
         }
     }
     {
@@ -1568,6 +1852,7 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             live.inputChannels = std::clamp(model.plugin->inputChannels, 1, LiveGraph::kScratchCap);
             live.outputChannels = std::clamp(model.plugin->outputChannels, 1, LiveGraph::kScratchCap);
             live.processChannels = std::max(live.inputChannels, live.outputChannels);
+            live.stereoFold = model.plugin->stereoFold;
             live.prepared = model.plugin->prepared;
             graph->keepAlive.push_back(model.plugin);
         }
@@ -1591,6 +1876,10 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             graph->delay[static_cast<std::size_t>(channel)].assign(static_cast<std::size_t>(delay), 0.0f);
     }
 
+    graph->feedCapacity = block * 4;
+    graph->feedIn.assign(static_cast<std::size_t>(kMaxChannels * graph->feedCapacity), 0.0f);
+    graph->feedOut.assign(static_cast<std::size_t>(kMaxChannels * graph->feedCapacity), 0.0f);
+    graph->blockWork.assign(static_cast<std::size_t>(kMaxChannels * block), 0.0f);
     graph->scratch.assign(static_cast<std::size_t>(kMaxChannels * LiveGraph::kScratchCap * block), 0.0f);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {

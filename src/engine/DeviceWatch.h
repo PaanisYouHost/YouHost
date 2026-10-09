@@ -1,5 +1,7 @@
 #pragma once
 
+#include "HostPath.h"
+
 #include <cmath>
 #include <string>
 
