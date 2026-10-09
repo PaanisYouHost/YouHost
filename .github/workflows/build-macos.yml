@@ -1,0 +1,89 @@
+name: Build YouHost
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: youhost-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS universal
+    # macos-latest is macOS 26 arm64. That pool failed to hand out a runner
+    # ("not acquired by Runner of type hosted"). macos-15 is the free standard
+    # arm64 image and can still build an arm64 + x86_64 universal binary.
+    # Run 37815795731 was cancelled the same way before any step ran; a push
+    # retriggers the job because this token cannot rerun workflows.
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Ad-hoc sign
+        run: |
+          set -euo pipefail
+          APP=$(find build -type d -name 'YouHost.app' -print -quit)
+          if [ -z "${APP}" ]; then
+            echo "YouHost.app was not produced"
+            find build -name 'YouHost*' -print
+            exit 1
+          fi
+          echo "Signing ${APP}"
+          codesign --force --sign - --timestamp=none "${APP}"
+          codesign --verify --strict --verbose=2 "${APP}"
+          codesign -dv "${APP}" 2>&1 | tee "${RUNNER_TEMP}/codesign.txt"
+          grep -q "Signature=adhoc" "${RUNNER_TEMP}/codesign.txt"
+          FLAGS=$(sed -n 's/.*flags=\([^ ]*\).*/\1/p' "${RUNNER_TEMP}/codesign.txt" | head -n 1)
+          echo "codesign flags: ${FLAGS}"
+          if printf '%s\n' "${FLAGS}" | grep -q 'runtime'; then
+            echo "Hardened runtime must stay off for unsigned plugin loading."
+            exit 1
+          fi
+          BIN="${APP}/Contents/MacOS/YouHost"
+          lipo -info "${BIN}" | tee "${RUNNER_TEMP}/lipo.txt"
+          grep -q 'arm64' "${RUNNER_TEMP}/lipo.txt"
+          grep -q 'x86_64' "${RUNNER_TEMP}/lipo.txt"
+          plutil -p "${APP}/Contents/Info.plist" | tee "${RUNNER_TEMP}/plist.txt"
+          grep -q 'NSMicrophoneUsageDescription' "${RUNNER_TEMP}/plist.txt"
+          grep -q 'YouHost' "${RUNNER_TEMP}/plist.txt"
+
+      - name: Zip
+        run: |
+          set -euo pipefail
+          APP=$(find build -type d -name 'YouHost.app' -print -quit)
+          ditto -c -k --keepParent "${APP}" YouHost-macOS-universal.zip
+          unzip -t YouHost-macOS-universal.zip
+          ls -lh YouHost-macOS-universal.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouHost-macOS-universal
+          path: YouHost-macOS-universal.zip
+          if-no-files-found: error
+
+      - name: Attach zip to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: YouHost-macOS-universal.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
