@@ -424,8 +424,12 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
 
 void presentSingleAudioCard(juce::Component& root)
 {
-    juce::Label* inputLabel = nullptr;
-    juce::Component* inputBox = nullptr;
+    struct InputRow
+    {
+        juce::Label* label = nullptr;
+        juce::Component* box = nullptr;
+    };
+    std::vector<InputRow> inputs;
     std::function<void(juce::Component&)> find;
     find = [&](juce::Component& node)
     {
@@ -436,26 +440,40 @@ void presentSingleAudioCard(juce::Component& root)
             if (auto* label = dynamic_cast<juce::Label*>(child))
             {
                 const auto text = label->getText();
-                if (text == "Input:")
-                {
-                    inputLabel = label;
-                    inputBox = label->getAttachedComponent();
-                }
-                else if (text == "Output:" || text == "Device:")
+                if (text == "Input:" || text.startsWith("Input:"))
+                    inputs.push_back({ label, label->getAttachedComponent() });
+                else if (text == "Output:" || text == "Device:" || text.startsWith("Output:"))
                     label->setText("Audio card:", juce::dontSendNotification);
             }
             find(*child);
         }
     };
     find(root);
-    if (inputLabel == nullptr || ! inputLabel->isVisible())
+    InputRow open;
+    for (const auto& row : inputs)
+    {
+        if (row.label == nullptr)
+            continue;
+        if (row.label->isVisible() || row.label->getHeight() > 0)
+            open = row;
+    }
+    if (open.label == nullptr)
         return;
 
-    const int shift = std::max(inputLabel->getHeight(), inputBox != nullptr ? inputBox->getHeight() : 0) + 6;
-    const int cut = inputLabel->getY();
-    inputLabel->setVisible(false);
-    if (inputBox != nullptr)
-        inputBox->setVisible(false);
+    const int shift = std::max(open.label->getHeight(), open.box != nullptr ? open.box->getHeight() : 0) + 6;
+    const int cut = open.label->getY();
+    for (const auto& row : inputs)
+    {
+        if (row.label == nullptr)
+            continue;
+        row.label->setVisible(false);
+        row.label->setSize(row.label->getWidth(), 0);
+        if (row.box != nullptr)
+        {
+            row.box->setVisible(false);
+            row.box->setSize(row.box->getWidth(), 0);
+        }
+    }
     if (shift <= 6)
         return;
 
@@ -464,7 +482,13 @@ void presentSingleAudioCard(juce::Component& root)
     {
         for (auto* child : node.getChildren())
         {
-            if (child == nullptr || child == inputLabel || child == inputBox)
+            if (child == nullptr)
+                continue;
+            bool isInput = false;
+            for (const auto& row : inputs)
+                if (child == row.label || child == row.box)
+                    isInput = true;
+            if (isInput)
                 continue;
             if (child->isVisible() && child->getY() > cut)
                 child->setTopLeftPosition(child->getX(), child->getY() - shift);
@@ -658,6 +682,7 @@ private:
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 160));
+            presentSingleAudioCard(selector_);
         }
 
     private:
@@ -673,6 +698,7 @@ private:
             const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
             offlineRate_.setEnabled(rateOk);
             offlineBuffer_.setEnabled(bufferOk);
+            presentSingleAudioCard(selector_);
         }
 
         juce::AudioDeviceSelectorComponent& selector_;
@@ -998,6 +1024,8 @@ private:
             };
             offlineRate_.setVisible(false);
             offlineBuffer_.setVisible(false);
+            seenMenuRevision_ = engine_.deviceMenuRevision();
+            syncOfflineDeviceEntry(selector_, engine_);
             startTimerHz(4);
         }
 
@@ -1009,12 +1037,20 @@ private:
             recentViewport_.setViewedComponent(nullptr, false);
         }
 
+        void paint(juce::Graphics&) override
+        {
+            // JUCE applies a pending device-selector resize at the start of
+            // paint and puts the Input row back. Collapse it before the rows draw.
+            presentSingleAudioCard(*this);
+        }
+
         void resized() override
         {
             auto area = getLocalBounds().reduced(16, 12);
             deviceViewport_.setBounds(area.removeFromTop(168));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 140));
+            presentSingleAudioCard(*this);
             const bool offline = engine_.offlineTemplate();
             offlineRate_.setVisible(offline);
             offlineBuffer_.setVisible(offline);
@@ -1090,6 +1126,7 @@ private:
                 if (getWidth() > 0)
                     resized();
             }
+            presentSingleAudioCard(*this);
             auto note = engine_.missingSessionParentNote();
             const auto deviceNote = engine_.startupDeviceNote();
             if (deviceNote.isNotEmpty())
