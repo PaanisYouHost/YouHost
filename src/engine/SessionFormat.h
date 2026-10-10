@@ -3,6 +3,7 @@
 #include "ChannelListen.h"
 #include "DisplayLayout.h"
 #include "HostLimits.h"
+#include "MeterScale.h"
 
 #include <algorithm>
 #include <cctype>
