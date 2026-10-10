@@ -521,7 +521,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
     {
         graphics.setColour(theme::dim);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
-        graphics.drawFittedText("No input channels are open. Open Audio setup and enable the inputs.",
+        graphics.drawFittedText("This interface has no input channels.",
                                 getLocalBounds().reduced(8),
                                 juce::Justification::centred,
                                 3);

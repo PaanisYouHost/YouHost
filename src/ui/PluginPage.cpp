@@ -1065,7 +1065,7 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
         refresh();
     };
     addAndMakeVisible(viewport_);
-    empty_.setText("No input channels are open. Open Audio setup and enable the inputs.", juce::dontSendNotification);
+    empty_.setText("This interface has no input channels.", juce::dontSendNotification);
     empty_.setJustificationType(juce::Justification::centred);
     empty_.setColour(juce::Label::textColourId, theme::dim);
     content_.addAndMakeVisible(empty_);

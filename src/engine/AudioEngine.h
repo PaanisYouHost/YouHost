@@ -302,7 +302,10 @@ private:
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool awaitingSavedDevice_ = false;
-    bool wideningOutputs_ = false;
+    bool forcingChannels_ = false;
+    juce::String lastFullOpenName_;
+    int lastFullOpenInputs_ = -1;
+    int lastFullOpenOutputs_ = -1;
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;

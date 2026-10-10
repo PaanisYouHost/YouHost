@@ -731,6 +731,12 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Shift+click") != std::string::npos);
     CHECK(help.find("Cmd+click") != std::string::npos);
     CHECK(help.find("Option-drag") != std::string::npos);
+    CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
+    CHECK(help.find("INPUT means the audio passes through the plugins to the output and is not recorded") != std::string::npos);
+    CHECK(help.find("OFF cuts the channel fully: no audio, no plugins, and no recording") != std::string::npos);
+    CHECK(help.find("The interface always opens with all channels") != std::string::npos);
+    CHECK(help.find("Channel use is chosen only with these buttons") != std::string::npos);
+    CHECK(help.find("Audio setup ticks") == std::string::npos);
 
     CHECK(youhost::matchNameKey(false, true, false, false, false, false, false) == youhost::NameKey::commit);
     CHECK(youhost::matchNameKey(false, false, true, false, false, false, false) == youhost::NameKey::cancel);
@@ -1063,6 +1069,35 @@ void testDeviceWatch()
     const auto allOut = youhost::inspectChannelMask(full, 48);
     CHECK(allOut.active == 48);
     CHECK(! youhost::trailingOutputMissing(allOut));
+}
+
+void testDeviceOpensAllChannels()
+{
+    CHECK(youhost::channelsToOpen(32) == 32);
+    CHECK(youhost::channelsToOpen(200) == 128);
+    CHECK(youhost::channelsToOpen(0) == 0);
+    CHECK(youhost::channelsToOpen(-3) == 0);
+
+    bool saved[8] = { true, true, false, false, false, false, false, false };
+    CHECK(! youhost::deviceMaskIsComplete(saved, 8));
+    youhost::openAllReportedChannels(saved, 8);
+    CHECK(youhost::deviceMaskIsComplete(saved, 8));
+    for (const bool bit : saved)
+        CHECK(bit);
+
+    bool wide[128] = {};
+    wide[0] = true;
+    CHECK(! youhost::deviceMaskIsComplete(wide, 200));
+    youhost::openAllReportedChannels(wide, 200);
+    CHECK(youhost::deviceMaskIsComplete(wide, 200));
+    CHECK(youhost::channelsToOpen(200) == 128);
+    CHECK(youhost::deviceMaskIsComplete(nullptr, 0));
+    CHECK(! youhost::deviceMaskIsComplete(nullptr, 4));
+
+    bool full[8];
+    for (bool& bit : full)
+        bit = true;
+    CHECK(youhost::deviceMaskIsComplete(full, 8));
 }
 
 void testMergePeaks()
@@ -1772,6 +1807,7 @@ int main()
     testInsertMenuAndStall();
     testCrashJournal();
     testDeviceWatch();
+    testDeviceOpensAllChannels();
     testMergePeaks();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();

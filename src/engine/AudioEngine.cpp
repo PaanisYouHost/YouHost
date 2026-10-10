@@ -40,6 +40,16 @@ int64_t steadyNowNs()
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
+// A saved mask is ignored. Missing channel attributes make the device open its default set,
+// which initialise asked for as every channel up to kMaxChannels.
+void ignoreSavedChannelMask(juce::XmlElement* saved)
+{
+    if (saved == nullptr)
+        return;
+    saved->removeAttribute("audioDeviceInChans");
+    saved->removeAttribute("audioDeviceOutChans");
+}
+
 std::atomic<int> stallDumpFd { -1 };
 std::atomic<std::int64_t> stallLoggedNs { 0 };
 
@@ -274,6 +284,10 @@ void AudioEngine::start(bool allowInput)
     std::unique_ptr<juce::XmlElement> saved;
     if (allowInput)
         saved = settings_.loadAudioSetup();
+    ignoreSavedChannelMask(saved.get());
+    lastFullOpenName_.clear();
+    lastFullOpenInputs_ = -1;
+    lastFullOpenOutputs_ = -1;
     rememberSavedSetup(saved.get());
 
     const int inputs = allowInput ? kMaxChannels : 0;
@@ -774,72 +788,99 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
 {
     if (catalogue_ != nullptr)
         catalogue_->setDeviceOpen(true);
-    if (wideningOutputs_)
+    if (forcingChannels_)
         return;
 
     const auto inputNames = device.getInputChannelNames();
     const auto outputNames = device.getOutputChannelNames();
     const auto inputMask = device.getActiveInputChannels();
     const auto outputMask = device.getActiveOutputChannels();
-    const int reported = std::min(outputNames.size(), kMaxChannels);
-    bool open[kMaxChannels] {};
-    for (int index = 0; index < reported; ++index)
-        open[index] = outputMask[index];
-    const auto view = inspectChannelMask(open, reported);
+    const int inputsToOpen = microphoneGranted_ ? channelsToOpen(inputNames.size()) : 0;
+    const int outputsToOpen = channelsToOpen(outputNames.size());
+    bool inputsOpen[kMaxChannels] {};
+    bool outputsOpen[kMaxChannels] {};
+    for (int index = 0; index < inputsToOpen; ++index)
+        inputsOpen[index] = inputMask[index];
+    for (int index = 0; index < outputsToOpen; ++index)
+        outputsOpen[index] = outputMask[index];
 
+    const bool complete = deviceMaskIsComplete(inputsOpen, inputsToOpen)
+                          && deviceMaskIsComplete(outputsOpen, outputsToOpen);
+    if (lastFullOpenName_ == device.getName()
+        && lastFullOpenInputs_ == inputNames.size()
+        && lastFullOpenOutputs_ == outputNames.size())
+        return;
+
+    lastFullOpenName_ = device.getName();
+    lastFullOpenInputs_ = inputNames.size();
+    lastFullOpenOutputs_ = outputNames.size();
     juce::String line;
     line << "device " << device.getName()
          << " inputs reported " << inputNames.size()
          << " active " << inputMask.countNumberOfSetBits()
          << " outputs reported " << outputNames.size()
          << " active " << outputMask.countNumberOfSetBits();
-    if (inputNames.size() > 0)
-        line << " in0 \"" << inputNames[0] << "\" inLast \"" << inputNames[inputNames.size() - 1] << "\"";
-    if (outputNames.size() > 0)
-        line << " out0 \"" << outputNames[0] << "\" outLast \"" << outputNames[outputNames.size() - 1] << "\"";
     appendHostLog(settings_, line);
-
-    if (! trailingOutputMissing(view) || settings_.outputMaskWasWidened(device.getName(), view.reported))
+    if (complete)
         return;
 
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager_.getAudioDeviceSetup(setup);
-    setup.outputChannels.setBit(view.reported - 1, true);
+    setup.useDefaultInputChannels = false;
     setup.useDefaultOutputChannels = false;
-    settings_.rememberWidenedOutput(device.getName(), view.reported);
-    appendHostLog(settings_, "opened trailing output " + juce::String(view.reported) + " on " + device.getName());
-    wideningOutputs_ = true;
-    deviceManager_.setAudioDeviceSetup(setup, true);
-    wideningOutputs_ = false;
+    setup.inputChannels.clear();
+    setup.outputChannels.clear();
+    if (inputsToOpen > 0)
+        setup.inputChannels.setRange(0, inputsToOpen, true);
+    if (outputsToOpen > 0)
+        setup.outputChannels.setRange(0, outputsToOpen, true);
+    appendHostLog(settings_, "opening every channel on " + device.getName());
+    forcingChannels_ = true;
+    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+    forcingChannels_ = false;
+    if (error.isNotEmpty())
+        openError_ = error;
 }
 
 void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 {
-    deviceName_ = device.getName();
+    if (forcingChannels_)
+        return;
+
+    // A short saved mask is reopened once here. Later polls skip this unless the open mask changes.
+    const bool unseen = lastFullOpenInputs_ < 0 || device.getName() != lastFullOpenName_;
+    if (unseen
+        || device.getActiveInputChannels() != lastInputMask_
+        || device.getActiveOutputChannels() != lastOutputMask_)
+        noteChannelMasks(device);
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    if (live == nullptr || ! live->isOpen())
+        return;
+
+    deviceName_ = live->getName();
     cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
 
-    const double rate = device.getCurrentSampleRate();
-    const int buffer = device.getCurrentBufferSizeSamples();
+    const double rate = live->getCurrentSampleRate();
+    const int buffer = live->getCurrentBufferSizeSamples();
     const bool starting = deviceStarting_.exchange(false, std::memory_order_acq_rel);
     const bool rateChanged = preparedRate_ <= 0.0 || std::abs(rate - preparedRate_) >= 1.0;
     const bool bufferChanged = buffer != preparedBuffer_;
-    const auto inputMask = device.getActiveInputChannels();
-    const auto outputMask = device.getActiveOutputChannels();
+    const auto inputMask = live->getActiveInputChannels();
+    const auto outputMask = live->getActiveOutputChannels();
     const bool masksChanged = inputMask != lastInputMask_ || outputMask != lastOutputMask_;
     const bool needPrepare = starting || rateChanged || bufferChanged;
 
     if (needPrepare || masksChanged)
     {
-        publishConfig(device);
-        noteChannelMasks(device);
+        publishConfig(*live);
     }
     else
     {
         sampleRate_.store(rate, std::memory_order_relaxed);
         bufferSamples_.store(buffer, std::memory_order_relaxed);
-        inputLatencySamples_.store(device.getInputLatencyInSamples(), std::memory_order_relaxed);
-        outputLatencySamples_.store(device.getOutputLatencyInSamples(), std::memory_order_relaxed);
-        formulaValue_.store(static_cast<int>(formulaForDeviceType(device.getTypeName().toRawUTF8())),
+        inputLatencySamples_.store(live->getInputLatencyInSamples(), std::memory_order_relaxed);
+        outputLatencySamples_.store(live->getOutputLatencyInSamples(), std::memory_order_relaxed);
+        formulaValue_.store(static_cast<int>(formulaForDeviceType(live->getTypeName().toRawUTF8())),
                             std::memory_order_relaxed);
         deviceOpen_.store(true, std::memory_order_relaxed);
     }
@@ -849,10 +890,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         if (recorder_ != nullptr)
             recorder_->setDevice(rate, true);
         if (rack_ != nullptr)
-            rack_->prepare(rate, buffer > 0 ? buffer : 512, currentConfig().routing, device.getWorkgroup());
+            rack_->prepare(rate, buffer > 0 ? buffer : 512, currentConfig().routing, live->getWorkgroup());
         preparedRate_ = rate;
         preparedBuffer_ = buffer;
-        installOverloadListener(device.getName());
+        installOverloadListener(live->getName());
     }
     else if (masksChanged && rack_ != nullptr)
     {
@@ -861,7 +902,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     lastInputMask_ = inputMask;
     lastOutputMask_ = outputMask;
-    if (remember && device.getName() == wantedName_)
+    if (remember && live->getName() == wantedName_)
     {
         deviceLostBanner_ = false;
         lossFinalized_ = false;
@@ -873,10 +914,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
     rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
 
-    if (remember && (needPrepare || masksChanged || wantedName_ != device.getName()))
+    if (remember && (needPrepare || masksChanged || wantedName_ != live->getName()))
     {
         deviceManager_.getAudioDeviceSetup(wantedSetup_);
-        wantedName_ = device.getName();
+        wantedName_ = live->getName();
         saveSetupIfAllowed();
     }
 }
@@ -951,6 +992,10 @@ bool AudioEngine::deviceNameListed(const juce::String& name)
 
 void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
 {
+    wantedSetup_.useDefaultInputChannels = true;
+    wantedSetup_.useDefaultOutputChannels = true;
+    wantedSetup_.inputChannels.clear();
+    wantedSetup_.outputChannels.clear();
     if (saved == nullptr)
         return;
 
@@ -964,16 +1009,6 @@ void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
     }
     wantedSetup_.bufferSize = saved->getIntAttribute("audioDeviceBufferSize", wantedSetup_.bufferSize);
     wantedSetup_.sampleRate = saved->getDoubleAttribute("audioDeviceRate", wantedSetup_.sampleRate);
-    if (saved->hasAttribute("audioDeviceInChans"))
-    {
-        wantedSetup_.inputChannels.parseString(saved->getStringAttribute("audioDeviceInChans"), 2);
-        wantedSetup_.useDefaultInputChannels = false;
-    }
-    if (saved->hasAttribute("audioDeviceOutChans"))
-    {
-        wantedSetup_.outputChannels.parseString(saved->getStringAttribute("audioDeviceOutChans"), 2);
-        wantedSetup_.useDefaultOutputChannels = false;
-    }
     wantedName_ = wantedSetup_.outputDeviceName.isNotEmpty() ? wantedSetup_.outputDeviceName
                                                              : wantedSetup_.inputDeviceName;
 }
@@ -1911,9 +1946,15 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
     if (microphoneGranted_ && data.device != nullptr)
     {
+        auto deviceXml = std::make_unique<juce::XmlElement>(*data.device);
+        ignoreSavedChannelMask(deviceXml.get());
+        lastFullOpenName_.clear();
+        lastFullOpenInputs_ = -1;
+        lastFullOpenOutputs_ = -1;
+        rememberSavedSetup(deviceXml.get());
         deviceManager_.removeAudioCallback(this);
         deviceManager_.removeChangeListener(this);
-        openError_ = deviceManager_.initialise(kMaxChannels, kMaxChannels, data.device.get(), true);
+        openError_ = deviceManager_.initialise(kMaxChannels, kMaxChannels, deviceXml.get(), true);
         deviceManager_.addChangeListener(this);
         deviceManager_.addAudioCallback(this);
         pollDeviceStats();

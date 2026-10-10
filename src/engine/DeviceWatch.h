@@ -37,4 +37,34 @@ inline int usableChannelCount(int deviceChannels) noexcept
     return deviceChannels;
 }
 
+// The interface always opens this many channels: every name the device reports, capped at 128.
+inline int channelsToOpen(int reported) noexcept
+{
+    return usableChannelCount(reported);
+}
+
+// True when the first channelsToOpen(reported) bits are on. A shorter saved mask is not complete.
+inline bool deviceMaskIsComplete(const bool* open, int reported) noexcept
+{
+    const int count = channelsToOpen(reported);
+    if (count <= 0)
+        return true;
+    if (open == nullptr)
+        return false;
+    for (int index = 0; index < count; ++index)
+        if (! open[index])
+            return false;
+    return true;
+}
+
+// Turns on every channel the device reported, up to 128. The caller supplies at least that many flags.
+inline void openAllReportedChannels(bool* open, int reported) noexcept
+{
+    const int count = channelsToOpen(reported);
+    if (open == nullptr || count <= 0)
+        return;
+    for (int index = 0; index < count; ++index)
+        open[index] = true;
+}
+
 } // namespace youhost

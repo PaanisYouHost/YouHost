@@ -41,7 +41,6 @@ private:
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
     void hideDeviceTestTone();
-    void mirrorSetupToggles();
     void toggleSetup();
     void showPage(int page);
     void toggleScanner();

@@ -191,7 +191,7 @@ public:
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
-        prepareRememberedWindow(*this, settings_, "windowSetup", 760, 700, 560, 460);
+        prepareRememberedWindow(*this, settings_, "windowSetup", 720, 420, 560, 320);
         setVisible(false);
     }
 
@@ -228,7 +228,7 @@ private:
             auto area = getLocalBounds().reduced(12, 8);
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
-            selector_.setSize(width, std::max(selector_.getHeight(), std::max(640, viewport_.getMaximumVisibleHeight())));
+            selector_.setSize(width, std::max(selector_.getHeight(), 160));
         }
 
     private:
@@ -239,20 +239,6 @@ private:
     AppSettings& settings_;
     Content content_;
 };
-
-void gatherToggleLists(juce::Component& component, std::vector<std::vector<juce::ToggleButton*>>& lists)
-{
-    std::vector<juce::ToggleButton*> row;
-    for (auto* child : component.getChildren())
-        if (auto* toggle = dynamic_cast<juce::ToggleButton*>(child))
-            row.push_back(toggle);
-    if (! row.empty())
-        lists.push_back(std::move(row));
-
-    for (auto* child : component.getChildren())
-        if (child != nullptr && dynamic_cast<juce::ToggleButton*>(child) == nullptr)
-            gatherToggleLists(*child, lists);
-}
 
 juce::String sessionNameProblem(const juce::File& parent, const juce::String& rawName, juce::File& folderOut)
 {
@@ -458,8 +444,8 @@ public:
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
         setResizable(true, false);
-        setResizeLimits(680, 640, 1400, 1200);
-        centreWithSize(860, 820);
+        setResizeLimits(640, 520, 1400, 1100);
+        centreWithSize(780, 640);
         setVisible(true);
     }
 
@@ -491,7 +477,7 @@ private:
         Content(AudioEngine& engine, std::function<void()> onDone)
             : engine_(engine),
               onDone_(std::move(onDone)),
-              selector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false),
+              selector_(engine.deviceManager(), 0, 0, 0, 0, false, false, false, false),
               parent_(engine.defaultSessionParent())
         {
             addAndMakeVisible(intro_);
@@ -507,8 +493,9 @@ private:
             addAndMakeVisible(internal_);
             addAndMakeVisible(recentLabel_);
             addAndMakeVisible(recentViewport_);
-            intro_.setText("Choose the interface, then create a session or open one. Recordings usually go on an external drive. "
-                           "Ticks in this list open device channels. In the mixer, REC and OFF are the channel switches.",
+            intro_.setText("Choose the interface, sample rate, and buffer size, then create a session or open one. "
+                           "Recordings usually go on an external drive. The interface opens with all channels. "
+                           "Channel use is chosen only with the REC, INPUT, and OFF buttons.",
                            juce::dontSendNotification);
             intro_.setJustificationType(juce::Justification::topLeft);
             nameLabel_.setText("Session name", juce::dontSendNotification);
@@ -547,11 +534,11 @@ private:
         void resized() override
         {
             auto area = getLocalBounds().reduced(16, 12);
-            intro_.setBounds(area.removeFromTop(52));
+            intro_.setBounds(area.removeFromTop(68));
             area.removeFromTop(6);
-            deviceViewport_.setBounds(area.removeFromTop(std::max(220, area.getHeight() / 2)));
+            deviceViewport_.setBounds(area.removeFromTop(168));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
-            selector_.setSize(width, std::max(selector_.getHeight(), 480));
+            selector_.setSize(width, std::max(selector_.getHeight(), 140));
             area.removeFromTop(10);
             auto row = area.removeFromTop(28);
             nameLabel_.setBounds(row.removeFromLeft(110));
@@ -901,7 +888,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
       scanner_(engine, settings),
       dropouts_(engine, settings),
       cpu_(engine, settings),
-      deviceSelector_(engine.deviceManager(), 0, kMaxChannels, 0, kMaxChannels, false, false, false, false)
+      deviceSelector_(engine.deviceManager(), 0, 0, 0, 0, false, false, false, false)
 {
     setOpaque(true);
     setWantsKeyboardFocus(true);
@@ -1103,7 +1090,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
     clearClipsButton_.setTooltip("Clear every latched clip mark");
     setupButton_.onClick = [this] { toggleSetup(); };
-    setupButton_.setTooltip("A tick means the channel is live (REC or INPUT). Untick sets OFF. The audio device stays open.");
+    setupButton_.setTooltip("Device, sample rate, and buffer size. The interface opens with all channels. REC, INPUT, and OFF choose what each channel does.");
 
     meterGrid_.setClearHandler([this](int channel)
     {
@@ -1896,7 +1883,6 @@ void MainComponent::timerCallback()
     if (setupWindow_ != nullptr && setupWindow_->isVisible())
     {
         hideDeviceTestTone();
-        mirrorSetupToggles();
     }
     refresh();
 }
@@ -2085,45 +2071,6 @@ void MainComponent::toggleSetup()
     {
         setupWindow_->toFront(true);
         hideDeviceTestTone();
-        mirrorSetupToggles();
-    }
-}
-
-void MainComponent::mirrorSetupToggles()
-{
-    if (setupWindow_ == nullptr || ! setupWindow_->isVisible())
-        return;
-
-    std::vector<std::vector<juce::ToggleButton*>> lists;
-    gatherToggleLists(deviceSelector_, lists);
-    for (const auto& list : lists)
-    {
-        const int count = std::min(static_cast<int>(list.size()), kMaxChannels);
-        for (int index = 0; index < count; ++index)
-        {
-            auto* button = list[static_cast<std::size_t>(index)];
-            if (button == nullptr)
-                continue;
-            const auto listen = engine_.channelListen(index);
-            const bool live = channelListenAudible(listen);
-            if (button->getToggleState() != live)
-                button->setToggleState(live, juce::dontSendNotification);
-            button->onClick = [this, index, button]
-            {
-                if (button->getToggleState())
-                {
-                    if (engine_.channelListen(index) == ChannelListen::off)
-                        engine_.setChannelListen(index, ChannelListen::record);
-                }
-                else
-                {
-                    engine_.setChannelListen(index, ChannelListen::off);
-                }
-            };
-            button->setTooltip(live
-                                   ? "Live (REC or INPUT). Untick to turn this channel OFF. The audio device stays open."
-                                   : "OFF. Tick to set REC. The audio device stays open.");
-        }
     }
 }
 
