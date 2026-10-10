@@ -5,6 +5,7 @@
 #include "SignalPath.h"
 #include "WaveformScale.h"
 #include "DeviceWatch.h"
+#include "RecordLock.h"
 #include "HostLog.h"
 #include "MeterScale.h"
 #include "SessionDisk.h"
@@ -224,6 +225,11 @@ AudioDeviceID findCoreAudioDevice(const juce::String& name)
 
 } // namespace
 
+juce::String recordingCloseText(bool locked)
+{
+    return locked ? juce::String("Unlock recording first.") : juce::String("Stop recording first.");
+}
+
 AudioEngine::AudioEngine(AppSettings& settings)
     : settings_(settings)
 {
@@ -242,6 +248,12 @@ AudioEngine::AudioEngine(AppSettings& settings)
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
     wavBitDepth_ = settings_.loadWavBitDepth();
     recorder_->setWavBitDepth(wavBitDepth_);
+    preferredRate_ = settings_.loadPreferredSampleRate();
+    preferredBuffer_ = settings_.loadPreferredBuffer();
+    if (preferredRate_ < 1000.0)
+        preferredRate_ = 48000.0;
+    if (preferredBuffer_ < 16)
+        preferredBuffer_ = 64;
     dropoutOriginNs_ = steadyNowNs();
     playbackMax_ = 32768;
     playbackScratch_.assign(static_cast<std::size_t>(kMaxChannels) * static_cast<std::size_t>(playbackMax_), 0.0f);
@@ -323,6 +335,14 @@ void AudioEngine::pollDeviceStats()
 
     if (deviceError_.exchange(false, std::memory_order_relaxed))
         openError_ = "The audio device reported an error.";
+
+    if (offlineTemplate_)
+    {
+        deviceOpen_.store(false, std::memory_order_relaxed);
+        deviceName_ = juce::String(kOfflineDeviceName);
+        publishSessionChannelLimit();
+        return;
+    }
 
     auto* device = deviceManager_.getCurrentAudioDevice();
     const bool open = device != nullptr && device->isOpen();
@@ -411,9 +431,125 @@ const AudioThreadConfig& AudioEngine::currentConfig() const
     return configs_[static_cast<std::size_t>(index)];
 }
 
+SessionChannelView AudioEngine::channelView() const
+{
+    if (offlineTemplate_)
+        return sessionChannelView(0, false, true, false);
+    const bool open = deviceOpen_.load(std::memory_order_relaxed);
+    const int inputs = open ? inputCount() : 0;
+    return sessionChannelView(inputs, open, false, revealUnsupported_);
+}
+
+void AudioEngine::setOfflineTemplate(bool offline)
+{
+    if (! recordActionAllowed(RecordDisrupt::offlineSwitch, isRecording(), recordLockArmed_))
+        return;
+    if (offlineTemplate_ == offline)
+        return;
+    offlineTemplate_ = offline;
+    revealUnsupported_ = false;
+    if (offline)
+    {
+        if (auto* live = deviceManager_.getCurrentAudioDevice())
+        {
+            if (live->getCurrentSampleRate() > 0.0)
+                preferredRate_ = live->getCurrentSampleRate();
+            if (live->getCurrentBufferSizeSamples() > 0)
+                preferredBuffer_ = live->getCurrentBufferSizeSamples();
+            settings_.savePreferredSampleRate(preferredRate_);
+            settings_.savePreferredBuffer(preferredBuffer_);
+        }
+        closingDevice_.store(true, std::memory_order_release);
+        deviceManager_.closeAudioDevice();
+        closingDevice_.store(false, std::memory_order_release);
+        deviceOpen_.store(false, std::memory_order_relaxed);
+        deviceName_ = juce::String(kOfflineDeviceName);
+    }
+    publishSessionChannelLimit();
+    ++displayRevision_;
+}
+
+void AudioEngine::setPreferredSampleRate(double rate)
+{
+    if (! recordActionAllowed(RecordDisrupt::changeRate, isRecording(), recordLockArmed_))
+        return;
+    if (! (rate > 0.0))
+        return;
+    preferredRate_ = rate;
+    settings_.savePreferredSampleRate(rate);
+    if (offlineTemplate_ && recorder_ != nullptr)
+        recorder_->setTimelineSampleRate(rate);
+}
+
+void AudioEngine::setPreferredBuffer(int samples)
+{
+    if (! recordActionAllowed(RecordDisrupt::changeBuffer, isRecording(), recordLockArmed_))
+        return;
+    if (samples < 16)
+        return;
+    preferredBuffer_ = samples;
+    settings_.savePreferredBuffer(samples);
+}
+
+bool AudioEngine::isRecording() const
+{
+    return recorder_ != nullptr && recorder_->isRecording();
+}
+
+bool AudioEngine::recordingLocked() const
+{
+    return recordLockEngaged(recordLockArmed_, isRecording());
+}
+
+void AudioEngine::setRecordLockArmed(bool armed)
+{
+    recordLockArmed_ = armed;
+}
+
+juce::String AudioEngine::takeSessionRateNotice()
+{
+    auto notice = sessionRateNotice_;
+    sessionRateNotice_.clear();
+    return notice;
+}
+
+void AudioEngine::setSelectionListen(ChannelListen mode)
+{
+    if (! recordActionAllowed(RecordDisrupt::globalListen, isRecording(), recordLockArmed_))
+        return;
+    const auto selected = selectedChannels();
+    const auto targets = channelsForGlobalListen(selected.data(), static_cast<int>(selected.size()), visibleChannels());
+    for (const int channel : targets)
+        setChannelListen(channel, mode);
+}
+
+void AudioEngine::publishSessionChannelLimit()
+{
+    const auto view = channelView();
+    sessionVisible_.store(view.visible, std::memory_order_relaxed);
+    const int audioLimit = view.cardInputs;
+    sessionAudioLimit_.store(audioLimit, std::memory_order_relaxed);
+    if (rack_ != nullptr)
+        rack_->setActiveChannels(audioLimit);
+}
+
+void AudioEngine::setRevealUnsupportedChannels(bool reveal)
+{
+    if (revealUnsupported_ == reveal)
+        return;
+    revealUnsupported_ = reveal;
+    publishSessionChannelLimit();
+    ++displayRevision_;
+}
+
 int AudioEngine::visibleChannels() const
 {
-    return currentConfig().routing.visibleChannels;
+    return sessionVisible_.load(std::memory_order_relaxed);
+}
+
+juce::String AudioEngine::hiddenChannelNote() const
+{
+    return juce::String(youhost::hiddenChannelNote(channelView()));
 }
 
 int AudioEngine::inputCount() const
@@ -595,12 +731,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     // Record tap is a lock-free copy of the raw input. Playback, when active,
     // replaces that input before meters and plugins. Neither path takes a lock.
+    const int sessionChannels = sessionAudioLimit_.load(std::memory_order_relaxed);
     if (recorder_ != nullptr)
         recorder_->processRecord(inputChannelData,
                                  numInputChannels,
                                  config.routing.inputPacked.data(),
                                  kMaxChannels,
-                                 numSamples);
+                                 numSamples,
+                                 sessionChannels);
 
     const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
     const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
@@ -622,7 +760,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            numSamples,
                            playConfig,
                            strips_.data(),
-                           kMaxChannels,
+                           sessionChannels,
                            enabledLow,
                            enabledHigh);
     }
@@ -635,18 +773,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            numSamples,
                            config,
                            strips_.data(),
-                           kMaxChannels,
+                           sessionChannels,
                            enabledLow,
                            enabledHigh);
     }
 
     // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
     if (rack_ != nullptr)
-        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh);
+        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels);
 
     if (outputChannelData != nullptr && numSamples > 0)
     {
-        for (int channel = 0; channel < kMaxChannels; ++channel)
+        for (int channel = 0; channel < sessionChannels; ++channel)
         {
             if (! channelIsOn(enabledLow, enabledHigh, channel))
                 continue;
@@ -744,6 +882,7 @@ void AudioEngine::publishConfig(juce::AudioIODevice& device)
     formulaValue_.store(static_cast<int>(formulaForDeviceType(device.getTypeName().toRawUTF8())),
                         std::memory_order_relaxed);
     deviceOpen_.store(true, std::memory_order_relaxed);
+    publishSessionChannelLimit();
 }
 
 void AudioEngine::installOverloadListener(const juce::String& deviceName)
@@ -857,6 +996,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (live == nullptr || ! live->isOpen())
         return;
 
+    if (deviceName_ != live->getName())
+        revealUnsupported_ = false;
     deviceName_ = live->getName();
     cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
 
@@ -927,6 +1068,7 @@ void AudioEngine::handleDeviceDown()
     deviceOpen_.store(false, std::memory_order_relaxed);
     cpuUsage_.store(0.0f, std::memory_order_relaxed);
     deviceName_ = "No device";
+    publishSessionChannelLimit();
     if (closingDevice_.load(std::memory_order_acquire) || ! started_)
         return;
 
@@ -1173,12 +1315,13 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
 
     recorder_->visitRecordedTakes([this, &fn](const RecordedTakeView* takes, int count, const RecordedTakeView* live)
     {
+        const int shown = visibleChannels();
         std::array<bool, kMaxChannels> heard {};
-        auto markHeard = [&heard](const RecordedTakeView* view)
+        auto markHeard = [&heard, shown](const RecordedTakeView* view)
         {
             if (view == nullptr)
                 return;
-            for (int channel = 0; channel < kMaxChannels; ++channel)
+            for (int channel = 0; channel < shown; ++channel)
             {
                 const auto index = static_cast<std::size_t>(channel);
                 const auto* peaks = view->peaks[index];
@@ -1201,7 +1344,7 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
 
         std::vector<LaneDesc> descriptions;
         std::array<bool, kMaxDisplayGroups> groupDone {};
-        for (int channel = 0; channel < kMaxChannels; ++channel)
+        for (int channel = 0; channel < shown; ++channel)
         {
             if (! heard[static_cast<std::size_t>(channel)])
                 continue;
@@ -1216,7 +1359,7 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
                 description.color = groups_[static_cast<std::size_t>(group)].color;
                 const auto name = groups_[static_cast<std::size_t>(group)].name;
                 description.title = name.isNotEmpty() ? name.toStdString() : "Group " + std::to_string(group + 1);
-                for (int member = 0; member < kMaxChannels; ++member)
+                for (int member = 0; member < shown; ++member)
                     if (channelGroup_[static_cast<std::size_t>(member)] == group && heard[static_cast<std::size_t>(member)])
                         description.members.push_back(member);
                 descriptions.push_back(std::move(description));
@@ -1385,6 +1528,8 @@ ChannelListen AudioEngine::channelListen(int channel) const
 
 void AudioEngine::setChannelListen(int channel, ChannelListen mode)
 {
+    if (! recordActionAllowed(RecordDisrupt::channelListen, isRecording(), recordLockArmed_))
+        return;
     if (channel < 0 || channel >= kMaxChannels)
         return;
     listen_[static_cast<std::size_t>(channel)] = mode;
@@ -1501,6 +1646,8 @@ juce::String AudioEngine::channelName(int channel) const
 
 void AudioEngine::toggleRecordReady()
 {
+    if (! recordActionAllowed(RecordDisrupt::recToggle, isRecording(), recordLockArmed_))
+        return;
     if (recorder_ != nullptr && recorder_->isRecording())
         return;
     recordReady_ = ! recordReady_;
@@ -1508,6 +1655,8 @@ void AudioEngine::toggleRecordReady()
 
 void AudioEngine::transportRecord()
 {
+    if (recordingLocked())
+        return;
     if (sessionCopyProgress() >= 0.0f)
     {
         sessionMessage_ = "Finish saving the copy before recording.";
@@ -1523,12 +1672,15 @@ void AudioEngine::transportRecord()
     if (recorder_ == nullptr)
         return;
     const auto routing = currentConfig().routing;
-    recorder_->record(routing.inputPacked.data(), kMaxChannels);
+    const int sessionChannels = std::clamp(sessionAudioLimit_.load(std::memory_order_relaxed), 0, kMaxChannels);
+    recorder_->record(routing.inputPacked.data(), sessionChannels);
     noteSessionEdit();
 }
 
 void AudioEngine::transportStop()
 {
+    if (recordingLocked())
+        return;
     recordReady_ = false;
     if (recorder_ == nullptr)
         return;
@@ -1582,6 +1734,11 @@ TransportView AudioEngine::transportView() const
 
 void AudioEngine::resetToCleanSession()
 {
+    if (isRecording())
+    {
+        sessionMessage_ = recordingCloseText(recordingLocked());
+        return;
+    }
     if (recorder_ != nullptr)
     {
         recorder_->stop();
@@ -1622,6 +1779,7 @@ void AudioEngine::resetToCleanSession()
     waveformGain_ = 1.0f;
     sessionPeak_ = false;
     sessionReferenceDb_ = kDefaultRmsReferenceDb;
+    publishSessionChannelLimit();
     sessionFolder_ = juce::File();
     sessionOnInternalDisk_ = false;
     hasPreservedSession_ = false;
@@ -1693,6 +1851,11 @@ bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk, b
 {
     if (folder.getFullPathName().isEmpty())
         return false;
+    if (isRecording())
+    {
+        sessionMessage_ = recordingCloseText(recordingLocked());
+        return false;
+    }
 
     if (recorder_ != nullptr)
         recorder_->stop();
@@ -1950,6 +2113,12 @@ bool AudioEngine::saveSessionToFolder(const juce::File& folder)
 
 bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 {
+    if (isRecording())
+    {
+        sessionMessage_ = recordingCloseText(recordingLocked());
+        return false;
+    }
+
     juce::File folder = fileOrFolder;
     if (fileOrFolder.existsAsFile())
         folder = fileOrFolder.getParentDirectory();
@@ -1995,21 +2164,23 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     applyDisplay(data);
     syncCompensation();
 
-    if (microphoneGranted_ && data.device != nullptr)
+    double cardRate = 0.0;
+    if (offlineTemplate_)
+        cardRate = preferredRate_;
+    else if (deviceOpen_.load(std::memory_order_relaxed))
+        cardRate = sampleRate_.load(std::memory_order_relaxed);
+    const auto adoption = adoptCardSampleRate(data.sampleRate, cardRate);
+    if (recorder_ != nullptr && adoption.rate > 0.0 && (adoption.changed || ! (data.sampleRate > 0.0)))
+        recorder_->setTimelineSampleRate(adoption.rate);
+    sessionRateNotice_ = juce::String(adoption.notice);
+    if (rack_ != nullptr && cardRate > 0.0)
     {
-        auto deviceXml = std::make_unique<juce::XmlElement>(*data.device);
-        ignoreSavedChannelMask(deviceXml.get());
-        lastFullOpenName_.clear();
-        lastFullOpenInputs_ = -1;
-        lastFullOpenOutputs_ = -1;
-        rememberSavedSetup(deviceXml.get());
-        deviceManager_.removeAudioCallback(this);
-        deviceManager_.removeChangeListener(this);
-        openError_ = deviceManager_.initialise(kMaxChannels, kMaxChannels, deviceXml.get(), true);
-        deviceManager_.addChangeListener(this);
-        deviceManager_.addAudioCallback(this);
-        pollDeviceStats();
-        saveSetupIfAllowed();
+        const int liveBuffer = bufferSamples_.load(std::memory_order_relaxed);
+        const int buffer = liveBuffer > 0 ? liveBuffer : preferredBuffer_;
+        juce::AudioWorkgroup group;
+        if (auto* live = deviceManager_.getCurrentAudioDevice())
+            group = live->getWorkgroup();
+        rack_->prepare(cardRate, buffer > 0 ? buffer : 512, currentConfig().routing, group);
     }
 
     settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
@@ -2019,6 +2190,12 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     recordReady_ = false;
     sessionMessage_ = "Opened " + sessionFolder_.getFileName();
     sessionDirty_ = false;
+    if (adoption.changed)
+    {
+        saveSession();
+        sessionMessage_ = "Opened " + sessionFolder_.getFileName();
+        sessionDirty_ = false;
+    }
     lastBackupMs_ = 0;
     restoringSession_ = false;
     dropoutHeaderWritten_ = false;
@@ -2117,6 +2294,18 @@ bool AudioEngine::beginSessionCopy(const juce::File& folder)
     return true;
 }
 
+void AudioEngine::setCopyFinishedHandler(std::function<void(bool ok)> handler)
+{
+    copyFinishedHandler_ = std::move(handler);
+}
+
+void AudioEngine::notifyCopyFinished(bool ok)
+{
+    auto handler = std::move(copyFinishedHandler_);
+    if (handler != nullptr)
+        handler(ok);
+}
+
 float AudioEngine::sessionCopyProgress() const
 {
     return sessionDisk_ != nullptr ? sessionDisk_->copyProgress() : -1.0f;
@@ -2143,6 +2332,12 @@ juce::String AudioEngine::takeCopyFailure()
 
 bool AudioEngine::importRecordingFolder(const juce::File& folder)
 {
+    if (isRecording())
+    {
+        sessionMessage_ = recordingCloseText(recordingLocked());
+        return false;
+    }
+
     if (folder.getChildFile(kSessionFileName).existsAsFile())
         return loadSessionFrom(folder);
     if (folder.getFileName() == juce::String(kSessionFileName) && folder.existsAsFile())
@@ -2242,6 +2437,11 @@ bool AudioEngine::importRecordingFolder(const juce::File& folder)
 
 void AudioEngine::clearTimeline()
 {
+    if (isRecording())
+    {
+        sessionMessage_ = recordingCloseText(recordingLocked());
+        return;
+    }
     if (recorder_ != nullptr)
     {
         recorder_->stop();

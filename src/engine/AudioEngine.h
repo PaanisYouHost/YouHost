@@ -12,6 +12,7 @@
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
 #include "Recorder.h"
+#include "SessionChannels.h"
 #include "SessionDocument.h"
 #include "TimelineLanes.h"
 
@@ -57,6 +58,22 @@ public:
     void pollDeviceStats();
     LatencyNumbers latencyNumbers() const;
     int visibleChannels() const;
+    bool revealUnsupportedChannels() const noexcept { return revealUnsupported_; }
+    void setRevealUnsupportedChannels(bool reveal);
+    juce::String hiddenChannelNote() const;
+    SessionChannelView channelView() const;
+    bool offlineTemplate() const noexcept { return offlineTemplate_; }
+    void setOfflineTemplate(bool offline);
+    double preferredSampleRate() const noexcept { return preferredRate_; }
+    int preferredBuffer() const noexcept { return preferredBuffer_; }
+    void setPreferredSampleRate(double rate);
+    void setPreferredBuffer(int samples);
+    bool isRecording() const;
+    bool recordLockArmed() const noexcept { return recordLockArmed_; }
+    bool recordingLocked() const;
+    void setRecordLockArmed(bool armed);
+    void setSelectionListen(ChannelListen mode);
+    juce::String takeSessionRateNotice();
     int inputCount() const;
     int outputCount() const;
     juce::String deviceName() const { return deviceName_; }
@@ -168,6 +185,9 @@ public:
     bool saveSessionToFolder(const juce::File& folder);
     bool saveSessionAs(const juce::File& folder);
     bool beginSessionCopy(const juce::File& folder);
+    void setCopyFinishedHandler(std::function<void(bool ok)> handler);
+    bool hasCopyFinishedHandler() const noexcept { return static_cast<bool>(copyFinishedHandler_); }
+    void notifyCopyFinished(bool ok);
     float sessionCopyProgress() const;
     juce::String backupStatusText() const;
     juce::String takeCopyFailure();
@@ -205,6 +225,8 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
     void publishConfig(juce::AudioIODevice& device);
+    void publishSessionChannelLimit();
+    SessionChannelView currentChannelView() const;
     void saveSetupIfAllowed();
     void syncRecorderFolder();
     void rememberSessionParent(const juce::File& sessionFolder);
@@ -264,6 +286,14 @@ private:
     bool sessionPeak_ = false;
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
     int wavBitDepth_ = kDefaultWavBitDepth;
+    bool revealUnsupported_ = false;
+    bool offlineTemplate_ = false;
+    bool recordLockArmed_ = false;
+    double preferredRate_ = 48000.0;
+    int preferredBuffer_ = 64;
+    juce::String sessionRateNotice_;
+    std::atomic<int> sessionVisible_ { kMaxChannels };
+    std::atomic<int> sessionAudioLimit_ { 0 };
     int sessionPage_ = 1;
     bool recordReady_ = false;
     bool sessionOnInternalDisk_ = false;
@@ -331,6 +361,7 @@ private:
     juce::uint32 lastBackupMs_ = 0;
     bool copyFailed_ = false;
     juce::String copyFailure_;
+    std::function<void(bool)> copyFinishedHandler_;
 };
 
 } // namespace youhost

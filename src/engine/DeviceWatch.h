@@ -27,6 +27,44 @@ inline std::string sampleRateWarningText(double deviceRate, double sessionRate)
            + " Hz. Playback needs the same rate.";
 }
 
+// 48000 -> "48", 44100 -> "44.1", 96000 -> "96".
+inline std::string formatRateKhz(double rate)
+{
+    const int milli = static_cast<int>(std::llround(rate));
+    if (milli <= 0)
+        return "0";
+    if (milli % 1000 == 0)
+        return std::to_string(milli / 1000);
+    const int tenth = (milli + 50) / 100;
+    if (tenth % 10 == 0)
+        return std::to_string(tenth / 10);
+    return std::to_string(tenth / 10) + "." + std::to_string(std::abs(tenth % 10));
+}
+
+struct SessionRateAdoption
+{
+    double rate = 0.0;
+    bool changed = false;
+    std::string notice;
+};
+
+// The session follows the card. A higher rate is announced. A lower rate is quiet.
+// The returned rate is what the session stores. WAV files are not rewritten.
+inline SessionRateAdoption adoptCardSampleRate(double sessionRate, double cardRate)
+{
+    SessionRateAdoption result;
+    result.rate = sessionRate;
+    if (! (cardRate > 0.0))
+        return result;
+    result.rate = cardRate;
+    if (! (sessionRate > 0.0) || ! sampleRatesDiffer(sessionRate, cardRate))
+        return result;
+    result.changed = true;
+    if (cardRate > sessionRate)
+        result.notice = "Session moves to " + formatRateKhz(cardRate) + " kHz";
+    return result;
+}
+
 // How many device channels YouHost will use. The fixed rack stops at 128.
 inline int usableChannelCount(int deviceChannels) noexcept
 {

@@ -142,6 +142,20 @@ void YouHostApplication::shutdown()
 
 void YouHostApplication::systemRequestedQuit()
 {
+    if (mainWindow_ != nullptr)
+    {
+        if (auto* main = dynamic_cast<MainComponent*>(mainWindow_->getContentComponent()))
+        {
+            main->requestApplicationQuit([this]
+            {
+                if (engine_ != nullptr)
+                    engine_->prepareForQuit();
+                mainWindow_.reset();
+                quit();
+            });
+            return;
+        }
+    }
     if (engine_ != nullptr)
         engine_->prepareForQuit();
     mainWindow_.reset();

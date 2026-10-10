@@ -8,13 +8,43 @@ namespace youhost
 enum class UnsavedChoice
 {
     save,
+    saveAs,
     discard,
     cancel
 };
 
-// New, Open, and Open Recent ask before throwing away edits.
+enum class SessionCloseReason
+{
+    newSession,
+    open,
+    openRecent,
+    quit,
+    deviceChange
+};
+
+// Changing device or Offline keeps the session. It does not reload it.
+inline bool closePathDiscardsSession(SessionCloseReason reason) noexcept
+{
+    return reason != SessionCloseReason::deviceChange;
+}
+
+inline bool recordingBlocksClose(bool recording, SessionCloseReason reason) noexcept
+{
+    return recording && closePathDiscardsSession(reason);
+}
+
+// New, Open, Open Recent, and quit ask before throwing away edits.
 inline bool sessionReplaceAsks(bool dirty) noexcept
 {
+    return dirty;
+}
+
+inline bool sessionCloseAsks(bool dirty, bool recording, SessionCloseReason reason) noexcept
+{
+    if (recordingBlocksClose(recording, reason))
+        return false;
+    if (! closePathDiscardsSession(reason))
+        return false;
     return dirty;
 }
 
@@ -25,9 +55,34 @@ inline bool sessionReplaceProceeds(bool dirty, UnsavedChoice choice) noexcept
     return choice != UnsavedChoice::cancel;
 }
 
+inline bool sessionCloseProceeds(bool dirty, bool recording, SessionCloseReason reason, UnsavedChoice choice) noexcept
+{
+    if (recordingBlocksClose(recording, reason))
+        return false;
+    if (! closePathDiscardsSession(reason))
+        return true;
+    return sessionReplaceProceeds(dirty, choice);
+}
+
 inline bool sessionReplaceSavesFirst(bool dirty, UnsavedChoice choice) noexcept
 {
     return dirty && choice == UnsavedChoice::save;
+}
+
+inline bool sessionCloseSavesFirst(bool dirty, bool recording, SessionCloseReason reason, UnsavedChoice choice) noexcept
+{
+    return sessionCloseProceeds(dirty, recording, reason, choice)
+           && dirty
+           && choice == UnsavedChoice::save
+           && closePathDiscardsSession(reason);
+}
+
+inline bool sessionCloseSaveAsFirst(bool dirty, bool recording, SessionCloseReason reason, UnsavedChoice choice) noexcept
+{
+    return sessionCloseProceeds(dirty, recording, reason, choice)
+           && dirty
+           && choice == UnsavedChoice::saveAs
+           && closePathDiscardsSession(reason);
 }
 
 // A brand new session has no plugins, names, colours, groups, or takes.

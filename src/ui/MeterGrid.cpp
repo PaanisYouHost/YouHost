@@ -264,6 +264,14 @@ void MeterGrid::setRecordHandler(std::function<void(int channel)> handler)
     onRecord_ = std::move(handler);
 }
 
+void MeterGrid::setListenChangesEnabled(bool enabled)
+{
+    if (listenChangesEnabled_ == enabled)
+        return;
+    listenChangesEnabled_ = enabled;
+    repaint();
+}
+
 void MeterGrid::setChannelMenuHandler(std::function<void(int channel)> handler)
 {
     onChannelMenu_ = std::move(handler);
@@ -622,6 +630,8 @@ void MeterGrid::paint(juce::Graphics& graphics)
             buttonFill = cell.reading.recordLive ? theme::red : juce::Colour(0xff8d2430);
         else if (listen == ChannelListen::input)
             buttonFill = juce::Colour(0xff245a9a);
+        if (! listenChangesEnabled_)
+            buttonFill = buttonFill.withMultipliedAlpha(0.4f);
         graphics.setColour(buttonFill);
         graphics.fillRoundedRectangle(button, 3.0f);
         graphics.setColour(on ? juce::Colours::white : theme::fainter);
@@ -700,8 +710,11 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
     }
     else if (hit.name && event.getNumberOfClicks() >= 2)
         beginNameEdit(hit.channel);
-    else if (hit.record && onRecord_ != nullptr)
-        onRecord_(hit.channel);
+    else if (hit.record)
+    {
+        if (listenChangesEnabled_ && onRecord_ != nullptr)
+            onRecord_(hit.channel);
+    }
     else if (hit.clip && onClearClip_ != nullptr)
         onClearClip_(hit.channel);
     else if (hit.channel >= 0 && onSelect_ != nullptr)

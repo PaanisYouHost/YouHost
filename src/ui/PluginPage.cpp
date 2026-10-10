@@ -788,6 +788,7 @@ public:
         number_.setText(juce::String(channel_ + 1), juce::dontSendNotification);
 
         const auto listen = engine_.channelListen(channel_);
+        arm_.setEnabled(! engine_.recordingLocked());
         arm_.setButtonText(channelListenLabel(listen));
         if (listen == ChannelListen::record)
         {

@@ -75,7 +75,8 @@ public:
                        int numInputs,
                        const std::int16_t* inputPacked,
                        int packedCount,
-                       int numSamples) noexcept;
+                       int numSamples,
+                       int activeChannels) noexcept;
     bool processPlayback(float* const* dest, int numSamples) noexcept;
     void noteCallback() noexcept;
 
@@ -99,10 +100,12 @@ public:
     void nudgeSeconds(double seconds);
     void clearTakes();
     void clearChannelNames();
+    bool channelHasTake(int channel) const;
 
     TransportView view() const;
     void visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const;
     double timelineSampleRate() const noexcept;
+    void setTimelineSampleRate(double sampleRate) noexcept;
     void setCallbacksLive(bool live) noexcept;
     void captureSession(SessionData& data) const;
     void restoreSession(const SessionData& data, const juce::File& audioFolder);

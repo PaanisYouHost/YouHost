@@ -19,6 +19,7 @@ namespace youhost
 {
 
 class BitDepthSlot;
+class RecordLockButton;
 
 class MainComponent : public juce::Component,
                       private juce::Timer,
@@ -27,6 +28,8 @@ class MainComponent : public juce::Component,
 public:
     MainComponent(AudioEngine& engine, AppSettings& settings);
     ~MainComponent() override;
+
+    void requestApplicationQuit(std::function<void()> quit);
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -121,6 +124,14 @@ private:
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
+    juce::TextButton globalRecButton_ { "REC" };
+    juce::TextButton globalInputButton_ { "INPUT" };
+    juce::TextButton globalOffButton_ { "OFF" };
+    std::unique_ptr<RecordLockButton> recordLock_;
+    std::function<void(bool)> afterCopy_;
+    bool copyWasRunning_ = false;
+    bool copyFailedSeen_ = false;
+    bool lockLayout_ = false;
     juce::Label latencyLabel_;
     juce::Viewport meterViewport_;
     MeterScaleRail leftScale_;
@@ -139,7 +150,7 @@ private:
     std::unique_ptr<juce::DocumentWindow> placeWindow_;
     std::unique_ptr<juce::DocumentWindow> copyWindow_;
     double copyProgressValue_ = 0.0;
-    void chooseSaveAsDestination();
+    void chooseSaveAsDestination(std::function<void(bool saved)> then = {});
     void syncCopyProgress();
 
     bool heavyPaintSuspended_ = false;
@@ -160,6 +171,7 @@ private:
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> deviceLostArea_;
+    juce::Rectangle<int> recordLockArea_;
     int timelineHeight_ = 0;
     juce::Rectangle<int> hintArea_;
     juce::Rectangle<int> bridgeArea_;

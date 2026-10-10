@@ -91,6 +91,38 @@ public:
         }
     }
 
+    double loadPreferredSampleRate()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getDoubleValue("preferredSampleRate", 48000.0);
+        return 48000.0;
+    }
+
+    void savePreferredSampleRate(double rate)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("preferredSampleRate", rate);
+            settings->saveIfNeeded();
+        }
+    }
+
+    int loadPreferredBuffer()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getIntValue("preferredBuffer", 64);
+        return 64;
+    }
+
+    void savePreferredBuffer(int samples)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("preferredBuffer", samples);
+            settings->saveIfNeeded();
+        }
+    }
+
     juce::String loadWindowState()
     {
         if (auto* settings = properties_.getUserSettings())

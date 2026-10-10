@@ -3,6 +3,7 @@
 #include "ScanJobs.h"
 
 #include <string_view>
+#include <vector>
 
 namespace youhost
 {
@@ -66,6 +67,29 @@ inline ChannelListen cycleChannelListen(ChannelListen mode) noexcept
         case ChannelListen::off: return ChannelListen::record;
     }
     return ChannelListen::record;
+}
+
+// Global REC, INPUT, and OFF apply to the selection. With nothing selected
+// they apply to every visible channel.
+inline std::vector<int> channelsForGlobalListen(const int* selected, int selectedCount, int visible)
+{
+    std::vector<int> channels;
+    if (visible < 0)
+        visible = 0;
+    if (selected != nullptr && selectedCount > 0)
+    {
+        for (int index = 0; index < selectedCount; ++index)
+        {
+            const int channel = selected[index];
+            if (channel >= 0 && channel < visible)
+                channels.push_back(channel);
+        }
+        return channels;
+    }
+    channels.reserve(static_cast<std::size_t>(visible));
+    for (int channel = 0; channel < visible; ++channel)
+        channels.push_back(channel);
+    return channels;
 }
 
 } // namespace youhost

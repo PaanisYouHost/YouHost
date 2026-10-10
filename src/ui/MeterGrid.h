@@ -90,6 +90,7 @@ public:
 
     void setClearHandler(std::function<void(int channel)> handler);
     void setRecordHandler(std::function<void(int channel)> handler);
+    void setListenChangesEnabled(bool enabled);
     void setChannelMenuHandler(std::function<void(int channel)> handler);
     void setGroupToggleHandler(std::function<void(int group)> handler);
     void setGroupMenuHandler(std::function<void(int group)> handler);
@@ -115,6 +116,7 @@ private:
 
     std::vector<BridgeCell> cells_;
     bool showPeak_ = false;
+    bool listenChangesEnabled_ = true;
     int rmsReferenceDb_ = -20;
     int fitWidth_ = 0;
     std::function<void(int)> onClearClip_;

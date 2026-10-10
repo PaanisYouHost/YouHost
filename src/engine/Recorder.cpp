@@ -88,6 +88,12 @@ double Recorder::timelineSampleRate() const noexcept
     return deviceRate_.load(std::memory_order_relaxed);
 }
 
+void Recorder::setTimelineSampleRate(double sampleRate) noexcept
+{
+    if (sampleRate > 0.0)
+        timelineRate_.store(sampleRate, std::memory_order_relaxed);
+}
+
 void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const
 {
     if (fn == nullptr)
@@ -207,14 +213,16 @@ void Recorder::processRecord(const float* const* inputs,
                              int numInputs,
                              const std::int16_t* inputPacked,
                              int packedCount,
-                             int numSamples) noexcept
+                             int numSamples,
+                             int activeChannels) noexcept
 {
     if (numSamples <= 0 || mode_.load(std::memory_order_acquire) != static_cast<int>(TransportMode::recording))
         return;
 
+    const int limit = std::clamp(activeChannels, 0, kMaxChannels);
     int armed = 0;
     int space = kRingSamples;
-    for (int channel = 0; channel < kMaxChannels; ++channel)
+    for (int channel = 0; channel < limit; ++channel)
     {
         if (recordMask_[static_cast<std::size_t>(channel)] == 0)
             continue;
@@ -227,7 +235,7 @@ void Recorder::processRecord(const float* const* inputs,
     if (armed > 0 && queued < numSamples)
         overflows_.fetch_add(numSamples - queued, std::memory_order_relaxed);
 
-    for (int channel = 0; channel < kMaxChannels && queued > 0; ++channel)
+    for (int channel = 0; channel < limit && queued > 0; ++channel)
     {
         if (recordMask_[static_cast<std::size_t>(channel)] == 0)
             continue;
@@ -823,6 +831,17 @@ void Recorder::clearChannelNames()
     const std::lock_guard<std::mutex> lock(stateLock_);
     for (auto& name : names_)
         name.clear();
+}
+
+bool Recorder::channelHasTake(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return false;
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    for (const auto& take : takes_)
+        if (take.files[static_cast<std::size_t>(channel)].isNotEmpty())
+            return true;
+    return false;
 }
 
 void Recorder::clearTakes()

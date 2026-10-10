@@ -8,12 +8,38 @@
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
 #include "engine/SessionFiles.h"
+#include "engine/DeviceWatch.h"
+#include "engine/RecordLock.h"
+#include "engine/SessionChannels.h"
 #include "engine/Shortcuts.h"
 
 #include <vector>
 
 namespace youhost
 {
+
+void showSessionRateNotice(AudioEngine& engine)
+{
+    const auto notice = engine.takeSessionRateNotice();
+    if (notice.isEmpty())
+        return;
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                           "Sample rate",
+                                           notice);
+}
+
+// Save = 1, Save As = 2, Don't Save = 3, Cancel = 0.
+void showUnsavedChoice(std::function<void(int result)> callback)
+{
+    auto* window = new juce::AlertWindow("Save changes?",
+                                         "This session has unsaved changes.",
+                                         juce::MessageBoxIconType::WarningIcon);
+    window->addButton("Save", 1);
+    window->addButton("Save As", 2);
+    window->addButton("Don't Save", 3);
+    window->addButton("Cancel", 0);
+    window->enterModalState(true, juce::ModalCallbackFunction::create(std::move(callback)), true);
+}
 
 class BitDepthSlot : public juce::Component
 {
@@ -116,6 +142,104 @@ void quiet(juce::Button& button)
     button.setMouseClickGrabsKeyboardFocus(false);
     button.setWantsKeyboardFocus(false);
 }
+
+void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
+{
+    const bool deviceOk = recordActionAllowed(RecordDisrupt::changeDevice, engine.isRecording(), engine.recordLockArmed());
+    const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine.isRecording(), engine.recordLockArmed());
+    std::function<void(juce::Component&)> walk;
+    walk = [&](juce::Component& node)
+    {
+        for (auto* child : node.getChildren())
+        {
+            if (child == nullptr)
+                continue;
+            if (auto* box = dynamic_cast<juce::ComboBox*>(child))
+            {
+                bool deviceList = false;
+                for (int index = 0; index < box->getNumItems(); ++index)
+                {
+                    const auto text = box->getItemText(index);
+                    if (text.contains("none") || text == juce::String(kOfflineDeviceName))
+                        deviceList = true;
+                }
+                if (deviceList)
+                {
+                    if (box->indexOfItemId(kOfflineDeviceItemId) < 0)
+                        box->addItem(kOfflineDeviceName, kOfflineDeviceItemId);
+                    if (! box->getProperties().contains("youhostOffline"))
+                    {
+                        auto previous = box->onChange;
+                        box->getProperties().set("youhostOffline", true);
+                        box->onChange = [box, previous, &engine]
+                        {
+                            if (box->getSelectedId() == kOfflineDeviceItemId)
+                            {
+                                if (! recordActionAllowed(RecordDisrupt::offlineSwitch, engine.isRecording(), engine.recordLockArmed()))
+                                {
+                                    const int last = static_cast<int>(box->getProperties()["youhostLastDevice"]);
+                                    box->setSelectedId(last == 0 ? -1 : last, juce::dontSendNotification);
+                                    return;
+                                }
+                                engine.setOfflineTemplate(true);
+                                return;
+                            }
+                            if (! recordActionAllowed(RecordDisrupt::changeDevice, engine.isRecording(), engine.recordLockArmed()))
+                                return;
+                            box->getProperties().set("youhostLastDevice", box->getSelectedId());
+                            if (engine.offlineTemplate())
+                                engine.setOfflineTemplate(false);
+                            if (previous != nullptr)
+                                previous();
+                        };
+                    }
+                    if (engine.offlineTemplate() && box->getSelectedId() != kOfflineDeviceItemId)
+                        box->setSelectedId(kOfflineDeviceItemId, juce::dontSendNotification);
+                    box->setEnabled(deviceOk);
+                }
+                else
+                {
+                    const auto text = box->getText();
+                    if (text.contains("Hz") || text.contains("sample"))
+                        box->setEnabled(rateOk);
+                }
+            }
+            walk(*child);
+        }
+    };
+    walk(root);
+}
+
+class UnsupportedRows : public juce::Component
+{
+public:
+    void setLines(const std::vector<juce::String>& lines)
+    {
+        if (lines_ == lines)
+            return;
+        lines_ = lines;
+        const int width = std::max(getWidth(), 200);
+        setSize(width, std::max(22, static_cast<int>(lines_.size()) * 22));
+        repaint();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.setColour(theme::fainter);
+        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+        for (int index = 0; index < static_cast<int>(lines_.size()); ++index)
+            graphics.drawText(lines_[static_cast<std::size_t>(index)],
+                              8,
+                              index * 22,
+                              std::max(0, getWidth() - 16),
+                              22,
+                              juce::Justification::centredLeft,
+                              true);
+    }
+
+private:
+    std::vector<juce::String> lines_;
+};
 
 class FloatWindow : public juce::DocumentWindow
 {
@@ -221,10 +345,10 @@ void attachBitDepthSlot(juce::AudioDeviceSelectorComponent& selector, BitDepthSl
 class SetupWindow : public juce::DocumentWindow
 {
 public:
-    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AppSettings& settings)
+    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AudioEngine& engine, AppSettings& settings)
         : juce::DocumentWindow("Audio setup", theme::background, juce::DocumentWindow::closeButton),
           settings_(settings),
-          content_(selector)
+          content_(selector, engine)
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
@@ -244,33 +368,152 @@ public:
     }
 
 private:
-    class Content : public juce::Component
+    class Content : public juce::Component,
+                    private juce::Timer
     {
     public:
-        explicit Content(juce::AudioDeviceSelectorComponent& selector)
-            : selector_(selector)
+        Content(juce::AudioDeviceSelectorComponent& selector, AudioEngine& engine)
+            : selector_(selector),
+              engine_(engine)
         {
+            addAndMakeVisible(note_);
+            addAndMakeVisible(reveal_);
+            addAndMakeVisible(listViewport_);
             addAndMakeVisible(viewport_);
+            note_.setJustificationType(juce::Justification::topLeft);
+            note_.setColour(juce::Label::textColourId, theme::dim);
+            reveal_.setClickingTogglesState(true);
+            reveal_.setTooltip("Shows channels this card does not have. They stay silent and are not processed.");
+            quiet(reveal_);
+            reveal_.onClick = [this]
+            {
+                engine_.setRevealUnsupportedChannels(reveal_.getToggleState());
+                refreshList();
+            };
+            listViewport_.setViewedComponent(&rows_, false);
+            listViewport_.setScrollBarsShown(true, false);
             viewport_.setViewedComponent(&selector_, false);
             viewport_.setScrollBarsShown(true, true);
+            addAndMakeVisible(offlineRate_);
+            addAndMakeVisible(offlineBuffer_);
+            for (const double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
+                offlineRate_.addItem(juce::String(formatRateKhz(rate)) + " kHz", static_cast<int>(rate));
+            offlineRate_.setSelectedId(static_cast<int>(engine_.preferredSampleRate()), juce::dontSendNotification);
+            offlineRate_.onChange = [this]
+            {
+                if (offlineRate_.getSelectedId() > 0)
+                    engine_.setPreferredSampleRate(offlineRate_.getSelectedId());
+            };
+            for (const int buffer : { 32, 64, 128, 256, 512, 1024 })
+                offlineBuffer_.addItem(juce::String(buffer) + " samples", buffer);
+            offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
+            offlineBuffer_.onChange = [this]
+            {
+                if (offlineBuffer_.getSelectedId() > 0)
+                    engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
+            };
+            refreshList();
+            startTimerHz(4);
         }
 
         ~Content() override
         {
+            stopTimer();
+            listViewport_.setViewedComponent(nullptr, false);
             viewport_.setViewedComponent(nullptr, false);
         }
 
         void resized() override
         {
             auto area = getLocalBounds().reduced(12, 8);
+            const bool offline = engine_.offlineTemplate();
+            offlineRate_.setVisible(offline);
+            offlineBuffer_.setVisible(offline);
+            if (offline)
+            {
+                auto row = area.removeFromTop(28);
+                offlineRate_.setBounds(row.removeFromLeft(150));
+                row.removeFromLeft(8);
+                offlineBuffer_.setBounds(row.removeFromLeft(160));
+                area.removeFromTop(6);
+            }
+            note_.setBounds(area.removeFromTop(showList_ ? 44 : 22));
+            area.removeFromTop(6);
+            reveal_.setVisible(showList_);
+            listViewport_.setVisible(showList_);
+            if (showList_)
+            {
+                reveal_.setBounds(area.removeFromTop(28).removeFromLeft(180));
+                area.removeFromTop(6);
+                listViewport_.setBounds(area.removeFromTop(132));
+                area.removeFromTop(8);
+                const int rowWidth = std::max(200, listViewport_.getMaximumVisibleWidth());
+                rows_.setSize(rowWidth, std::max(22, rows_.getHeight()));
+            }
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 160));
         }
 
     private:
+        void timerCallback() override
+        {
+            syncOfflineDeviceEntry(selector_, engine_);
+            const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
+            const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
+            offlineRate_.setEnabled(rateOk);
+            offlineBuffer_.setEnabled(bufferOk);
+            refreshList();
+        }
+
+        void refreshList()
+        {
+            const auto view = engine_.channelView();
+            const bool list = cardHidesChannels(view);
+            if (! list)
+            {
+                note_.setText("Every channel is on the mixer.", juce::dontSendNotification);
+                reveal_.setToggleState(false, juce::dontSendNotification);
+                rows_.setLines({});
+            }
+            else
+            {
+                juce::String text;
+                if (view.revealed)
+                    text = "Channels past this card are on the mixer and stay silent.";
+                else
+                    text = juce::String(hiddenChannelNote(view)) + ". They stay in the session.";
+                note_.setText(text, juce::dontSendNotification);
+                reveal_.setButtonText(view.revealed ? "Hide unsupported" : "Show on mixer");
+                reveal_.setToggleState(view.revealed, juce::dontSendNotification);
+                std::vector<juce::String> lines;
+                lines.reserve(static_cast<std::size_t>(kMaxChannels - view.cardInputs));
+                for (int channel = view.cardInputs; channel < kMaxChannels; ++channel)
+                {
+                    if (! channelUnsupportedByCard(channel, view))
+                        continue;
+                    lines.emplace_back(unsupportedChannelLine(channel, engine_.channelName(channel).toStdString()));
+                }
+                rows_.setLines(lines);
+            }
+
+            if (list != showList_)
+            {
+                showList_ = list;
+                resized();
+            }
+        }
+
         juce::AudioDeviceSelectorComponent& selector_;
+        AudioEngine& engine_;
+        juce::Label note_;
+        juce::TextButton reveal_ { "Show on mixer" };
+        juce::ComboBox offlineRate_;
+        juce::ComboBox offlineBuffer_;
+        UnsupportedRows rows_;
+        juce::Viewport listViewport_;
         juce::Viewport viewport_;
+        bool showList_ = false;
     };
 
     AppSettings& settings_;
@@ -558,11 +801,32 @@ private:
             bitSlot_.setSelectedId(engine_.wavBitDepth());
             bitSlot_.onChange = [this](int bits) { engine_.setWavBitDepth(bits, true); };
             attachBitDepthSlot(selector_, bitSlot_);
+            addAndMakeVisible(offlineRate_);
+            addAndMakeVisible(offlineBuffer_);
+            for (const double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
+                offlineRate_.addItem(juce::String(formatRateKhz(rate)) + " kHz", static_cast<int>(rate));
+            offlineRate_.setSelectedId(static_cast<int>(engine_.preferredSampleRate()), juce::dontSendNotification);
+            offlineRate_.onChange = [this]
+            {
+                if (offlineRate_.getSelectedId() > 0)
+                    engine_.setPreferredSampleRate(static_cast<double>(offlineRate_.getSelectedId()));
+            };
+            for (const int buffer : { 32, 64, 128, 256, 512, 1024 })
+                offlineBuffer_.addItem(juce::String(buffer) + " samples", buffer);
+            offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
+            offlineBuffer_.onChange = [this]
+            {
+                if (offlineBuffer_.getSelectedId() > 0)
+                    engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
+            };
+            offlineRate_.setVisible(false);
+            offlineBuffer_.setVisible(false);
             startTimerHz(4);
         }
 
         ~Content() override
         {
+            engine_.setCopyFinishedHandler(nullptr);
             stopTimer();
             deviceViewport_.setViewedComponent(nullptr, false);
             recentViewport_.setViewedComponent(nullptr, false);
@@ -576,6 +840,26 @@ private:
             deviceViewport_.setBounds(area.removeFromTop(168));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 140));
+            const bool offline = engine_.offlineTemplate();
+            offlineRate_.setVisible(offline);
+            offlineBuffer_.setVisible(offline);
+            if (offline)
+            {
+                if (bitSlot_.getParentComponent() != this)
+                {
+                    if (auto* old = bitSlot_.getParentComponent())
+                        old->removeChildComponent(&bitSlot_);
+                    addAndMakeVisible(bitSlot_);
+                }
+                area.removeFromTop(8);
+                auto rateRow = area.removeFromTop(28);
+                offlineRate_.setBounds(rateRow.removeFromLeft(150));
+                rateRow.removeFromLeft(8);
+                offlineBuffer_.setBounds(rateRow.removeFromLeft(160));
+                rateRow.removeFromLeft(8);
+                auto bitArea = rateRow.removeFromLeft(260);
+                bitSlot_.setBounds(bitArea.withTrimmedLeft(84));
+            }
             area.removeFromTop(10);
             auto row = area.removeFromTop(28);
             nameLabel_.setBounds(row.removeFromLeft(110));
@@ -603,8 +887,29 @@ private:
         void timerCallback() override
         {
             hideTestButtons(selector_);
-            attachBitDepthSlot(selector_, bitSlot_);
+            syncOfflineDeviceEntry(selector_, engine_);
+            if (! engine_.offlineTemplate())
+                attachBitDepthSlot(selector_, bitSlot_);
             bitSlot_.setSelectedId(engine_.wavBitDepth());
+            const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
+            const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
+            offlineRate_.setEnabled(rateOk);
+            offlineBuffer_.setEnabled(bufferOk);
+            const bool offline = engine_.offlineTemplate();
+            if (offline)
+            {
+                const int rateId = static_cast<int>(engine_.preferredSampleRate());
+                if (offlineRate_.getSelectedId() != rateId)
+                    offlineRate_.setSelectedId(rateId, juce::dontSendNotification);
+                if (offlineBuffer_.getSelectedId() != engine_.preferredBuffer())
+                    offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
+            }
+            if (offline != offlineLaidOut_)
+            {
+                offlineLaidOut_ = offline;
+                if (getWidth() > 0)
+                    resized();
+            }
             auto note = engine_.missingSessionParentNote();
             const auto deviceNote = engine_.startupDeviceNote();
             if (deviceNote.isNotEmpty())
@@ -663,37 +968,107 @@ private:
                         if (safe == nullptr)
                             return;
                         if (safe->engine_.loadSessionFrom(file))
+                        {
+                            showSessionRateNotice(safe->engine_);
                             safe->finish();
+                        }
                         else
                             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                                    "Could not open that session",
                                                                    safe->engine_.sessionMessage());
                     };
-                    if (! engine_.isSessionDirty())
-                    {
-                        open();
-                        return;
-                    }
-                    juce::AlertWindow::showYesNoCancelBox(
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Save changes?",
-                        "This session has unsaved changes.",
-                        "Save",
-                        "Don't save",
-                        "Cancel",
-                        nullptr,
-                        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), open](int result)
-                        {
-                            if (safe == nullptr || result == 0)
-                                return;
-                            if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
-                                return;
-                            open();
-                        }));
+                    replaceSession(open);
                 };
                 recent_.addAndMakeVisible(*button);
                 recentButtons_.push_back(std::move(button));
             }
+        }
+
+        void replaceSession(std::function<void()> proceed)
+        {
+            if (engine_.recordingLocked())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Unlock recording first",
+                                                       "Click the padlock to unlock. Recording stays locked until you do.");
+                return;
+            }
+            if (engine_.isRecording())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Stop recording first",
+                                                       "Stop the take before closing this session.");
+                return;
+            }
+            if (! engine_.isSessionDirty())
+            {
+                proceed();
+                return;
+            }
+
+            showUnsavedChoice([safe = juce::Component::SafePointer<Content>(this), proceed](int result)
+            {
+                if (safe == nullptr || result == 0)
+                    return;
+                if (result == 3)
+                {
+                    proceed();
+                    return;
+                }
+                if (result == 2)
+                {
+                    safe->saveCopyThen(proceed);
+                    return;
+                }
+                if (! safe->engine_.hasSession() || ! safe->engine_.saveSession())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                           "Could not save",
+                                                           safe->engine_.sessionMessage());
+                    return;
+                }
+                proceed();
+            });
+        }
+
+        void saveCopyThen(std::function<void()> proceed)
+        {
+            if (chooser_ != nullptr)
+                return;
+            chooser_ = std::make_unique<juce::FileChooser>("Save a Copy of This Session",
+                                                           engine_.suggestedSessionFolder().getParentDirectory(),
+                                                           juce::String(),
+                                                           true);
+            chooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectDirectories,
+                                  [safe = juce::Component::SafePointer<Content>(this), proceed](const juce::FileChooser& chooser)
+                                  {
+                                      const auto chosen = chooser.getResult();
+                                      juce::MessageManager::callAsync([safe, chosen, proceed]
+                                      {
+                                          if (safe == nullptr)
+                                              return;
+                                          safe->chooser_.reset();
+                                          if (chosen.getFullPathName().isEmpty())
+                                              return;
+                                          if (! safe->engine_.beginSessionCopy(chosen))
+                                          {
+                                              juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                                                     "Could not save the copy",
+                                                                                     safe->engine_.sessionMessage());
+                                              return;
+                                          }
+                                          if (safe->engine_.sessionCopyProgress() < 0.0f)
+                                          {
+                                              proceed();
+                                              return;
+                                          }
+                                          safe->engine_.setCopyFinishedHandler([safe, proceed](bool ok)
+                                          {
+                                              if (safe != nullptr && ok)
+                                                  proceed();
+                                          });
+                                      });
+                                  });
         }
 
         void browse()
@@ -742,27 +1117,7 @@ private:
                                                            "Cannot create the session",
                                                            safe->engine_.sessionMessage());
             };
-            if (! engine_.isSessionDirty())
-            {
-                place();
-                return;
-            }
-            juce::AlertWindow::showYesNoCancelBox(
-                juce::MessageBoxIconType::WarningIcon,
-                "Save changes?",
-                "This session has unsaved changes.",
-                "Save",
-                "Don't save",
-                "Cancel",
-                nullptr,
-                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), place](int result)
-                {
-                    if (safe == nullptr || result == 0)
-                        return;
-                    if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
-                        return;
-                    place();
-                }));
+            replaceSession(place);
         }
 
         void openExisting()
@@ -791,33 +1146,16 @@ private:
                                               if (safe == nullptr)
                                                   return;
                                               if (safe->engine_.loadSessionFrom(chosen))
+                                              {
+                                                  showSessionRateNotice(safe->engine_);
                                                   safe->finish();
+                                              }
                                               else
                                                   juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                                                          "Could not open that session",
                                                                                          safe->engine_.sessionMessage());
                                           };
-                                          if (! safe->engine_.isSessionDirty())
-                                          {
-                                              open();
-                                              return;
-                                          }
-                                          juce::AlertWindow::showYesNoCancelBox(
-                                              juce::MessageBoxIconType::WarningIcon,
-                                              "Save changes?",
-                                              "This session has unsaved changes.",
-                                              "Save",
-                                              "Don't save",
-                                              "Cancel",
-                                              nullptr,
-                                              juce::ModalCallbackFunction::create([safe, open](int result)
-                                              {
-                                                  if (safe == nullptr || result == 0)
-                                                      return;
-                                                  if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
-                                                      return;
-                                                  open();
-                                              }));
+                                          safe->replaceSession(open);
                                       });
                                   });
         }
@@ -835,15 +1173,18 @@ private:
                 {
                     if (result != 1 || safe == nullptr)
                         return;
-                    if (safe->engine_.isSessionDirty() && safe->engine_.hasSession() && ! safe->engine_.saveSession())
-                        return;
-                    safe->engine_.resetToCleanSession();
-                    if (safe->engine_.createInternalSession())
-                        safe->finish();
-                    else
-                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                               "Cannot create the session",
-                                                               safe->engine_.sessionMessage());
+                    safe->replaceSession([safe]
+                    {
+                        if (safe == nullptr)
+                            return;
+                        safe->engine_.resetToCleanSession();
+                        if (safe->engine_.createInternalSession())
+                            safe->finish();
+                        else
+                            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                                   "Cannot create the session",
+                                                                   safe->engine_.sessionMessage());
+                    });
                 }));
         }
 
@@ -857,6 +1198,9 @@ private:
         std::function<void()> onDone_;
         juce::AudioDeviceSelectorComponent selector_;
         BitDepthSlot bitSlot_;
+        juce::ComboBox offlineRate_;
+        juce::ComboBox offlineBuffer_;
+        bool offlineLaidOut_ = false;
         juce::File parent_;
         std::unique_ptr<juce::FileChooser> chooser_;
         juce::Label intro_;
@@ -883,6 +1227,88 @@ private:
 };
 
 } // namespace
+
+class RecordLockButton : public juce::Button
+{
+public:
+    RecordLockButton()
+        : juce::Button("Record lock")
+    {
+        setMouseClickGrabsKeyboardFocus(false);
+        setWantsKeyboardFocus(false);
+        setTooltip("Record lock. Click to arm it, and click again to unlock. There is no keyboard shortcut.");
+    }
+
+    void setLocked(bool locked)
+    {
+        if (locked_ == locked && cache_.isValid())
+            return;
+        locked_ = locked;
+        cacheDirty_ = true;
+        repaint();
+    }
+
+    void resized() override
+    {
+        cacheDirty_ = true;
+    }
+
+    void paintButton(juce::Graphics& graphics, bool, bool) override
+    {
+        ensureCache();
+        if (cache_.isValid())
+            graphics.drawImageAt(cache_, 0, 0);
+    }
+
+private:
+    void ensureCache()
+    {
+        const int width = std::max(1, getWidth());
+        const int height = std::max(1, getHeight());
+        if (! cacheDirty_ && cache_.isValid() && cache_.getWidth() == width && cache_.getHeight() == height && cacheLocked_ == locked_)
+            return;
+
+        cache_ = juce::Image(juce::Image::ARGB, width, height, true);
+        juce::Graphics image(cache_);
+        const auto fill = juce::Colour(locked_ ? kRecordLockLocked : kRecordLockUnlocked);
+        image.setColour(fill);
+        image.fillRoundedRectangle(1.0f, 1.0f, static_cast<float>(width - 2), static_cast<float>(height - 2), 8.0f);
+        image.setColour(juce::Colours::white);
+
+        const float bodyW = static_cast<float>(width) * 0.42f;
+        const float bodyH = static_cast<float>(height) * 0.34f;
+        const float bodyX = (static_cast<float>(width) - bodyW) * 0.5f;
+        const float bodyY = static_cast<float>(height) * 0.46f;
+        image.fillRoundedRectangle(bodyX, bodyY, bodyW, bodyH, 3.0f);
+
+        const float shackleW = bodyW * 0.72f;
+        const float shackleX = bodyX + (bodyW - shackleW) * 0.5f;
+        const float shackleTop = static_cast<float>(height) * 0.18f;
+        const float shackleBottom = bodyY + 4.0f;
+        juce::Path shackle;
+        if (locked_)
+        {
+            shackle.addRoundedRectangle(shackleX, shackleTop, shackleW, shackleBottom - shackleTop, shackleW * 0.5f, shackleW * 0.5f, true, true, false, false);
+        }
+        else
+        {
+            const float openShift = shackleW * 0.28f;
+            shackle.addRoundedRectangle(shackleX + openShift, shackleTop, shackleW, (shackleBottom - shackleTop) * 0.72f, shackleW * 0.5f, shackleW * 0.5f, true, true, false, false);
+        }
+        image.setColour(fill);
+        image.fillRect(shackleX + 3.0f, shackleTop + shackleW * 0.35f, shackleW - 6.0f, shackleBottom - shackleTop);
+        image.setColour(juce::Colours::white);
+        image.strokePath(shackle, juce::PathStrokeType(std::max(2.0f, static_cast<float>(height) * 0.07f)));
+
+        cacheDirty_ = false;
+        cacheLocked_ = locked_;
+    }
+
+    bool locked_ = false;
+    bool cacheLocked_ = false;
+    bool cacheDirty_ = true;
+    juce::Image cache_;
+};
 
 struct MainComponent::KeyProxy : juce::KeyListener
 {
@@ -914,26 +1340,26 @@ public:
 
     juce::PopupMenu getMenuForIndex(int, const juce::String&) override
     {
+        const bool recording = owner.engine_.isRecording();
+        const bool armed = owner.engine_.recordLockArmed();
+        const bool fileOk = recordActionAllowed(RecordDisrupt::newSession, recording, armed);
         juce::PopupMenu menu;
-        menu.addItem(1, "New");
-        menu.addItem(2, "Open...");
+        menu.addItem(1, "New", fileOk);
+        menu.addItem(2, "Open...", fileOk);
 
         juce::PopupMenu recent;
         const auto sessions = owner.engine_.recentSessions();
         for (int index = 0; index < sessions.size() && index < 10; ++index)
         {
-            juce::PopupMenu::Item item;
-            item.itemID = 100 + index;
-            item.text = juce::File(sessions[index]).getFileName();
-            recent.addItem(item);
+            recent.addItem(100 + index, juce::File(sessions[index]).getFileName(), fileOk);
         }
-        menu.addSubMenu("Open Recent", recent, ! sessions.isEmpty());
-        menu.addItem(5, "Import Recording Folder...");
+        menu.addSubMenu("Open Recent", recent, fileOk && ! sessions.isEmpty());
+        menu.addItem(5, "Import Recording Folder...", recordActionAllowed(RecordDisrupt::importRecordings, recording, armed));
         menu.addSeparator();
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveCommand);
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveAsCommand);
         menu.addSeparator();
-        menu.addItem(6, "Clear Timeline...");
+        menu.addItem(6, "Clear Timeline...", recordActionAllowed(RecordDisrupt::clearTimeline, recording, armed));
         return menu;
     }
 
@@ -1074,6 +1500,11 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(groupButton_);
     addAndMakeVisible(allButton_);
     addAndMakeVisible(hideButton_);
+    addAndMakeVisible(globalRecButton_);
+    addAndMakeVisible(globalInputButton_);
+    addAndMakeVisible(globalOffButton_);
+    recordLock_ = std::make_unique<RecordLockButton>();
+    addAndMakeVisible(*recordLock_);
     addAndMakeVisible(latencyLabel_);
     meterViewport_.setViewedComponent(&meterGrid_, false);
     meterViewport_.setScrollBarsShown(false, true);
@@ -1094,7 +1525,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         cpu_.addKeyListener(keys_.get());
         latencyWindow_->addKeyListener(keys_.get());
     }
-    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, settings_);
+    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, engine_, settings_);
     commandManager_.registerAllCommandsForTarget(this);
     commandManager_.setFirstCommandTarget(this);
     engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
@@ -1111,7 +1542,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_, &fileButton_,
                           &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
-                          &allButton_, &hideButton_ })
+                          &allButton_, &hideButton_, &globalRecButton_, &globalInputButton_, &globalOffButton_ })
         quiet(*button);
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &latencyButton_,
@@ -1167,6 +1598,17 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     helpButton_.setTooltip(juce::String(shortcutHelpText()));
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
+    globalRecButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::record); refresh(); };
+    globalInputButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::input); refresh(); };
+    globalOffButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::off); refresh(); };
+    globalRecButton_.setTooltip("Set the selected channels to REC. With no selection, every visible channel.");
+    globalInputButton_.setTooltip("Set the selected channels to INPUT. With no selection, every visible channel.");
+    globalOffButton_.setTooltip("Set the selected channels to OFF. With no selection, every visible channel.");
+    recordLock_->onClick = [this]
+    {
+        engine_.setRecordLockArmed(! engine_.recordLockArmed());
+        refresh();
+    };
     recButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8d2430));
     recButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffff3344));
     recButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -1436,6 +1878,8 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
             timeline_.verticalZoomOut();
             return true;
         case ShortcutId::recordNow:
+            if (! recordActionAllowed(RecordDisrupt::commandSpace, engine_.isRecording(), engine_.recordLockArmed()))
+                return true;
             requestRecord();
             return true;
         case ShortcutId::playOrStop:
@@ -1448,7 +1892,7 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
                 else
                     engine_.transportPlay();
             }
-            else
+            else if (recordActionAllowed(RecordDisrupt::space, engine_.isRecording(), engine_.recordLockArmed()))
                 engine_.transportStop();
             return true;
         }
@@ -1565,41 +2009,62 @@ void MainComponent::dismissStartup()
 
 void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
 {
+    if (engine_.recordingLocked())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Unlock recording first",
+                                               "Click the padlock to unlock. Recording stays locked until you do.");
+        return;
+    }
+    if (engine_.isRecording())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Stop recording first",
+                                               "Stop the take before closing this session.");
+        return;
+    }
     if (! engine_.isSessionDirty())
     {
         action();
         return;
     }
 
-    juce::Component::SafePointer<MainComponent> safe(this);
-    juce::AlertWindow::showYesNoCancelBox(
-        juce::MessageBoxIconType::WarningIcon,
-        "Save changes?",
-        "This session has unsaved changes.",
-        "Save",
-        "Don't save",
-        "Cancel",
-        nullptr,
-        juce::ModalCallbackFunction::create([safe, action](int result)
-        {
-            if (safe == nullptr || result == 0)
-                return;
-            if (result == 1)
-            {
-                if (! safe->engine_.hasSession())
-                {
-                    safe->promptForSession("Choose Where to Save This Session", [safe, action](bool placed)
-                    {
-                        if (placed && safe != nullptr)
-                            action();
-                    });
-                    return;
-                }
-                if (! safe->engine_.saveSession())
-                    return;
-            }
-            action();
-        }));
+    showUnsavedChoice([safe = juce::Component::SafePointer<MainComponent>(this), action](int result)
+                            {
+                                if (safe == nullptr || result == 0)
+                                    return;
+                                if (result == 3)
+                                {
+                                    action();
+                                    return;
+                                }
+                                if (result == 2)
+                                {
+                                    safe->chooseSaveAsDestination([safe, action](bool saved)
+                                    {
+                                        if (saved && safe != nullptr)
+                                            action();
+                                    });
+                                    return;
+                                }
+                                if (! safe->engine_.hasSession())
+                                {
+                                    safe->promptForSession("Choose Where to Save This Session", [safe, action](bool placed)
+                                    {
+                                        if (placed && safe != nullptr)
+                                            action();
+                                    });
+                                    return;
+                                }
+                                if (! safe->engine_.saveSession())
+                                    return;
+                                action();
+                            });
+}
+
+void MainComponent::requestApplicationQuit(std::function<void()> quit)
+{
+    runAfterUnsavedCheck(std::move(quit));
 }
 
 void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean)
@@ -1786,6 +2251,13 @@ void MainComponent::saveSessionAs()
         saveSession();
         return;
     }
+    if (engine_.recordingLocked())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Unlock recording first",
+                                               "Click the padlock to unlock before saving a copy.");
+        return;
+    }
     if (engine_.transportView().mode == TransportMode::recording)
     {
         juce::AlertWindow::showOkCancelBox(
@@ -1807,10 +2279,14 @@ void MainComponent::saveSessionAs()
     chooseSaveAsDestination();
 }
 
-void MainComponent::chooseSaveAsDestination()
+void MainComponent::chooseSaveAsDestination(std::function<void(bool saved)> then)
 {
     if (fileChooser_ != nullptr)
+    {
+        if (then != nullptr)
+            then(false);
         return;
+    }
 
     fileChooser_ = std::make_unique<juce::FileChooser>("Save a Copy of This Session",
                                                        engine_.suggestedSessionFolder().getParentDirectory(),
@@ -1818,14 +2294,21 @@ void MainComponent::chooseSaveAsDestination()
                                                        true);
     fileChooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectDirectories
                                   | juce::FileBrowserComponent::warnAboutOverwriting,
-                              [this](const juce::FileChooser& chooser)
+                              [this, then](const juce::FileChooser& chooser)
                               {
                                   const auto chosen = chooser.getResult();
-                                  juce::MessageManager::callAsync([this, chosen]
+                                  juce::MessageManager::callAsync([this, chosen, then]
                                   {
                                       fileChooser_.reset();
-                                      if (chosen.getFullPathName().isNotEmpty())
-                                          engine_.beginSessionCopy(chosen);
+                                      if (chosen.getFullPathName().isEmpty() || ! engine_.beginSessionCopy(chosen))
+                                      {
+                                          if (then != nullptr)
+                                              then(false);
+                                          refresh();
+                                          return;
+                                      }
+                                      if (then != nullptr)
+                                          afterCopy_ = then;
                                       refresh();
                                   });
                               });
@@ -1833,6 +2316,20 @@ void MainComponent::chooseSaveAsDestination()
 
 void MainComponent::importRecordings()
 {
+    if (engine_.recordingLocked())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Unlock recording first",
+                                               "Click the padlock to unlock. Recording stays locked until you do.");
+        return;
+    }
+    if (engine_.isRecording())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Stop recording first",
+                                               "Stop the take before importing.");
+        return;
+    }
     if (! engine_.hasSession())
     {
         promptForSession("Choose Where to Save This Session", [this](bool placed)
@@ -1865,6 +2362,20 @@ void MainComponent::importRecordings()
 
 void MainComponent::confirmClearTimeline()
 {
+    if (engine_.recordingLocked())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Unlock recording first",
+                                               "Click the padlock to unlock. Recording stays locked until you do.");
+        return;
+    }
+    if (engine_.isRecording())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Stop recording first",
+                                               "Stop the take before clearing the timeline.");
+        return;
+    }
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
                                        "Clear the Timeline?",
                                        "This removes the takes from the timeline. The WAV files stay in the audio folder.",
@@ -1890,6 +2401,7 @@ void MainComponent::openRecent(int index)
     runAfterUnsavedCheck([this, folder]
     {
         engine_.loadSessionFrom(folder);
+        showSessionRateNotice(engine_);
         refresh();
     });
 }
@@ -1963,6 +2475,7 @@ void MainComponent::syncCopyProgress()
     const auto failure = engine_.takeCopyFailure();
     if (failure.isNotEmpty())
     {
+        copyFailedSeen_ = true;
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                "Could not save the copy",
                                                failure);
@@ -1972,8 +2485,27 @@ void MainComponent::syncCopyProgress()
     if (progress < 0.0f)
     {
         copyWindow_.reset();
+        if (copyWasRunning_ || engine_.hasCopyFinishedHandler())
+        {
+            const bool wasRunning = copyWasRunning_;
+            copyWasRunning_ = false;
+            const bool ok = ! copyFailedSeen_;
+            copyFailedSeen_ = false;
+            if (wasRunning && afterCopy_ != nullptr)
+            {
+                auto next = std::move(afterCopy_);
+                next(ok);
+            }
+            if (engine_.hasCopyFinishedHandler())
+                engine_.notifyCopyFinished(ok);
+        }
+        else
+        {
+            copyFailedSeen_ = false;
+        }
         return;
     }
+    copyWasRunning_ = true;
 
     copyProgressValue_ = static_cast<double>(progress);
     if (copyWindow_ == nullptr)
@@ -2085,7 +2617,10 @@ void MainComponent::openSession()
                                   {
                                       fileChooser_.reset();
                                       if (chosen.getFullPathName().isNotEmpty())
+                                      {
                                           engine_.loadSessionFrom(chosen);
+                                          showSessionRateNotice(engine_);
+                                      }
                                       refresh();
                                   });
                               });
@@ -2106,9 +2641,7 @@ void MainComponent::timerCallback()
         attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
 
     if (setupWindow_ != nullptr && setupWindow_->isVisible())
-    {
         hideDeviceTestTone();
-    }
     refresh();
 }
 
@@ -2198,6 +2731,26 @@ void MainComponent::publishMeters(bool repaintLevels)
 
 void MainComponent::refresh()
 {
+    if (recordLock_ != nullptr)
+        recordLock_->setLocked(engine_.recordLockArmed());
+    const bool recording = engine_.isRecording();
+    const bool armedLock = engine_.recordLockArmed();
+    if (engine_.recordingLocked() != lockLayout_)
+    {
+        lockLayout_ = engine_.recordingLocked();
+        resized();
+    }
+    const bool fileOk = recordActionAllowed(RecordDisrupt::newSession, recording, armedLock);
+    newButton_.setEnabled(fileOk);
+    openButton_.setEnabled(fileOk);
+    fileButton_.setEnabled(fileOk);
+    stopButton_.setEnabled(recordActionAllowed(RecordDisrupt::stop, recording, armedLock));
+    recButton_.setEnabled(recordActionAllowed(RecordDisrupt::recToggle, recording, armedLock));
+    const bool listenOk = recordActionAllowed(RecordDisrupt::globalListen, recording, armedLock);
+    globalRecButton_.setEnabled(listenOk);
+    globalInputButton_.setEnabled(listenOk);
+    globalOffButton_.setEnabled(listenOk);
+    meterGrid_.setListenChangesEnabled(listenOk);
     const bool loading = engine_.isLoadingPlugins();
     if (loading != heavyPaintSuspended_)
     {
@@ -2239,14 +2792,14 @@ void MainComponent::refresh()
     timeline_.setWaveformGain(engine_.waveformGain());
     timeline_.setTransport(transport);
     timeLabel_.setText(timecodeText(transport.position, transport.sampleRate), juce::dontSendNotification);
-    const bool recording = transport.mode == TransportMode::recording;
+    const bool showingRecord = transport.mode == TransportMode::recording;
     const bool playing = transport.mode == TransportMode::playing;
-    timeLabel_.setColour(juce::Label::textColourId, recording ? juce::Colours::white : theme::text);
-    timeLabel_.setColour(juce::Label::backgroundColourId, recording ? juce::Colour(0xff8d2430) : theme::panel);
-    modeLabel_.setText(playing ? "PLAYBACK" : recording ? "RECORD" : juce::String(), juce::dontSendNotification);
+    timeLabel_.setColour(juce::Label::textColourId, showingRecord ? juce::Colours::white : theme::text);
+    timeLabel_.setColour(juce::Label::backgroundColourId, showingRecord ? juce::Colour(0xff8d2430) : theme::panel);
+    modeLabel_.setText(playing ? "PLAYBACK" : showingRecord ? "RECORD" : juce::String(), juce::dontSendNotification);
     modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
-    const bool blink = engine_.isRecordReady() && ! recording && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
-    recButton_.setToggleState(recording || blink, juce::dontSendNotification);
+    const bool blink = engine_.isRecordReady() && ! showingRecord && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
+    recButton_.setToggleState(showingRecord || blink, juce::dontSendNotification);
     playButton_.setToggleState(playing, juce::dontSendNotification);
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
@@ -2318,6 +2871,9 @@ void MainComponent::paint(juce::Graphics& graphics)
                << "   " << juce::String(numbers.sampleRate / 1000.0, 1) << " kHz";
     }
     status << "   " << engine_.wavBitDepthLabel();
+    const auto hiddenChannels = engine_.hiddenChannelNote();
+    if (hiddenChannels.isNotEmpty())
+        status << "   " << hiddenChannels;
     status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
     if (! engine_.hasSession())
         status << "   No session";
@@ -2364,7 +2920,18 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
-    juce::String hint = engine_.pluginLoadProgress();
+    if (! recordLockArea_.isEmpty())
+    {
+        graphics.setColour(juce::Colour(kRecordLockLocked));
+        graphics.fillRoundedRectangle(recordLockArea_.toFloat(), 8.0f);
+        graphics.setColour(juce::Colours::white);
+        graphics.setFont(juce::Font(juce::FontOptions(16.0f).withStyle("Bold")));
+        graphics.drawText("RECORDING LOCKED", recordLockArea_, juce::Justification::centred, true);
+    }
+
+    juce::String hint = engine_.hiddenChannelNote();
+    if (hint.isEmpty())
+        hint = engine_.pluginLoadProgress();
     if (hint.isEmpty())
         hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty())
@@ -2435,6 +3002,10 @@ void MainComponent::resized()
     allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
+    views.removeFromLeft(4);
+    globalRecButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
+    globalInputButton_.setBounds(views.removeFromLeft(62).reduced(0, 2));
+    globalOffButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
     views.removeFromRight(4);
     cpuButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
@@ -2450,14 +3021,17 @@ void MainComponent::resized()
 
     auto fileGap = area.removeFromTop(4);
     fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
-    auto transport = area.removeFromTop(40);
+    auto transport = area.removeFromTop(kRecordLockRowHeight);
+    if (recordLock_ != nullptr)
+        recordLock_->setBounds(transport.removeFromLeft(kRecordLockButtonWidth).reduced(2, 0));
+    transport.removeFromLeft(6);
     constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + 8 + 148 + 96;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
-    prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, 4));
-    nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, 4));
-    stopButton_.setBounds(cluster.removeFromLeft(64).reduced(2, 4));
-    playButton_.setBounds(cluster.removeFromLeft(72).reduced(2, 4));
-    recButton_.setBounds(cluster.removeFromLeft(84).reduced(2, 4));
+    prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
+    nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
+    stopButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
+    playButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
+    recButton_.setBounds(cluster.removeFromLeft(84).reduced(2, kTransportControlInsetY));
     cluster.removeFromLeft(8);
     timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
     modeLabel_.setBounds(cluster.reduced(4, 8));
@@ -2495,6 +3069,16 @@ void MainComponent::resized()
     else
     {
         deviceLostArea_ = {};
+    }
+
+    if (engine_.recordingLocked())
+    {
+        area.removeFromTop(6);
+        recordLockArea_ = area.removeFromTop(36);
+    }
+    else
+    {
+        recordLockArea_ = {};
     }
 
     area.removeFromTop(8);

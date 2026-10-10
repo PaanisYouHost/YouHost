@@ -3,6 +3,8 @@
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
 #include "engine/ChannelListen.h"
+#include "engine/SessionChannels.h"
+#include "engine/RecordLock.h"
 #include "engine/OutputGain.h"
 #include "engine/SignalPath.h"
 #include "engine/WaveformScale.h"
@@ -34,6 +36,7 @@
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -2038,6 +2041,227 @@ void testAudioEngineStressDoesNotAllocate()
     CHECK(workers[3].outputs[static_cast<std::size_t>((channelsPerThread - 1) * frames)] == 0.25f);
 }
 
+void testSessionChannelsRateLockAndClose()
+{
+    CHECK(youhost::audioCardKind("MacBook Pro Microphone") == youhost::AudioCardKind::builtin);
+    CHECK(youhost::audioCardKind("Built-in Output") == youhost::AudioCardKind::builtin);
+    CHECK(youhost::audioCardKind("X32") == youhost::AudioCardKind::real);
+    CHECK(youhost::audioCardKind("Dante Virtual Soundcard") == youhost::AudioCardKind::real);
+    CHECK(youhost::audioCardKind("") == youhost::AudioCardKind::none);
+    CHECK(youhost::audioCardKind("No device") == youhost::AudioCardKind::none);
+    CHECK(youhost::audioCardKind(youhost::kOfflineDeviceName) == youhost::AudioCardKind::none);
+
+    const auto builtin = youhost::sessionChannelView(2, true, false, false);
+    CHECK(builtin.visible == 2);
+    CHECK(builtin.visible != 128);
+    CHECK(builtin.cardInputs == 2);
+    CHECK(youhost::channelUsesCpu(0, builtin));
+    CHECK(! youhost::channelUsesCpu(2, builtin));
+    CHECK(youhost::hiddenChannelNote(builtin).find("126 channels hidden (card has 2)") != std::string::npos);
+
+    const auto card64 = youhost::sessionChannelView(64, true, false, false);
+    CHECK(card64.visible == 64);
+    CHECK(youhost::timelineShowsChannel(15, card64.visible));
+    CHECK(youhost::channelUsesCpu(15, card64));
+    CHECK(youhost::timelineShowsChannel(40, card64.visible));
+    CHECK(youhost::channelUsesCpu(40, card64));
+    CHECK(! youhost::channelUnsupportedByCard(40, card64));
+    CHECK(! youhost::timelineShowsChannel(70, card64.visible));
+    CHECK(! youhost::channelUsesCpu(70, card64));
+    CHECK(youhost::channelUnsupportedByCard(70, card64));
+
+    const auto card16 = youhost::sessionChannelView(16, true, false, false);
+    CHECK(card16.hidden == 112);
+    CHECK(youhost::hiddenChannelNote(card16) == "112 channels hidden (card has 16)");
+    CHECK(youhost::timelineShowsChannel(15, card16.visible));
+    CHECK(youhost::channelUsesCpu(15, card16));
+    CHECK(! youhost::timelineShowsChannel(40, card16.visible));
+    CHECK(! youhost::channelUsesCpu(40, card16));
+    CHECK(youhost::channelUnsupportedByCard(40, card16));
+
+    const auto revealed = youhost::sessionChannelView(16, true, false, true);
+    CHECK(revealed.visible == 128);
+    CHECK(revealed.revealed);
+    CHECK(! youhost::channelUsesCpu(40, revealed));
+    CHECK(youhost::channelUnsupportedByCard(40, revealed));
+    CHECK(youhost::unsupportedChannelLine(15, "Kick").find("16  Kick  Unsupported by this card") != std::string::npos);
+
+    const auto offline = youhost::sessionChannelView(2, true, true, false);
+    CHECK(offline.visible == 128);
+    CHECK(offline.cardInputs == 0);
+    CHECK(! youhost::channelUsesCpu(0, offline));
+    CHECK(! youhost::cardHidesChannels(offline));
+    CHECK(youhost::hiddenChannelNote(offline).empty());
+
+    const auto closed = youhost::sessionChannelView(32, false, false, false);
+    CHECK(closed.visible == 0);
+    CHECK(closed.cardInputs == 0);
+
+    const auto again = youhost::sessionChannelView(64, true, false, false);
+    CHECK(youhost::timelineShowsChannel(15, again.visible));
+
+    std::vector<std::string> devices = { "WING", youhost::kOfflineDeviceName, "X32" };
+    youhost::appendOfflineDeviceEntry(devices);
+    CHECK(devices.size() == 3);
+    CHECK(devices.back() == youhost::kOfflineDeviceName);
+    CHECK(devices[0] == "WING");
+    youhost::appendOfflineDeviceEntry(devices);
+    CHECK(devices.size() == 3);
+    CHECK(std::count(devices.begin(), devices.end(), youhost::kOfflineDeviceName) == 1);
+    CHECK(youhost::deviceKeptOnSessionOpen("WING", youhost::kOfflineDeviceName) == "WING");
+
+    youhost::SessionDocumentModel model;
+    youhost::SessionChannelRecord channel;
+    channel.index = 15;
+    channel.name = "Kick";
+    channel.color = 2;
+    channel.group = 1;
+    youhost::SessionSlotRecord slot;
+    slot.occupied = true;
+    slot.pluginName = "EQ";
+    channel.slots.push_back(slot);
+    model.channels.push_back(channel);
+    youhost::SessionTakeRecord take;
+    take.files.push_back(youhost::SessionFileRecord { 15, "16_1_Kick.wav" });
+    model.takes.push_back(take);
+    CHECK(model.channels[0].name == "Kick");
+    CHECK(model.channels[0].color == 2);
+    CHECK(model.channels[0].group == 1);
+    CHECK(model.channels[0].slots[0].pluginName == "EQ");
+    CHECK(model.takes[0].files[0].name == "16_1_Kick.wav");
+
+    const auto xml = youhost::writeSessionXml(youhost::writeSessionModel(model));
+    CHECK(xml.find("version=\"6\"") != std::string::npos);
+    CHECK(xml.find("channels=") == std::string::npos);
+    CHECK(youhost::kSessionFormatVersion == 6);
+
+    CHECK(youhost::formatRateKhz(48000.0) == "48");
+    CHECK(youhost::formatRateKhz(44100.0) == "44.1");
+    CHECK(youhost::formatRateKhz(96000.0) == "96");
+    CHECK(youhost::formatRateKhz(88200.0) == "88.2");
+    const auto up = youhost::adoptCardSampleRate(44100.0, 48000.0);
+    CHECK(up.changed);
+    CHECK(up.rate == 48000.0);
+    CHECK(up.notice == "Session moves to 48 kHz");
+    const auto up96 = youhost::adoptCardSampleRate(48000.0, 96000.0);
+    CHECK(up96.notice == "Session moves to 96 kHz");
+    const auto up88 = youhost::adoptCardSampleRate(44100.0, 88200.0);
+    CHECK(up88.notice == "Session moves to 88.2 kHz");
+    const auto down = youhost::adoptCardSampleRate(48000.0, 44100.0);
+    CHECK(down.changed);
+    CHECK(down.notice.empty());
+    CHECK(down.rate == 44100.0);
+    const auto same = youhost::adoptCardSampleRate(48000.0, 48000.0);
+    CHECK(! same.changed);
+    CHECK(same.notice.empty());
+    const auto fresh = youhost::adoptCardSampleRate(0.0, 48000.0);
+    CHECK(! fresh.changed);
+    CHECK(fresh.notice.empty());
+    CHECK(fresh.rate == 48000.0);
+
+    const youhost::SessionCloseReason closes[] = {
+        youhost::SessionCloseReason::newSession,
+        youhost::SessionCloseReason::open,
+        youhost::SessionCloseReason::openRecent,
+        youhost::SessionCloseReason::quit,
+    };
+    for (const auto reason : closes)
+    {
+        CHECK(youhost::closePathDiscardsSession(reason));
+        CHECK(youhost::recordingBlocksClose(true, reason));
+        CHECK(youhost::sessionCloseAsks(true, false, reason));
+        CHECK(! youhost::sessionCloseAsks(true, true, reason));
+        CHECK(! youhost::sessionCloseProceeds(true, true, reason, youhost::UnsavedChoice::discard));
+        CHECK(youhost::sessionCloseProceeds(true, false, reason, youhost::UnsavedChoice::save));
+        CHECK(youhost::sessionCloseProceeds(true, false, reason, youhost::UnsavedChoice::saveAs));
+        CHECK(youhost::sessionCloseProceeds(true, false, reason, youhost::UnsavedChoice::discard));
+        CHECK(! youhost::sessionCloseProceeds(true, false, reason, youhost::UnsavedChoice::cancel));
+        CHECK(youhost::sessionCloseSavesFirst(true, false, reason, youhost::UnsavedChoice::save));
+        CHECK(youhost::sessionCloseSaveAsFirst(true, false, reason, youhost::UnsavedChoice::saveAs));
+        CHECK(! youhost::sessionCloseSavesFirst(true, false, reason, youhost::UnsavedChoice::saveAs));
+        CHECK(! youhost::sessionCloseAsks(false, false, reason));
+    }
+    CHECK(! youhost::closePathDiscardsSession(youhost::SessionCloseReason::deviceChange));
+    CHECK(! youhost::recordingBlocksClose(true, youhost::SessionCloseReason::deviceChange));
+    CHECK(! youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::deviceChange));
+    CHECK(youhost::sessionCloseProceeds(true, false, youhost::SessionCloseReason::deviceChange, youhost::UnsavedChoice::cancel));
+    CHECK(! youhost::sessionCloseSavesFirst(true, false, youhost::SessionCloseReason::deviceChange, youhost::UnsavedChoice::save));
+
+    const bool locked = true;
+    const bool recording = true;
+    const youhost::RecordDisrupt blocked[] = {
+        youhost::RecordDisrupt::stop,
+        youhost::RecordDisrupt::space,
+        youhost::RecordDisrupt::commandSpace,
+        youhost::RecordDisrupt::recToggle,
+        youhost::RecordDisrupt::newSession,
+        youhost::RecordDisrupt::open,
+        youhost::RecordDisrupt::openRecent,
+        youhost::RecordDisrupt::clearTimeline,
+        youhost::RecordDisrupt::importRecordings,
+        youhost::RecordDisrupt::changeDevice,
+        youhost::RecordDisrupt::changeRate,
+        youhost::RecordDisrupt::changeBuffer,
+        youhost::RecordDisrupt::offlineSwitch,
+        youhost::RecordDisrupt::channelListen,
+        youhost::RecordDisrupt::globalListen,
+    };
+    for (const auto action : blocked)
+        CHECK(! youhost::recordActionAllowed(action, recording, locked));
+    CHECK(youhost::guardRecordAction(youhost::RecordDisrupt::quit, recording, locked) == youhost::RecordGuard::unlockBeforeQuit);
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::hostEdit, recording, locked));
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::save, recording, locked));
+
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::stop, recording, false));
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::space, recording, false));
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::channelListen, recording, false));
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::hostEdit, recording, false));
+    CHECK(youhost::guardRecordAction(youhost::RecordDisrupt::changeDevice, recording, false) == youhost::RecordGuard::blockWhileRecording);
+    CHECK(youhost::guardRecordAction(youhost::RecordDisrupt::newSession, recording, false) == youhost::RecordGuard::blockWhileRecording);
+    CHECK(youhost::guardRecordAction(youhost::RecordDisrupt::quit, recording, false) == youhost::RecordGuard::blockWhileRecording);
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::recToggle, false, true));
+    CHECK(youhost::recordActionAllowed(youhost::RecordDisrupt::space, false, true));
+    CHECK(! youhost::recordLockEngaged(true, false));
+    CHECK(youhost::recordLockEngaged(true, true));
+    CHECK(youhost::recordLockControlHeight() >= youhost::transportControlHeight());
+    CHECK(youhost::recordLockControlHeight() == 44);
+    CHECK(youhost::transportControlHeight() == 36);
+    CHECK(youhost::kRecordLockButtonWidth >= 48);
+    CHECK(youhost::kRecordLockUnlocked == 0xff6f9e96u);
+    CHECK(youhost::kRecordLockLocked == 0xffff2430u);
+
+    float input[8] = { 0.1f, -0.2f, 0.3f, -0.4f, 0.5f, -0.6f, 0.7f, -0.8f };
+    float recorded[8] = {};
+    float plugin[8];
+    std::memcpy(plugin, input, sizeof(input));
+    for (float& sample : plugin)
+        sample = 0.0f;
+    CHECK(youhost::copyRawRecordBlock(input, recorded, 8) == 8);
+    for (int index = 0; index < 8; ++index)
+        CHECK(recorded[index] == input[index]);
+    CHECK(plugin[0] == 0.0f);
+
+    const int selected[] = { 1, 16, 80 };
+    const auto picked = youhost::channelsForGlobalListen(selected, 3, 64);
+    CHECK(picked.size() == 2);
+    CHECK(picked[0] == 1);
+    CHECK(picked[1] == 16);
+    const auto all = youhost::channelsForGlobalListen(nullptr, 0, 4);
+    CHECK(all.size() == 4);
+    CHECK(all[0] == 0);
+    CHECK(all[3] == 3);
+
+    const auto help = youhost::shortcutHelpText();
+    CHECK(help.find("Offline (no audio) - 128 channels") != std::string::npos);
+    CHECK(help.find("Show on mixer") != std::string::npos);
+    CHECK(help.find("RECORDING LOCKED") != std::string::npos);
+    CHECK(help.find("Session moves to 48 kHz") != std::string::npos);
+    CHECK(help.find("Scene") == std::string::npos);
+    CHECK(help.find("MIDI") == std::string::npos);
+    CHECK(help.find("Null test") == std::string::npos);
+    CHECK(help.find("Auto (card)") == std::string::npos);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -2092,6 +2316,7 @@ int main()
     testPluginLoadPace();
     testShortcutsMatchTheHelp();
     testGroupsFoldAndPalette();
+    testSessionChannelsRateLockAndClose();
 
     if (failures != 0)
     {

@@ -128,7 +128,7 @@ inline int setupWindowWidth() noexcept
 
 inline int setupWindowHeight() noexcept
 {
-    return 520;
+    return 640;
 }
 
 inline int startupWindowWidth() noexcept

@@ -630,12 +630,26 @@ void PluginRack::audioProcessorChanged(juce::AudioProcessor*, const juce::AudioP
         stateDirty_.store(true, std::memory_order_relaxed);
 }
 
+void PluginRack::setActiveChannels(int count)
+{
+    if (count < 0)
+        count = 0;
+    if (count > kMaxChannels)
+        count = kMaxChannels;
+    const int previous = activeChannels_.exchange(count, std::memory_order_relaxed);
+    if (previous == count)
+        return;
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    publishUnlocked();
+}
+
 void PluginRack::process(float* const* outputs,
                          int numOutputs,
                          int numSamples,
                          const Routing& routing,
                          std::uint64_t enabledLow,
-                         std::uint64_t enabledHigh)
+                         std::uint64_t enabledHigh,
+                         int activeChannels)
 {
     if (numSamples > 0 && blockSize_ > 0 && numSamples != blockSize_)
     {
@@ -676,7 +690,8 @@ void PluginRack::process(float* const* outputs,
         jobGraph_ = graph;
         jobSamples_ = numSamples;
         int count = 0;
-        for (int channel = 0; channel < kMaxChannels; ++channel)
+        const int limit = std::clamp(activeChannels, 0, kMaxChannels);
+        for (int channel = 0; channel < limit; ++channel)
         {
             const int packed = routing.outputPacked[static_cast<std::size_t>(channel)];
             if (packed < 0 || packed >= numOutputs)
@@ -2088,8 +2103,16 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         buffer.ensureSize(256);
 
     std::array<ChannelLatencyInput, kMaxChannels> inputs {};
+    const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (channel >= shown)
+        {
+            chainSamples_[static_cast<std::size_t>(channel)] = 0;
+            inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { 0, false, -1 };
+            continue;
+        }
+
         int chain = 0;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {

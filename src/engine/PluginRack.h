@@ -94,7 +94,9 @@ public:
                  int numSamples,
                  const Routing& routing,
                  std::uint64_t enabledLow,
-                 std::uint64_t enabledHigh);
+                 std::uint64_t enabledHigh,
+                 int activeChannels);
+    void setActiveChannels(int count);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
     CpuMeters cpuMeters() const;
@@ -249,6 +251,7 @@ private:
     std::array<bool, kMaxChannels> audible_ {};
     std::array<int, kMaxChannels> groups_ {};
     int alignGroup_ = 0;
+    std::atomic<int> activeChannels_ { kMaxChannels };
     mutable std::array<std::atomic<std::uint64_t>, 8> coreNs_ {};
     mutable std::array<std::atomic<std::uint32_t>, 8> coreBlocks_ {};
     std::array<int, kMaxChannels> chainSamples_ {};
