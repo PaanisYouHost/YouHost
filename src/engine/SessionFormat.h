@@ -296,6 +296,11 @@ struct SessionDocumentModel
     double wave = 1.0;
     std::string align = "all";
     double rate = 0.0;
+    int buffer = 0;
+    int cardChannels = 0;
+    std::string inputDevice;
+    std::string outputDevice;
+    bool explicitOffline = false;
     int channelCount = kMaxChannels;
     bool peak = false;
     int reference = kDefaultRmsReferenceDb;
@@ -324,6 +329,13 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
     if (const auto* align = sessionAttribute(root, "align"))
         model.align = *align == "group" ? "group" : "all";
     model.rate = sessionAttributeDouble(root, "rate", 0.0);
+    model.buffer = sessionAttributeInt(root, "buffer", 0);
+    model.cardChannels = sessionAttributeInt(root, "cardChannels", 0);
+    if (const auto* input = sessionAttribute(root, "input"))
+        model.inputDevice = *input;
+    if (const auto* output = sessionAttribute(root, "output"))
+        model.outputDevice = *output;
+    model.explicitOffline = sessionAttributeBool(root, "offline", false);
     // A stored channels attribute is ignored. The session always holds 128.
     model.channelCount = kMaxChannels;
 
@@ -472,6 +484,16 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
     sessionSetAttribute(root, "align", model.align == "group" ? "group" : "all");
     if (model.rate > 0.0)
         sessionSetAttribute(root, "rate", std::to_string(model.rate));
+    if (model.buffer >= 16)
+        sessionSetAttribute(root, "buffer", std::to_string(model.buffer));
+    if (model.cardChannels > 0)
+        sessionSetAttribute(root, "cardChannels", std::to_string(model.cardChannels));
+    if (! model.inputDevice.empty())
+        sessionSetAttribute(root, "input", model.inputDevice);
+    if (! model.outputDevice.empty())
+        sessionSetAttribute(root, "output", model.outputDevice);
+    if (model.explicitOffline)
+        sessionSetAttribute(root, "offline", "1");
 
     SessionNode meters;
     meters.name = "Meters";

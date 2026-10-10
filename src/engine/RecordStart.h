@@ -15,6 +15,8 @@ namespace youhost
 {
 
 inline constexpr const char* kRecordArmedHint = "REC ARMED - press PLAY (or Cmd+Space)";
+inline constexpr const char* kOfflineRecordNotice =
+    "Offline: no audio card. Choose a card in Audio setup to record.";
 
 enum class TransportPress
 {
@@ -61,6 +63,7 @@ struct RecordAttemptResult
     bool stop = false;
     std::string log;
     std::string alert;
+    bool openAudioSetup = false;
     double rate = 0.0;
     std::vector<int> channels;
     std::vector<std::string> files;
@@ -118,7 +121,13 @@ inline RecordAttemptResult planRecordStart(const RecordAttempt& attempt)
             return failAttempt(attempt.folderProblem);
         return failAttempt("The session folder is not writable. Recording did not start.");
     }
-    if (! attempt.offline && ! attempt.deviceLive)
+    if (attempt.offline)
+    {
+        auto blocked = failAttempt(kOfflineRecordNotice);
+        blocked.openAudioSetup = true;
+        return blocked;
+    }
+    if (! attempt.deviceLive)
         return failAttempt("The audio device is not running. Recording did not start.");
 
     const double rate = recordAttemptRate(attempt);

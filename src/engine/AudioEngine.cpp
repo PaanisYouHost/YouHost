@@ -365,7 +365,8 @@ void AudioEngine::pollDeviceStats()
     juce::AudioDeviceManager::AudioDeviceSetup current;
     deviceManager_.getAudioDeviceSetup(current);
     const bool namedBySetup = device->getName() == current.outputDeviceName || device->getName() == current.inputDeviceName;
-    const bool userChoseThis = namedBySetup && wantedName_.isNotEmpty() && device->getName() != wantedName_ && ! awaitingSavedDevice_;
+    const bool userChoseThis = namedBySetup && wantedName_.isNotEmpty() && device->getName() != wantedName_
+                               && ! awaitingSavedDevice_ && ! setupLocked_;
     if (userChoseThis)
     {
         deviceLostBanner_ = false;
@@ -436,6 +437,8 @@ const AudioThreadConfig& AudioEngine::currentConfig() const
 
 SessionChannelView AudioEngine::channelView() const
 {
+    if (missingCard_)
+        return missingCardChannelView(savedCardChannels_);
     if (offlineTemplate_)
         return sessionChannelView(0, false, true, false);
     const bool open = deviceOpen_.load(std::memory_order_relaxed);
@@ -447,8 +450,10 @@ void AudioEngine::setOfflineTemplate(bool offline)
 {
     if (! recordActionAllowed(RecordDisrupt::offlineSwitch, isRecording(), recordLockArmed_))
         return;
-    if (offlineTemplate_ == offline)
+    if (offlineTemplate_ == offline && ! missingCard_)
         return;
+    missingCard_ = false;
+    missingCardStatus_.clear();
     offlineTemplate_ = offline;
     revealUnsupported_ = false;
     if (offline)
@@ -1089,9 +1094,13 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     if (remember && (needPrepare || masksChanged || wantedName_ != live->getName()))
     {
-        deviceManager_.getAudioDeviceSetup(wantedSetup_);
-        wantedName_ = live->getName();
-        saveSetupIfAllowed();
+        const bool lockedToOther = setupLocked_ && wantedName_.isNotEmpty() && live->getName() != wantedName_;
+        if (! lockedToOther)
+        {
+            deviceManager_.getAudioDeviceSetup(wantedSetup_);
+            wantedName_ = live->getName();
+            saveSetupIfAllowed();
+        }
     }
 }
 
@@ -1511,12 +1520,30 @@ void AudioEngine::setChannelListen(int channel, ChannelListen mode)
         return;
     if (channel < 0 || channel >= kMaxChannels)
         return;
+    if (listen_[static_cast<std::size_t>(channel)] == mode)
+        return;
     listen_[static_cast<std::size_t>(channel)] = mode;
-    if (recorder_ != nullptr)
-        recorder_->setArmed(channel, channelListenRecords(mode));
     storeChannelOn(channel, channelListenAudible(mode));
+    listenFlush_ = true;
+}
+
+void AudioEngine::flushListenEdits()
+{
+    if (! listenFlush_)
+        return;
+    listenFlush_ = false;
+    std::array<bool, kMaxChannels> armed {};
+    std::array<bool, kMaxChannels> audible {};
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto mode = listen_[static_cast<std::size_t>(channel)];
+        armed[static_cast<std::size_t>(channel)] = channelListenRecords(mode);
+        audible[static_cast<std::size_t>(channel)] = channelListenAudible(mode);
+    }
+    if (recorder_ != nullptr)
+        recorder_->replaceArmed(armed);
     if (rack_ != nullptr)
-        rack_->setAudible(channel, channelListenAudible(mode));
+        rack_->setAudibleAll(audible);
     noteSessionEdit();
 }
 
@@ -1710,6 +1737,7 @@ RecordAttempt AudioEngine::makeRecordAttempt()
 
 juce::String AudioEngine::pressTransport(TransportPress press)
 {
+    flushListenEdits();
     if (press == TransportPress::commandSpace)
         recordReady_ = true;
 
@@ -1869,6 +1897,18 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
                 continue;
             ListedDevice item;
             item.name = name.toStdString();
+            const auto cached = std::find_if(deviceInventory_.begin(), deviceInventory_.end(),
+                                             [&item](const ListedDevice& known)
+                                             {
+                                                 return known.name == item.name || known.inputName == item.name
+                                                        || known.outputName == item.name;
+                                             });
+            if (cached != deviceInventory_.end() && cached->inputs >= 0 && cached->outputs >= 0
+                && (cached->inputs > 0 || cached->outputs > 0))
+            {
+                found.push_back(*cached);
+                continue;
+            }
             if (auto* live = deviceManager_.getCurrentAudioDevice())
             {
                 if (live->getName() == name && live->isOpen())
@@ -1888,9 +1928,28 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
             found.push_back(std::move(item));
         }
     }
+    found = pairBuiltinCards(found);
+    std::string signature;
+    for (const auto& item : found)
+        signature += item.name + ":" + std::to_string(item.inputs) + ":" + std::to_string(item.outputs) + "\n";
+    if (signature != deviceInventorySignature_)
+    {
+        deviceInventorySignature_ = signature;
+        ++deviceMenuRevision_;
+    }
     deviceInventory_ = std::move(found);
     deviceInventoryMs_ = now;
     return deviceInventory_;
+}
+
+void AudioEngine::sampleLiveCpu()
+{
+    if (offlineTemplate_ || ! deviceOpen_.load(std::memory_order_relaxed))
+    {
+        cpuUsage_.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
 }
 
 void AudioEngine::openNamedDevice(const juce::String& name)
@@ -1906,8 +1965,20 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     revealUnsupported_ = false;
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager_.getAudioDeviceSetup(setup);
-    setup.inputDeviceName = name;
-    setup.outputDeviceName = name;
+    juce::String inputName = name;
+    juce::String outputName = name;
+    for (const auto& listed : deviceInventory_)
+    {
+        if (listed.name != name.toStdString() && listed.inputName != name.toStdString())
+            continue;
+        if (! listed.inputName.empty())
+            inputName = juce::String(listed.inputName);
+        if (! listed.outputName.empty())
+            outputName = juce::String(listed.outputName);
+        break;
+    }
+    setup.inputDeviceName = inputName;
+    setup.outputDeviceName = outputName;
     setup.useDefaultInputChannels = true;
     setup.useDefaultOutputChannels = true;
     wantedName_ = name;
@@ -2238,6 +2309,7 @@ void AudioEngine::setMeterRestoreHandler(std::function<void(bool, int)> handler)
 
 void AudioEngine::maintainSession()
 {
+    flushListenEdits();
     if (catalogue_ != nullptr)
         catalogue_->flushSave();
     drainDropoutLog();
@@ -2302,6 +2374,25 @@ SessionData AudioEngine::captureSessionData()
     data.page = sessionPage_;
     data.waveformGain = waveformGain_;
     data.alignGroup = alignGroup_;
+    data.bufferSamples = preferredBuffer_;
+    data.explicitOffline = offlineTemplate_ && ! missingCard_;
+    data.cardChannels = missingCard_ ? savedCardChannels_ : inputCount();
+    if (offlineTemplate_)
+    {
+        data.inputDevice = missingCard_ ? wantedName_ : juce::String(kOfflineDeviceName);
+        if (! (data.sampleRate > 0.0))
+            data.sampleRate = preferredRate_;
+    }
+    else
+    {
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        deviceManager_.getAudioDeviceSetup(setup);
+        data.inputDevice = setup.inputDeviceName;
+        data.outputDevice = setup.outputDeviceName;
+        if (auto* live = deviceManager_.getCurrentAudioDevice())
+            if (live->getCurrentSampleRate() > 0.0)
+                data.sampleRate = live->getCurrentSampleRate();
+    }
     data.hasPreserved = hasPreservedSession_;
     data.preserved = preservedSession_;
     if (timelineProvider_)
@@ -2405,6 +2496,42 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
     waveformGain_ = clampWaveformGain(data.waveformGain);
     alignGroup_ = data.alignGroup == 1 ? 1 : 0;
+    if (data.sampleRate > 0.0)
+        setPreferredSampleRate(data.sampleRate);
+    const bool cardPresent = [&]()
+    {
+        if (data.inputDevice.isEmpty())
+            return false;
+        inventoryForce_ = true;
+        const auto present = connectedDevices();
+        for (const auto& listed : present)
+            if (listed.name == data.inputDevice.toStdString() || listed.inputName == data.inputDevice.toStdString())
+                return true;
+        return false;
+    }();
+    const auto restored = restoreSessionCard(data.inputDevice.toStdString(),
+                                             data.outputDevice.toStdString(),
+                                             data.cardChannels,
+                                             data.bufferSamples,
+                                             data.explicitOffline,
+                                             cardPresent);
+    if (restored.offline)
+        setOfflineTemplate(true);
+    if (restored.missing)
+    {
+        missingCard_ = true;
+        savedCardChannels_ = data.cardChannels;
+        wantedName_ = juce::String(restored.input);
+        missingCardStatus_ = juce::String(restored.status);
+        sessionMessage_ = missingCardStatus_;
+        publishSessionChannelLimit();
+    }
+    else if (restored.useSaved)
+    {
+        openNamedDevice(juce::String(restored.input));
+    }
+    if (data.bufferSamples >= 16)
+        setPreferredBuffer(data.bufferSamples);
     hasPreservedSession_ = data.hasPreserved;
     preservedSession_ = data.preserved;
     if (timelineHandler_)

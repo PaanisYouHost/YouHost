@@ -4,6 +4,7 @@
 #include "engine/Shortcuts.h"
 #include "engine/ChannelListen.h"
 #include "engine/SessionChannels.h"
+#include "engine/StatusLine.h"
 #include "engine/RecordLock.h"
 #include "engine/OutputGain.h"
 #include "engine/SignalPath.h"
@@ -475,6 +476,16 @@ void testTimelineNavigation()
     CHECK(revealed <= 20);
     CHECK(revealed + 8 > 20);
     CHECK(youhost::laneScrollToReveal(40, 8, 10, 12) == 10);
+
+    const auto focused = youhost::focusReadableLane(32, 20, 200.0f);
+    const int focusedShown = youhost::lanesVisible(32, focused.verticalStep, 200.0f);
+    CHECK(200.0f / static_cast<float>(focusedShown) >= youhost::kReadableLaneHeightPx);
+    CHECK(focused.laneScroll <= 20);
+    CHECK(focused.laneScroll + focusedShown > 20);
+    const auto fitted = youhost::fitAllLaneFocus();
+    CHECK(fitted.verticalStep == 0);
+    CHECK(fitted.laneScroll == 0);
+    CHECK(youhost::lanesVisible(32, fitted.verticalStep, 200.0f) > focusedShown);
 
     const int anchored = youhost::laneScrollKeepingAnchor(32, 0, 16, 8, 3);
     CHECK(anchored <= 3);
@@ -1148,6 +1159,9 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Make group from selection") != std::string::npos);
     CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
     CHECK(help.find("Cmd+G does nothing on the HOST page") != std::string::npos);
+    CHECK(help.find("makes it tall enough to read") != std::string::npos);
+    CHECK(help.find("FIT shows every lane again") != std::string::npos);
+    CHECK(help.find("takes focus only when you click it or press G") != std::string::npos);
     CHECK(help.find("nothing while a text field has focus") != std::string::npos);
     CHECK(help.find("Option-drag") != std::string::npos);
     CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
@@ -2570,6 +2584,19 @@ void testTimelinePaintDoesNotReenterLock()
                                 });
     CHECK(sawKick);
     CHECK(sawDrums);
+
+    std::array<youhost::TimelineChannelInfo, 3> silent {};
+    silent[0].name = "One";
+    silent[1].name = "Two";
+    silent[2].name = "Three";
+    youhost::buildTimelineLanes(nullptr, 0, nullptr, silent.data(), 3, nullptr, 0,
+                                [](const std::vector<youhost::TimelineLaneView>& lanes)
+                                {
+                                    CHECK(lanes.size() == 3);
+                                    CHECK(lanes[1].number == 2);
+                                    CHECK(lanes[1].title == "Two");
+                                    CHECK(lanes[1].regions.empty());
+                                });
 }
 
 youhost::RecordAttempt readyTake()
@@ -2657,19 +2684,21 @@ void testRecordStartTransport()
     offline.deviceLive = false;
     offline.offline = true;
     const auto offlineStart = youhost::resolveTransport(offline, youhost::TransportPress::play);
-    CHECK(offlineStart.startRecording);
-    CHECK(offlineStart.files.size() == static_cast<std::size_t>(youhost::kMaxChannels));
-    CHECK(youhost::writeMonoWav((dir / offlineStart.files.front()).string(), 48000, samples, 4));
-    CHECK(youhost::writeMonoWav((dir / offlineStart.files.back()).string(), 48000, samples, 4));
+    CHECK(! offlineStart.startRecording);
+    CHECK(offlineStart.openAudioSetup);
+    CHECK(offlineStart.alert == youhost::kOfflineRecordNotice);
+    CHECK(youhost::writeMonoWav((dir / "1_1.wav").string(), 48000, samples, 4));
+    CHECK(youhost::writeMonoWav((dir / "128_1.wav").string(), 48000, samples, 4));
     CHECK(wavFileHasSamples((dir / "1_1.wav").string()));
     CHECK(wavFileHasSamples((dir / "128_1.wav").string()));
 
-    auto allOff = offline;
+    auto allOff = readyTake();
+    allOff.deviceLive = true;
     for (auto& channel : allOff.channels)
         channel.rec = false;
     const auto off = youhost::resolveTransport(allOff, youhost::TransportPress::space);
     CHECK(! off.startRecording);
-    CHECK(off.alert.find("Every channel is OFF") != std::string::npos);
+    CHECK(off.alert.find("input") != std::string::npos);
 
     auto lockedIdle = card;
     lockedIdle.lockArmed = true;
@@ -2709,7 +2738,9 @@ void testRecordStartTransport()
 
     auto fresh = offline;
     const auto afterNew = youhost::resolveTransport(fresh, youhost::TransportPress::play);
-    CHECK(afterNew.files.size() == static_cast<std::size_t>(youhost::kMaxChannels));
+    CHECK(! afterNew.startRecording);
+    CHECK(afterNew.files.empty());
+    CHECK(afterNew.alert == youhost::kOfflineRecordNotice);
 
     auto noSession = card;
     noSession.hasSession = false;
@@ -2815,6 +2846,48 @@ void testDeviceListGrouping()
     };
     CHECK(youhost::chooseStartupDevice("Pro Tools Audio Bridge 32", "", bridgeAndMac) == "MacBook Pro Microphone");
     CHECK(youhost::chooseStartupDevice("", "", std::vector<youhost::ListedDevice> { { "Pro Tools Audio Bridge 32", 32, 32 } }).empty());
+
+    const std::vector<youhost::ListedDevice> macbook = {
+        { "MacBook Pro Microphone", 1, 0 },
+        { "MacBook Pro Speakers", 0, 2 },
+        { "External Headphones", 0, 2 },
+        { "WING 2", 48, 48 },
+    };
+    const auto pairedRows = youhost::buildDeviceList(macbook, "");
+    int macRows = 0;
+    bool sawBuiltIn = false;
+    bool sawHeadphones = false;
+    for (const auto& row : pairedRows)
+    {
+        if (row.name == "MacBook Pro")
+        {
+            ++macRows;
+            sawBuiltIn = row.label == "MacBook Pro (built-in) - 1 in / 2 out";
+            CHECK(row.kind == youhost::DeviceRowKind::builtin);
+        }
+        if (row.name == "MacBook Pro Microphone" || row.name == "MacBook Pro Speakers")
+            ++macRows;
+        if (row.name == "External Headphones")
+            sawHeadphones = true;
+    }
+    CHECK(macRows == 1);
+    CHECK(sawBuiltIn);
+    CHECK(sawHeadphones);
+    const auto finnish = youhost::pairBuiltinCards({
+        { "MacBook Pro-mikrofoni", 1, 0 },
+        { "MacBook Pro-kaiuttimet", 0, 2 },
+    });
+    CHECK(finnish.size() == 1);
+    CHECK(finnish[0].name == "MacBook Pro");
+    CHECK(finnish[0].inputName == "MacBook Pro-mikrofoni");
+    CHECK(finnish[0].outputName == "MacBook Pro-kaiuttimet");
+    const auto builtIn = youhost::pairBuiltinCards({
+        { "Built-in Microphone", 1, 0 },
+        { "Built-in Output", 0, 2 },
+    });
+    CHECK(builtIn.size() == 1);
+    CHECK(builtIn[0].inputName == "Built-in Microphone");
+    CHECK(builtIn[0].outputName == "Built-in Output");
 
     const auto rows = youhost::buildDeviceList(present, "");
     CHECK(rows.size() >= 5);
@@ -3138,6 +3211,109 @@ void testReleaseChecklist()
     item("startup window has no instructional paragraph",
          mainUi.find("Choose the interface, sample rate, and buffer size") == std::string::npos
              && mainUi.find("Recordings usually go on an external drive. The interface opens") == std::string::npos);
+
+    const auto macbookPair = youhost::pairBuiltinCards({
+        { "MacBook Pro Microphone", 1, 0 },
+        { "MacBook Pro Speakers", 0, 2 },
+        { "External Headphones", 0, 2 },
+    });
+    bool macbookOne = macbookPair.size() == 2;
+    for (const auto& device : macbookPair)
+        if (device.name == "MacBook Pro")
+            macbookOne = macbookOne && device.inputs == 1 && device.outputs == 2
+                         && device.inputName == "MacBook Pro Microphone"
+                         && device.outputName == "MacBook Pro Speakers";
+    item("MacBook built-in is one audio card", macbookOne && mainUi.find("\"Audio card:\"") != std::string::npos);
+
+    int listenModes[4] = {};
+    const auto clickStarted = std::chrono::steady_clock::now();
+    for (int step = 0; step < 50; ++step)
+        youhost::applyLocalListen(listenModes, 4, step % 4, step % 3);
+    const auto clickMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - clickStarted)
+                             .count();
+    const auto engineSrc = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto listenAt = engineSrc.find("void AudioEngine::setChannelListen");
+    const auto flushAt = engineSrc.find("void AudioEngine::flushListenEdits");
+    const auto listenBody = listenAt == std::string::npos || flushAt == std::string::npos || flushAt < listenAt
+                                ? std::string()
+                                : engineSrc.substr(listenAt, flushAt - listenAt);
+    item("rapid REC/INPUT clicks do not rebuild the graph",
+         clickMs < 16 && listenBody.find("setAudible") == std::string::npos && listenBody.find("listenFlush_ = true") != std::string::npos);
+
+    youhost::SessionDocumentModel savedCard;
+    savedCard.buffer = 32;
+    savedCard.cardChannels = 16;
+    savedCard.inputDevice = "WING";
+    savedCard.outputDevice = "WING";
+    savedCard.bits = 24;
+    savedCard.rate = 48000.0;
+    const auto savedXml = youhost::writeSessionXml(youhost::writeSessionModel(savedCard));
+    youhost::SessionNode savedRoot;
+    youhost::SessionDocumentModel savedBack;
+    const bool savedRound = youhost::parseSessionXml(savedXml, savedRoot) && youhost::readSessionModel(savedRoot, savedBack);
+    const auto missing = youhost::restoreSessionCard("WING", "WING", 16, 32, false, false);
+    const auto present = youhost::restoreSessionCard("WING", "WING", 16, 32, false, true);
+    const auto explicitOffline = youhost::restoreSessionCard(youhost::kOfflineDeviceName, "", 16, 32, true, false);
+    const auto missingView = youhost::missingCardChannelView(16);
+    item("buffer 32 is saved in the session",
+         youhost::kNewSessionBufferSamples == 32 && savedRound && savedBack.buffer == 32
+             && savedBack.cardChannels == 16 && savedBack.inputDevice == "WING" && savedXml.find("channels=") == std::string::npos);
+
+    item("missing card goes Offline and keeps the saved channel count",
+         missing.missing && missing.offline && missing.visible == 16 && missing.buffer == 32
+             && missing.status == "Saved card WING not found - Offline"
+             && missingView.visible == 16 && missingView.missingCard
+             && present.useSaved && ! present.missing && present.visible == 16
+             && explicitOffline.offline && ! explicitOffline.missing && explicitOffline.visible == 128);
+
+    const auto timelineUi = readWorkspaceFile("src/ui/TimelineView.cpp");
+    item("Go field takes focus only from a click or G",
+         timelineUi.find("setWantsKeyboardFocus(false)") != std::string::npos
+             && timelineUi.find("releaseGoFocus") != std::string::npos
+             && timelineUi.find("onEscapeKey") != std::string::npos);
+
+    item("File button and Clear Timeline are gone; Open lists recent sessions",
+         mainHeader.find("fileButton_") == std::string::npos
+             && mainUi.find("Clear Timeline") == std::string::npos
+             && mainUi.find("Browse...") != std::string::npos
+             && mainUi.find("No recent sessions") != std::string::npos);
+
+    item("status line keeps fixed columns and pads CPU",
+         youhost::formatCpuField(7) == "CPU   7%" && youhost::formatCpuField(42) == "CPU  42%"
+             && youhost::formatCpuField(100) == "CPU 100%" && youhost::formatCpuField(-4) == "CPU   0%"
+             && youhost::formatCpuField(140) == "CPU 100%"
+             && youhost::formatStatusLine("A", "1 in / 2 out", "48.0 kHz", "24-bit", 7, "Song").size()
+                    == static_cast<std::size_t>(youhost::formatStatusLine("B", "48 in / 48 out", "192.0 kHz", "32-bit float", 100, "Other").size()));
+
+    const auto install = readWorkspaceFile("INSTALL.md");
+    item("install guide is the Mac steps after the app is on the Mac",
+         install.find("YouHost.app") != std::string::npos && install.find("Applications") != std::string::npos
+             && install.find("apt ") == std::string::npos && install.find("Linux") == std::string::npos);
+
+    item("session is required before the main window",
+         ! youhost::mainWindowAllowed(false, false) && ! youhost::mainWindowAllowed(false, true)
+             && youhost::mainWindowAllowed(true, false));
+
+    const auto appSrc = readWorkspaceFile("src/YouHostApplication.cpp");
+    item("Cmd+Q asks before quitting",
+         appSrc.find("requestApplicationQuit") != std::string::npos
+             && appSrc.find("systemRequestedQuit") != std::string::npos
+             && quitAsks);
+
+    item("record lock arms only from the padlock",
+         engineSrc.find("recordLockArmed_ = true") == std::string::npos
+             && mainUi.find("setRecordLockArmed(! engine_.recordLockArmed())") != std::string::npos);
+
+    item("device menu is not rebuilt on every timer tick",
+         mainUi.find("if (revision != seenMenuRevision_)") != std::string::npos);
+
+    item("Show Backups is not a control",
+         mainUi.find("Show Backup") == std::string::npos && mainHeader.find("Show Backup") == std::string::npos);
+
+    item("clicking a REC channel enlarges that lane",
+         mainUi.find("focusChannelLane(channel, page_ == 1)") != std::string::npos
+             && readWorkspaceFile("src/engine/TimelineZoom.h").find("kReadableLaneHeightPx") != std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);

@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace youhost
 {
@@ -33,6 +34,7 @@ public:
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
     void parentHierarchyChanged() override;
 
 private:
@@ -56,9 +58,8 @@ private:
     void saveSession();
     void saveSessionAs();
     void importRecordings();
-    void confirmClearTimeline();
     void openRecent(int index);
-    void showFileMenu();
+    void showOpenMenu();
     void showHelp();
     void layoutMeters();
     void openStartup();
@@ -115,7 +116,6 @@ private:
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
     juce::TextButton saveAsButton_ { "Save As" };
-    juce::TextButton fileButton_ { "File" };
     juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
     juce::TextButton cpuButton_ { "4 CPU" };
     juce::TextButton setupButton_ { "Audio setup" };
@@ -169,6 +169,9 @@ private:
 
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;
+    juce::Rectangle<int> cpuStatusArea_;
+    int lastCpuPercent_ = -1;
+    std::string lastStatusWithoutCpu_;
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> deviceLostArea_;
     juce::Rectangle<int> recordLockArea_;

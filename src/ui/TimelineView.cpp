@@ -68,6 +68,8 @@ TimelineView::TimelineView()
     fitButton_.setTooltip("Fit every take across the width and every lane down the timeline (Option+R).");
     fitButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2f6f4e));
     fitButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    gotoBox_.setWantsKeyboardFocus(false);
+    gotoBox_.setMouseClickGrabsKeyboardFocus(false);
     gotoBox_.setTextToShowWhenEmpty("Go", theme::fainter);
     gotoBox_.setInputRestrictions(3, "0123456789");
     gotoBox_.setJustification(juce::Justification::centred);
@@ -78,7 +80,9 @@ TimelineView::TimelineView()
         if (number > 0)
             scrollToChannel(number - 1);
         gotoBox_.setText({}, juce::dontSendNotification);
+        releaseGoFocus();
     };
+    gotoBox_.onEscapeKey = [this] { releaseGoFocus(); };
     waveOutButton_.setTooltip("Shorter waveform. Display only. Cmd or Option plus the wheel does this too.");
     waveInButton_.setTooltip("Taller waveform. Display only. A full-scale peak still fills the lane at the default.");
     zoomOutButton_.onClick = [this] { zoomOut(); };
@@ -154,9 +158,10 @@ void TimelineView::zoomOut()
 
 void TimelineView::fitAll()
 {
+    const auto fitted = fitAllLaneFocus();
     zoomStep_ = 0;
-    verticalStep_ = 0;
-    laneScroll_ = 0;
+    verticalStep_ = fitted.verticalStep;
+    laneScroll_ = fitted.laneScroll;
     viewStart_ = 0;
     holdTimeScroll_ = false;
     syncScroll();
@@ -234,6 +239,11 @@ void TimelineView::rememberLanes(const std::vector<TimelineLaneView>& lanes)
 
 void TimelineView::scrollToChannel(int channel)
 {
+    focusChannelLane(channel, false);
+}
+
+void TimelineView::focusChannelLane(int channel, bool enlarge)
+{
     if (channel < 0 || laneProvider_ == nullptr)
         return;
     int found = -1;
@@ -244,15 +254,43 @@ void TimelineView::scrollToChannel(int channel)
     });
     if (found < 0)
         return;
-    laneScroll_ = laneScrollToReveal(std::max(1, laneCount()), std::max(1, lanesShown()), laneScroll_, found);
+    if (enlarge)
+    {
+        const auto focus = focusReadableLane(std::max(1, laneCount()), found, waveformArea().getHeight());
+        verticalStep_ = focus.verticalStep;
+        laneScroll_ = focus.laneScroll;
+    }
+    else
+    {
+        laneScroll_ = laneScrollToReveal(std::max(1, laneCount()), std::max(1, lanesShown()), laneScroll_, found);
+    }
     syncScroll();
     repaint();
 }
 
 void TimelineView::focusChannelJump()
 {
+    gotoBox_.setWantsKeyboardFocus(true);
     gotoBox_.grabKeyboardFocus();
     gotoBox_.selectAll();
+}
+
+void TimelineView::releaseGoFocus()
+{
+    if (! gotoBox_.hasKeyboardFocus(true))
+    {
+        gotoBox_.setWantsKeyboardFocus(false);
+        return;
+    }
+    gotoBox_.setWantsKeyboardFocus(false);
+    gotoBox_.giveAwayKeyboardFocus();
+    if (auto* top = getTopLevelComponent())
+        top->grabKeyboardFocus();
+}
+
+bool TimelineView::goFieldIs(const juce::Component* component) const
+{
+    return component == &gotoBox_ || gotoBox_.isParentOf(component);
 }
 
 int TimelineView::zoomAnchorLane() const
@@ -408,6 +446,8 @@ void TimelineView::resized()
 
 void TimelineView::mouseDown(const juce::MouseEvent& event)
 {
+    if (event.eventComponent != &gotoBox_ && ! gotoBox_.isParentOf(event.eventComponent))
+        releaseGoFocus();
     if (event.position.y >= static_cast<float>(getHeight() - 8))
     {
         draggingHeight_ = true;

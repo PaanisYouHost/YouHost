@@ -134,6 +134,7 @@ struct SessionChannelView
 {
     bool offline = false;
     bool deviceOpen = false;
+    bool missingCard = false;
     int cardInputs = 0;
     int visible = 0;
     int hidden = 0;
@@ -158,6 +159,66 @@ inline SessionChannelView sessionChannelView(int cardInputs, bool deviceOpen, bo
         view.visible = 0;
     view.hidden = view.deviceOpen ? kMaxChannels - view.visible : 0;
     return view;
+}
+
+// The saved card is gone. Show that card's channel count, not the 128 of an
+// explicit Offline choice.
+inline SessionChannelView missingCardChannelView(int savedCardChannels) noexcept
+{
+    SessionChannelView view;
+    view.offline = true;
+    view.missingCard = true;
+    view.cardInputs = clampCardInputs(savedCardChannels);
+    view.visible = view.cardInputs;
+    return view;
+}
+
+struct SessionCardRestore
+{
+    bool useSaved = false;
+    bool offline = false;
+    bool missing = false;
+    int visible = 0;
+    int buffer = 0;
+    std::string input;
+    std::string output;
+    std::string status;
+};
+
+// Opening a session restores its card, buffer, and channel count. A missing
+// card goes Offline and keeps the saved count. Explicit Offline stays at 128.
+inline SessionCardRestore restoreSessionCard(std::string_view savedInput,
+                                            std::string_view savedOutput,
+                                            int savedCardChannels,
+                                            int savedBuffer,
+                                            bool explicitOffline,
+                                            bool inputPresent)
+{
+    SessionCardRestore result;
+    result.buffer = savedBuffer >= 16 ? savedBuffer : 0;
+    if (explicitOffline || isOfflineDeviceName(savedInput))
+    {
+        result.offline = true;
+        result.visible = kMaxChannels;
+        return result;
+    }
+    if (savedInput.empty())
+        return result;
+    result.useSaved = true;
+    result.input = std::string(savedInput);
+    result.output = savedOutput.empty() ? result.input : std::string(savedOutput);
+    if (! inputPresent)
+    {
+        result.missing = true;
+        result.offline = true;
+        result.visible = clampCardInputs(savedCardChannels);
+        result.status = "Saved card ";
+        result.status += result.input;
+        result.status += " not found - Offline";
+        return result;
+    }
+    result.visible = clampCardInputs(savedCardChannels);
+    return result;
 }
 
 inline std::string hiddenChannelNote(const SessionChannelView& view)
@@ -215,10 +276,108 @@ inline constexpr const char* kVirtualDeviceHeading = "Virtual / aggregate device
 
 struct ListedDevice
 {
+    ListedDevice() = default;
+    ListedDevice(std::string deviceName, int deviceInputs, int deviceOutputs)
+        : name(std::move(deviceName)),
+          inputs(deviceInputs),
+          outputs(deviceOutputs)
+    {
+    }
+
     std::string name;
     int inputs = 0;
     int outputs = 0;
+    std::string inputName;
+    std::string outputName;
 };
+
+inline bool isBuiltinMicrophone(std::string_view name) noexcept
+{
+    return audioCardKind(name) == AudioCardKind::builtin
+           && (containsFolded(name, "microphone") || containsFolded(name, "mikrofoni"));
+}
+
+inline bool isBuiltinSpeaker(std::string_view name) noexcept
+{
+    if (audioCardKind(name) != AudioCardKind::builtin || containsFolded(name, "headphone"))
+        return false;
+    // "kaiuttimet" is the plural and does not contain the singular "kaiutin".
+    return containsFolded(name, "speaker") || containsFolded(name, "kaiuttimet")
+           || containsFolded(name, "kaiutin") || containsFolded(name, "output");
+}
+
+inline std::string builtinFamilyKey(std::string_view name)
+{
+    std::string text(name);
+    const char* cuts[] = {
+        " Microphone", " microphone", "-mikrofoni", "-Mikrofoni",
+        " Speakers", " speakers", "-kaiuttimet", "-Kaiuttimet",
+        " Output", " output",
+    };
+    for (const char* cut : cuts)
+    {
+        const std::string suffix(cut);
+        if (text.size() >= suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0)
+        {
+            text.resize(text.size() - suffix.size());
+            break;
+        }
+    }
+    return text;
+}
+
+// MacBook mic + speakers become one card. Headphones stay on their own row.
+inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice>& devices)
+{
+    std::vector<ListedDevice> rest;
+    std::vector<ListedDevice> mics;
+    std::vector<ListedDevice> speakers;
+    rest.reserve(devices.size());
+    for (const auto& device : devices)
+    {
+        if (isBuiltinMicrophone(device.name))
+            mics.push_back(device);
+        else if (isBuiltinSpeaker(device.name))
+            speakers.push_back(device);
+        else
+            rest.push_back(device);
+    }
+
+    std::vector<bool> speakerUsed(speakers.size(), false);
+    for (const auto& mic : mics)
+    {
+        const auto family = builtinFamilyKey(mic.name);
+        int match = -1;
+        for (std::size_t index = 0; index < speakers.size(); ++index)
+        {
+            if (speakerUsed[index])
+                continue;
+            if (builtinFamilyKey(speakers[index].name) == family)
+            {
+                match = static_cast<int>(index);
+                break;
+            }
+        }
+        if (match < 0)
+        {
+            rest.push_back(mic);
+            continue;
+        }
+        speakerUsed[static_cast<std::size_t>(match)] = true;
+        const auto& speaker = speakers[static_cast<std::size_t>(match)];
+        ListedDevice paired;
+        paired.name = family.empty() ? mic.name : family;
+        paired.inputName = mic.name;
+        paired.outputName = speaker.name;
+        paired.inputs = mic.inputs > 0 ? mic.inputs : speaker.inputs;
+        paired.outputs = speaker.outputs > 0 ? speaker.outputs : mic.outputs;
+        rest.push_back(std::move(paired));
+    }
+    for (std::size_t index = 0; index < speakers.size(); ++index)
+        if (! speakerUsed[index])
+            rest.push_back(speakers[index]);
+    return rest;
+}
 
 enum class DeviceRowKind
 {
@@ -266,6 +425,11 @@ inline std::string deviceEntryLabel(std::string_view name, int inputs, int outpu
     if (inputs < 0 || outputs < 0)
         return std::string(name);
     std::string label(name);
+    if (audioCardKind(name) == AudioCardKind::builtin && inputs > 0 && outputs > 0
+        && ! containsFolded(name, "built-in") && ! containsFolded(name, "microphone")
+        && ! containsFolded(name, "speaker") && ! containsFolded(name, "mikrofoni")
+        && ! containsFolded(name, "kaiutin"))
+        label += " (built-in)";
     label += " - ";
     label += std::to_string(inputs);
     label += " in / ";
@@ -321,10 +485,11 @@ inline bool deviceFilterMatches(std::string_view label, std::string_view filter)
 
 inline std::vector<DeviceRow> buildDeviceList(const std::vector<ListedDevice>& devices, std::string_view filter)
 {
+    const auto paired = pairBuiltinCards(devices);
     std::vector<ListedDevice> hardware;
     std::vector<ListedDevice> virtualDevices;
     std::vector<ListedDevice> builtin;
-    for (const auto& device : devices)
+    for (const auto& device : paired)
     {
         if (device.name.empty() || isOfflineDeviceName(device.name))
             continue;

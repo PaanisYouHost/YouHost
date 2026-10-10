@@ -16,6 +16,7 @@
 #include "engine/SessionChannels.h"
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
+#include "engine/StatusLine.h"
 
 #include <vector>
 
@@ -135,10 +136,26 @@ int referenceDbFor(int id)
     return kDefaultRmsReferenceDb;
 }
 
-void showTransportResult(const juce::String& problem)
+void showTransportResult(const juce::String& problem, std::function<void()> openSetup = {})
 {
     if (problem.isEmpty())
         return;
+    if (problem == juce::String(kOfflineRecordNotice))
+    {
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::WarningIcon,
+            "Recording did not start",
+            problem,
+            "Audio setup",
+            "Close",
+            nullptr,
+            juce::ModalCallbackFunction::create([openSetup](int result)
+            {
+                if (result == 1 && openSetup != nullptr)
+                    openSetup();
+            }));
+        return;
+    }
     const auto title = problem.contains("locked") ? juce::String("Recording is locked")
                        : (problem.contains("Playback") || problem.contains("Nothing recorded")) ? juce::String("Playback")
                                                                                                 : juce::String("Recording did not start");
@@ -211,6 +228,8 @@ void showDeviceSwitchBlocked(const std::string& reason)
                                                                   : juce::String("Stop recording first");
     juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, juce::String(reason));
 }
+
+void presentSingleAudioCard(juce::Component& root);
 
 // Keeps JUCE's device row beside sample rate and buffer. The menu is hardware,
 // then a separator, then virtual devices, then Offline. Channel counts are in the names.
@@ -400,6 +419,59 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
         }
     };
     walk(root);
+    presentSingleAudioCard(root);
+}
+
+void presentSingleAudioCard(juce::Component& root)
+{
+    juce::Label* inputLabel = nullptr;
+    juce::Component* inputBox = nullptr;
+    std::function<void(juce::Component&)> find;
+    find = [&](juce::Component& node)
+    {
+        for (auto* child : node.getChildren())
+        {
+            if (child == nullptr)
+                continue;
+            if (auto* label = dynamic_cast<juce::Label*>(child))
+            {
+                const auto text = label->getText();
+                if (text == "Input:")
+                {
+                    inputLabel = label;
+                    inputBox = label->getAttachedComponent();
+                }
+                else if (text == "Output:" || text == "Device:")
+                    label->setText("Audio card:", juce::dontSendNotification);
+            }
+            find(*child);
+        }
+    };
+    find(root);
+    if (inputLabel == nullptr || ! inputLabel->isVisible())
+        return;
+
+    const int shift = std::max(inputLabel->getHeight(), inputBox != nullptr ? inputBox->getHeight() : 0) + 6;
+    const int cut = inputLabel->getY();
+    inputLabel->setVisible(false);
+    if (inputBox != nullptr)
+        inputBox->setVisible(false);
+    if (shift <= 6)
+        return;
+
+    std::function<void(juce::Component&)> lift;
+    lift = [&](juce::Component& node)
+    {
+        for (auto* child : node.getChildren())
+        {
+            if (child == nullptr || child == inputLabel || child == inputBox)
+                continue;
+            if (child->isVisible() && child->getY() > cut)
+                child->setTopLeftPosition(child->getX(), child->getY() - shift);
+            lift(*child);
+        }
+    };
+    lift(root);
 }
 
 class FloatWindow : public juce::DocumentWindow
@@ -558,6 +630,8 @@ private:
                 if (offlineBuffer_.getSelectedId() > 0)
                     engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
             };
+            seenMenuRevision_ = engine_.deviceMenuRevision();
+            syncOfflineDeviceEntry(selector_, engine_);
             startTimerHz(4);
         }
 
@@ -589,7 +663,12 @@ private:
     private:
         void timerCallback() override
         {
-            syncOfflineDeviceEntry(selector_, engine_);
+            const auto revision = engine_.deviceMenuRevision();
+            if (revision != seenMenuRevision_)
+            {
+                seenMenuRevision_ = revision;
+                syncOfflineDeviceEntry(selector_, engine_);
+            }
             const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
             const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
             offlineRate_.setEnabled(rateOk);
@@ -601,6 +680,7 @@ private:
         juce::ComboBox offlineRate_;
         juce::ComboBox offlineBuffer_;
         juce::Viewport viewport_;
+        unsigned seenMenuRevision_ = 0;
     };
 
     AppSettings& settings_;
@@ -982,7 +1062,12 @@ private:
         void timerCallback() override
         {
             hideTestButtons(selector_);
-            syncOfflineDeviceEntry(selector_, engine_);
+            const auto revision = engine_.deviceMenuRevision();
+            if (revision != seenMenuRevision_)
+            {
+                seenMenuRevision_ = revision;
+                syncOfflineDeviceEntry(selector_, engine_);
+            }
             if (! engine_.offlineTemplate())
                 attachBitDepthSlot(selector_, bitSlot_);
             bitSlot_.setSelectedId(engine_.wavBitDepth());
@@ -1313,6 +1398,7 @@ private:
         juce::Component recent_;
         juce::Label emptyRecent_;
         std::vector<std::unique_ptr<juce::TextButton>> recentButtons_;
+        unsigned seenMenuRevision_ = 0;
     };
 
     std::function<void()> onDone_;
@@ -1452,8 +1538,6 @@ public:
         menu.addSeparator();
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveCommand);
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveAsCommand);
-        menu.addSeparator();
-        menu.addItem(6, "Clear Timeline...", recordActionAllowed(RecordDisrupt::clearTimeline, recording, armed));
         return menu;
     }
 
@@ -1467,8 +1551,6 @@ public:
             owner.openSession();
         else if (id == 5)
             owner.importRecordings();
-        else if (id == 6)
-            owner.confirmClearTimeline();
         else if (id >= 100 && id < 110)
             owner.openRecent(id - 100);
         owner.refresh();
@@ -1594,7 +1676,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(openButton_);
     addAndMakeVisible(saveButton_);
     addAndMakeVisible(saveAsButton_);
-    addAndMakeVisible(fileButton_);
     addAndMakeVisible(dropoutsButton_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
@@ -1641,7 +1722,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
-                          &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_, &fileButton_,
+                          &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_,
                           &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
                           &allButton_, &hideButton_, &globalRecButton_, &globalInputButton_, &globalOffButton_ })
         quiet(*button);
@@ -1661,7 +1742,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     nextButton_.onClick = [this] { engine_.transportJump(1); };
     stopButton_.onClick = [this]
     {
-        showTransportResult(engine_.transportStop());
+        showTransportResult(engine_.transportStop(), [this] { toggleSetup(); });
         refresh();
     };
     playButton_.onClick = [this]
@@ -1669,22 +1750,21 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         if (engine_.isRecordReady() && engine_.transportView().mode == TransportMode::stopped)
             requestRecord();
         else
-            showTransportResult(engine_.transportPlay());
+            showTransportResult(engine_.transportPlay(), [this] { toggleSetup(); });
         refresh();
     };
     recButton_.onClick = [this] { engine_.toggleRecordReady(); refresh(); };
     helpButton_.onClick = [this] { showHelp(); };
     newButton_.onClick = [this] { newSession(); };
-    openButton_.onClick = [this] { openSession(); };
+    openButton_.onClick = [this] { showOpenMenu(); };
+    openButton_.setTooltip("Open a recent session, or browse for one.");
     saveButton_.onClick = [this] { saveSession(); };
     saveAsButton_.onClick = [this] { saveSessionAs(); };
-    fileButton_.onClick = [this] { showFileMenu(); };
     dropoutsButton_.onClick = [this] { toggleDropouts(); };
     recorderButton_.setTooltip("Recorder page (" + juce::String(shortcutChord(ShortcutId::recPage)) + ").");
     pluginsButton_.setTooltip("Plugins page (" + juce::String(shortcutChord(ShortcutId::hostPage)) + ").");
     dropoutsButton_.setTooltip("Open or close the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
     latencyButton_.setTooltip("Open or close the latency card (" + juce::String(shortcutChord(ShortcutId::latency)) + ").");
-    fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
     groupButton_.setTooltip("New group from the selected channels ("
                              + juce::String(shortcutChord(ShortcutId::makeGroup))
                              + "). The name is selected. Colour swatches sit under it. Enter folds the group.");
@@ -1799,7 +1879,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     {
         engine_.selectChannel(channel, extend, toggle);
     });
-    engine_.setSelectionHandler([this](int channel) { timeline_.scrollToChannel(channel); });
+    engine_.setSelectionHandler([this](int channel)
+    {
+        timeline_.focusChannelLane(channel, page_ == 1);
+    });
     timeline_.setSelectedChannel([this] { return engine_.selectedChannel(); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
     timeline_.setLaneProvider([this](const std::function<void(const std::vector<TimelineLaneView>&)>& paint)
@@ -1830,6 +1913,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
                                           });
     };
 
+    addMouseListener(this, true);
     startTimerHz(30);
     hideDeviceTestTone();
     engine_.pluginCatalogue().startIfEmpty();
@@ -2011,9 +2095,9 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
             if (mode == TransportMode::stopped && engine_.isRecordReady())
                 requestRecord();
             else if (mode == TransportMode::stopped)
-                showTransportResult(engine_.transportPlay());
+                showTransportResult(engine_.transportPlay(), [this] { toggleSetup(); });
             else
-                showTransportResult(engine_.transportStop());
+                showTransportResult(engine_.transportStop(), [this] { toggleSetup(); });
             refresh();
             return true;
         }
@@ -2261,7 +2345,7 @@ void MainComponent::requestRecord()
     if (startupWindow_ != nullptr || placeWindow_ != nullptr)
     {
         appendHostLog(settings_, "record start failed: the session window is still open");
-        showTransportResult("Close the session window before recording.");
+        showTransportResult("Close the session window before recording.", [this] { toggleSetup(); });
         return;
     }
     startRecordingIfReady();
@@ -2269,7 +2353,7 @@ void MainComponent::requestRecord()
 
 void MainComponent::startRecordingIfReady()
 {
-    showTransportResult(engine_.transportRecord());
+    showTransportResult(engine_.transportRecord(), [this] { toggleSetup(); });
     refresh();
 }
 
@@ -2456,38 +2540,6 @@ void MainComponent::importRecordings()
                               });
 }
 
-void MainComponent::confirmClearTimeline()
-{
-    if (engine_.recordingLocked())
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                               "Unlock recording first",
-                                               "Click the padlock to unlock. Recording stays locked until you do.");
-        return;
-    }
-    if (engine_.isRecording())
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                               "Stop recording first",
-                                               "Stop the take before clearing the timeline.");
-        return;
-    }
-    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
-                                       "Clear the Timeline?",
-                                       "This removes the takes from the timeline. The WAV files stay in the audio folder.",
-                                       "Clear Timeline",
-                                       "Cancel",
-                                       nullptr,
-                                       juce::ModalCallbackFunction::create([this](int result)
-                                       {
-                                           if (result == 1)
-                                           {
-                                               engine_.clearTimeline();
-                                               refresh();
-                                           }
-                                       }));
-}
-
 void MainComponent::openRecent(int index)
 {
     const auto sessions = engine_.recentSessions();
@@ -2502,17 +2554,30 @@ void MainComponent::openRecent(int index)
     });
 }
 
-void MainComponent::showFileMenu()
+void MainComponent::showOpenMenu()
 {
-    if (fileMenu_ == nullptr)
-        return;
-    auto menu = fileMenu_->getMenuForIndex(0, "File");
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&fileButton_),
+    juce::PopupMenu menu;
+    const auto sessions = engine_.recentSessions();
+    if (sessions.isEmpty())
+        menu.addItem(-1, "No recent sessions", false);
+    for (int index = 0; index < sessions.size() && index < 10; ++index)
+        menu.addItem(100 + index, juce::File(sessions[index]).getFileName());
+    menu.addSeparator();
+    menu.addItem(2, "Browse...");
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&openButton_),
                        [this](int result)
                        {
-                           if (fileMenu_ != nullptr)
-                               fileMenu_->menuItemSelected(result, 0);
+                           if (result == 2)
+                               openSession();
+                           else if (result >= 100 && result < 110)
+                               openRecent(result - 100);
                        });
+}
+
+void MainComponent::mouseDown(const juce::MouseEvent& event)
+{
+    if (! timeline_.goFieldIs(event.eventComponent))
+        timeline_.releaseGoFocus();
 }
 
 class CopyProgressWindow : public juce::DocumentWindow,
@@ -2728,7 +2793,10 @@ void MainComponent::timerCallback()
     if (++pollDivider_ >= 6)
     {
         pollDivider_ = 0;
-        engine_.pollDeviceStats();
+        if (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost())
+            engine_.sampleLiveCpu();
+        else
+            engine_.pollDeviceStats();
         engine_.maintainSession();
     }
     syncCopyProgress();
@@ -2846,7 +2914,6 @@ void MainComponent::refresh()
     const bool fileOk = recordActionAllowed(RecordDisrupt::newSession, recording, armedLock);
     newButton_.setEnabled(fileOk);
     openButton_.setEnabled(fileOk);
-    fileButton_.setEnabled(fileOk);
     stopButton_.setEnabled(recordActionAllowed(RecordDisrupt::stop, recording, armedLock));
     recButton_.setEnabled(recordActionAllowed(RecordDisrupt::recToggle, recording, armedLock));
     const bool listenOk = recordActionAllowed(RecordDisrupt::globalListen, recording, armedLock);
@@ -2924,9 +2991,29 @@ void MainComponent::refresh()
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
-    // Status text changes with the CPU readout. Buttons, meters, and the
-    // timeline repaint themselves when their own state changes.
-    repaint(statusArea_);
+    const int cpuNow = juce::jlimit(0, 100, juce::roundToInt(engine_.cpuUsage() * 100.0f));
+    std::string statusKey = engine_.missingCardStatus().isNotEmpty() ? engine_.missingCardStatus().toStdString()
+                                                                     : engine_.deviceName().toStdString();
+    statusKey += "|";
+    statusKey += std::to_string(engine_.inputCount());
+    statusKey += "|";
+    statusKey += std::to_string(engine_.outputCount());
+    statusKey += "|";
+    statusKey += engine_.wavBitDepthLabel().toStdString();
+    if (engine_.hasSession())
+        statusKey += engine_.sessionName().toStdString();
+    if (statusKey != lastStatusWithoutCpu_)
+    {
+        lastStatusWithoutCpu_ = std::move(statusKey);
+        repaint(statusArea_);
+    }
+    else if (cpuNow != lastCpuPercent_)
+    {
+        lastCpuPercent_ = cpuNow;
+        repaint(cpuStatusArea_);
+    }
+    else
+        lastCpuPercent_ = cpuNow;
     if (pollDivider_ == 0 || page_ != hintPage_)
     {
         hintPage_ = page_;
@@ -2970,31 +3057,32 @@ void MainComponent::paint(juce::Graphics& graphics)
     graphics.drawText("YouHost", titleArea_, juce::Justification::centredLeft, false);
 
     const auto numbers = engine_.latencyNumbers();
-    juce::String status = engine_.deviceName();
+    const auto cardStatus = engine_.missingCardStatus();
+    std::string device = cardStatus.isNotEmpty() ? cardStatus.toStdString() : engine_.deviceName().toStdString();
+    std::string io;
+    std::string rate;
     if (numbers.deviceOpen && numbers.sampleRate > 0.0)
     {
-        status << "   " << engine_.inputCount() << " in / " << engine_.outputCount() << " out"
-               << "   " << juce::String(numbers.sampleRate / 1000.0, 1) << " kHz";
+        io = std::to_string(engine_.inputCount()) + " in / " + std::to_string(engine_.outputCount()) + " out";
+        rate = juce::String(numbers.sampleRate / 1000.0, 1).toStdString() + " kHz";
     }
-    status << "   " << engine_.wavBitDepthLabel();
-    status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
+    else if (engine_.missingCardStatus().isNotEmpty())
+    {
+        const auto view = engine_.channelView();
+        io = std::to_string(view.visible) + " ch";
+    }
+    std::string session;
     if (engine_.hasSession())
-        status << "   " << engine_.sessionName();
+        session = engine_.sessionName().toStdString();
     if (engine_.sessionIsOnInternalDisk())
-        status << " (internal disk)";
-    const auto backup = engine_.backupStatusText();
-    if (backup.isNotEmpty())
-        status << "   " << backup;
-    const auto loadingPlugins = engine_.pluginLoadProgress();
-    if (loadingPlugins.isNotEmpty())
-        status << "   " << loadingPlugins;
-    const auto transport = engine_.transportView();
-    if (transport.status.isNotEmpty())
-        status << "   " << transport.status;
+        session += " disk";
+    const auto line = formatStatusLine(device, io, rate, engine_.wavBitDepthLabel().toStdString(),
+                                       juce::jlimit(0, 100, juce::roundToInt(engine_.cpuUsage() * 100.0f)),
+                                       session);
 
     graphics.setColour(theme::dim);
-    graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
-    graphics.drawText(status, statusArea_, juce::Justification::centredRight, true);
+    graphics.setFont(juce::Font(juce::FontOptions(13.0f).withName(juce::Font::getDefaultMonospacedFontName())));
+    graphics.drawText(juce::String(line), statusArea_, juce::Justification::centredLeft, false);
 
     if (! engine_.microphoneGranted())
     {
@@ -3090,6 +3178,9 @@ void MainComponent::resized()
     auto title = area.removeFromTop(22);
     titleArea_ = title.removeFromLeft(90);
     statusArea_ = title;
+    const int cpuChars = kStatusCpuChars;
+    const int cpuWidth = cpuChars * 8;
+    cpuStatusArea_ = statusArea_.withTrimmedLeft(statusCpuColumnIndex() * 8).withWidth(cpuWidth);
     area.removeFromTop(6);
 
     auto views = area.removeFromTop(34);
@@ -3100,10 +3191,8 @@ void MainComponent::resized()
     saveButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     views.removeFromLeft(4);
     saveAsButton_.setBounds(views.removeFromLeft(72).reduced(0, 2));
-    views.removeFromLeft(4);
+    views.removeFromLeft(8);
     setupButton_.setBounds(views.removeFromLeft(96).reduced(0, 2));
-    views.removeFromLeft(4);
-    fileButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     views.removeFromLeft(8);
     groupButton_.setBounds(views.removeFromLeft(56).reduced(0, 2));
     views.removeFromLeft(4);

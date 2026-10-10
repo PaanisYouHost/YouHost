@@ -27,6 +27,20 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | ALL labels stay ALL | The buttons stay labelled ALL REC, ALL INPUT, and ALL OFF. A selection does not rename them or narrow the tooltip. |
 | Group dialog | Cmd+G opens the name and colour dialog for the selected channels and the new group starts folded. An empty selection creates nothing. Plain G is still Go to channel. |
 | Startup window | The startup window has the menus and New / Open / Recent. The instructional paragraph is gone. |
+| MacBook built-in | The MacBook microphone and speakers are one Audio card row. Headphones stay separate. The menu label is Audio card. |
+| Rapid REC/INPUT clicks | Fifty local listen writes stay under 16 ms. The click path does not rebuild the plugin graph. |
+| Buffer saved in the session | A session file stores buffer 32, the card name, and the card channel count. It does not store a channels attribute. |
+| Missing card | A missing saved card goes Offline, keeps that card's channel count, and the status is `Saved card X not found - Offline`. Explicit Offline still shows 128. |
+| Go field focus | The Go field does not take focus until it is clicked or G is pressed. Return and Esc leave it. |
+| File and Clear | The File button and Clear Timeline are gone. Open lists recent sessions and Browse. |
+| Status line | CPU is padded to three digits. Every status column has a fixed width. |
+| Install guide | The install note is the Mac steps after YouHost.app is already on the Mac. |
+| Session required | The main window stays closed until a session exists. |
+| Cmd+Q hook | Quit goes through the unsaved-changes prompt. |
+| Record lock | The padlock is the only control that arms the lock. |
+| Device menu flicker | The audio card menu is rebuilt when the device list changes, not on every timer tick. |
+| Show Backups | There is no Show Backups control. Backups still run on their own. |
+| REC lane click | Clicking a channel on the REC page scrolls to that lane and makes it tall enough to read. |
 
 ## Windows to photograph on a Mac release
 

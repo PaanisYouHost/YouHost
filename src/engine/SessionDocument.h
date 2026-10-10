@@ -63,6 +63,11 @@ struct SessionData
     float waveformGain = 1.0f;
     int alignGroup = 0;
     double sampleRate = 0.0;
+    int bufferSamples = 0;
+    int cardChannels = 0;
+    bool explicitOffline = false;
+    juce::String inputDevice;
+    juce::String outputDevice;
     int channelCount = kMaxChannels;
     SessionTimelineState timeline {};
     std::unique_ptr<juce::XmlElement> device;

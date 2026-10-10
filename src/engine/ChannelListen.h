@@ -96,6 +96,14 @@ inline std::vector<int> channelsForGlobalListen(const int* selected, int selecte
     return channels;
 }
 
+// A channel-button click only writes the mode. It does not rebuild a graph.
+inline void applyLocalListen(int* modes, int count, int channel, int mode) noexcept
+{
+    if (modes == nullptr || channel < 0 || channel >= count)
+        return;
+    modes[channel] = mode;
+}
+
 // Page 1 is REC and page 2 is HOST. Both return the same visible channels.
 inline std::vector<int> channelsForPageListen(int page, const int* selected, int selectedCount, int visible)
 {

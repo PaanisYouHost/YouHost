@@ -140,6 +140,12 @@ void YouHostApplication::shutdown()
     lookAndFeel_.reset();
 }
 
+void YouHostApplication::anotherInstanceStarted(const juce::String&)
+{
+    if (mainWindow_ != nullptr)
+        mainWindow_->toFront(true);
+}
+
 void YouHostApplication::systemRequestedQuit()
 {
     if (mainWindow_ != nullptr)

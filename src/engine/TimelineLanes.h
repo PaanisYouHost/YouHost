@@ -173,23 +173,6 @@ inline void buildTimelineLanes(const TimelineTakeSource* takes,
     if (count < 0)
         count = 0;
 
-    std::array<bool, kMaxChannels> heard {};
-    const auto markHeard = [&heard, shown](const TimelineTakeSource* view)
-    {
-        if (view == nullptr)
-            return;
-        for (int channel = 0; channel < shown; ++channel)
-        {
-            const auto index = static_cast<std::size_t>(channel);
-            const auto* peaks = view->peaks[index];
-            if (view->recorded[index] || (peaks != nullptr && ! peaks->empty()))
-                heard[index] = true;
-        }
-    };
-    for (int index = 0; index < count; ++index)
-        markHeard(takes + index);
-    markHeard(live);
-
     struct LaneDesc
     {
         bool group = false;
@@ -203,8 +186,6 @@ inline void buildTimelineLanes(const TimelineTakeSource* takes,
     std::array<bool, kMaxDisplayGroups> groupDone {};
     for (int channel = 0; channel < shown; ++channel)
     {
-        if (! heard[static_cast<std::size_t>(channel)])
-            continue;
         const int group = channels != nullptr ? channels[channel].group : -1;
         const bool collapsed = group >= 0 && group < groupCount && groups != nullptr && groups[group].collapsed;
         if (collapsed)
@@ -217,7 +198,7 @@ inline void buildTimelineLanes(const TimelineTakeSource* takes,
             description.color = groups[group].color;
             description.title = groups[group].name.empty() ? "Group " + std::to_string(group + 1) : groups[group].name;
             for (int member = 0; member < shown; ++member)
-                if (channels[member].group == group && heard[static_cast<std::size_t>(member)])
+                if (channels != nullptr && channels[member].group == group)
                     description.members.push_back(member);
             descriptions.push_back(std::move(description));
             continue;

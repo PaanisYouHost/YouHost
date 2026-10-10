@@ -15,6 +15,7 @@ namespace youhost
 inline constexpr int kMaxTimelineZoomStep = 40;
 inline constexpr std::int64_t kMinTimelineZoomSamples = 2048;
 inline constexpr float kLaneLabelMinPx = 12.0f;
+inline constexpr float kReadableLaneHeightPx = 72.0f;
 inline constexpr int kTimelineRulerHeightPx = 18;
 inline constexpr float kTimelineTimecodeColumn = 70.0f;
 
@@ -318,6 +319,43 @@ inline int laneScrollKeepingAnchor(int total, int oldScroll, int oldShown, int n
     if (newOffset >= newShown)
         newOffset = newShown - 1;
     return clampLaneIndex(anchorLane - newOffset, total, newShown);
+}
+
+struct LaneFocus
+{
+    int verticalStep = 0;
+    int laneScroll = 0;
+};
+
+// Clicking a channel on REC makes that lane tall enough to read and puts it at the top.
+inline LaneFocus focusReadableLane(int totalLanes, int lane, float areaHeightPx) noexcept
+{
+    LaneFocus focus;
+    if (totalLanes < 1)
+        totalLanes = 1;
+    if (lane < 0)
+        lane = 0;
+    if (lane >= totalLanes)
+        lane = totalLanes - 1;
+
+    const int maxStep = maxVerticalZoomStep(totalLanes);
+    int step = 0;
+    for (; step < maxStep; ++step)
+    {
+        const int shown = std::max(1, lanesVisible(totalLanes, step, areaHeightPx));
+        if (areaHeightPx / static_cast<float>(shown) >= kReadableLaneHeightPx)
+            break;
+    }
+    focus.verticalStep = step;
+    const int shown = std::max(1, lanesVisible(totalLanes, focus.verticalStep, areaHeightPx));
+    focus.laneScroll = clampLaneIndex(lane, totalLanes, shown);
+    return focus;
+}
+
+// FIT puts every lane back. Step 0 is the fitted view.
+inline LaneFocus fitAllLaneFocus() noexcept
+{
+    return {};
 }
 
 // Scroll just enough that `lane` is fully inside the visible range.

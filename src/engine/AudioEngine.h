@@ -57,6 +57,11 @@ public:
     bool isRunning() const noexcept { return started_; }
 
     void pollDeviceStats();
+    void sampleLiveCpu();
+    unsigned deviceMenuRevision() const noexcept { return deviceMenuRevision_; }
+    bool deviceSetupLocked() const noexcept { return setupLocked_; }
+    bool deviceIsOpen() const noexcept { return deviceOpen_.load(std::memory_order_relaxed); }
+    juce::String missingCardStatus() const { return missingCardStatus_; }
     LatencyNumbers latencyNumbers() const;
     int visibleChannels() const;
     int sessionChannelCount() const noexcept { return sessionChannelCount_; }
@@ -110,6 +115,7 @@ public:
     bool isRecordArmed(int channel) const;
     ChannelListen channelListen(int channel) const;
     void setChannelListen(int channel, ChannelListen mode);
+    void flushListenEdits();
     void cycleChannelListen(int channel);
     float outputDb(int channel) const;
     void setOutputDb(int channel, float db);
@@ -348,6 +354,12 @@ private:
     std::atomic<bool> deviceDown_ { false };
     bool setupLocked_ = false;
     bool inventoryForce_ = false;
+    bool listenFlush_ = false;
+    bool missingCard_ = false;
+    int savedCardChannels_ = 0;
+    juce::String missingCardStatus_;
+    unsigned deviceMenuRevision_ = 0;
+    std::string deviceInventorySignature_;
     std::atomic<bool> closingDevice_ { false };
     bool deviceLostBanner_ = false;
     bool reopenInProgress_ = false;

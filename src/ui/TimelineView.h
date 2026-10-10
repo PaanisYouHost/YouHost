@@ -40,7 +40,10 @@ public:
     void setWaveformGainHandler(std::function<void(float)> handler);
     void setSelectedChannel(std::function<int()> channel);
     void scrollToChannel(int channel);
+    void focusChannelLane(int channel, bool enlarge);
     void focusChannelJump();
+    void releaseGoFocus();
+    bool goFieldIs(const juce::Component* component) const;
     void setViewState(const SessionTimelineState& state);
     SessionTimelineState viewState() const;
 
@@ -92,7 +95,17 @@ private:
     juce::TextButton verticalOutButton_ { "v-" };
     juce::TextButton verticalInButton_ { "v+" };
     juce::TextButton fitButton_ { "FIT" };
-    juce::TextEditor gotoBox_;
+    class GoBox : public juce::TextEditor
+    {
+    public:
+        void mouseDown(const juce::MouseEvent& event) override
+        {
+            setWantsKeyboardFocus(true);
+            juce::TextEditor::mouseDown(event);
+            grabKeyboardFocus();
+        }
+    };
+    GoBox gotoBox_;
     juce::TextButton waveOutButton_ { "W-" };
     juce::TextButton waveInButton_ { "W+" };
     float waveformGain_ = 1.0f;

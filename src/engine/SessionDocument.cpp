@@ -120,6 +120,16 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
     root.setAttribute("align", data.alignGroup == 1 ? "group" : "all");
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
+    if (data.bufferSamples >= 16)
+        root.setAttribute("buffer", data.bufferSamples);
+    if (data.cardChannels > 0)
+        root.setAttribute("cardChannels", data.cardChannels);
+    if (data.inputDevice.isNotEmpty())
+        root.setAttribute("input", data.inputDevice);
+    if (data.outputDevice.isNotEmpty())
+        root.setAttribute("output", data.outputDevice);
+    if (data.explicitOffline)
+        root.setAttribute("offline", 1);
 
     auto* meters = root.createNewChildElement("Meters");
     meters->setAttribute("peak", data.peakMeter);
@@ -240,6 +250,11 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     data.timeline = timelineFromNode(data.preserved);
     data.page = root->getIntAttribute("page", 1) == 2 ? 2 : 1;
     data.sampleRate = root->getDoubleAttribute("rate", 0.0);
+    data.bufferSamples = root->getIntAttribute("buffer", 0);
+    data.cardChannels = root->getIntAttribute("cardChannels", 0);
+    data.inputDevice = root->getStringAttribute("input");
+    data.outputDevice = root->getStringAttribute("output");
+    data.explicitOffline = root->getBoolAttribute("offline", false);
     data.channelCount = kMaxChannels;
     data.waveformGain = static_cast<float>(root->getDoubleAttribute("wave", 1.0));
     data.alignGroup = root->getStringAttribute("align") == "group" ? 1 : 0;
