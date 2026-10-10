@@ -681,6 +681,7 @@ private:
                         "Save",
                         "Don't save",
                         "Cancel",
+                        nullptr,
                         juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), open](int result)
                         {
                             if (safe == nullptr || result == 0)
@@ -753,6 +754,7 @@ private:
                 "Save",
                 "Don't save",
                 "Cancel",
+                nullptr,
                 juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), place](int result)
                 {
                     if (safe == nullptr || result == 0)
@@ -807,6 +809,7 @@ private:
                                               "Save",
                                               "Don't save",
                                               "Cancel",
+                                              nullptr,
                                               juce::ModalCallbackFunction::create([safe, open](int result)
                                               {
                                                   if (safe == nullptr || result == 0)
@@ -1576,6 +1579,7 @@ void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
         "Save",
         "Don't save",
         "Cancel",
+        nullptr,
         juce::ModalCallbackFunction::create([safe, action](int result)
         {
             if (safe == nullptr || result == 0)
