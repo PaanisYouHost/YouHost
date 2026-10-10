@@ -40,6 +40,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -558,6 +559,58 @@ void testSessionFileActions()
     CHECK(help.find("MIDI") == std::string::npos);
 }
 
+std::string readWorkspaceFile(const char* path)
+{
+    std::ifstream in(path);
+    if (! in)
+        return {};
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+void testInstallGuide()
+{
+    const auto guide = readWorkspaceFile("INSTALL.md");
+    const auto workflow = readWorkspaceFile(".github/workflows/build-macos.yml");
+    CHECK(! guide.empty());
+    CHECK(! workflow.empty());
+
+    const auto finnish = guide.find("YouHost — ASENNUSOHJE");
+    const auto english = guide.find("YouHost — INSTALL");
+    CHECK(finnish != std::string::npos);
+    CHECK(english != std::string::npos);
+    CHECK(finnish < english);
+
+    const char* required[] = {
+        "Artifacts",
+        "YouHost-macOS-universal",
+        "YouHost.app",
+        "Applications",
+        "Open Anyway",
+        "Avaa silti",
+        "xattr -dr com.apple.quarantine /Applications/YouHost.app",
+        "SCAN",
+        "~/Library/Application Support/Ambient Audio/YouHost",
+        "youhost.log",
+        "crash-journal.txt",
+        "32-64",
+        "Do not scan plugins during a show.",
+        "Älä skannaa plugineja keikan aikana.",
+        "ASENNUSOHJE - INSTALL.txt",
+    };
+    for (const char* phrase : required)
+        CHECK(guide.find(phrase) != std::string::npos);
+
+    CHECK(workflow.find("pack/ASENNUSOHJE - INSTALL.txt") != std::string::npos);
+    CHECK(workflow.find("cp \"INSTALL.md\" \"pack/ASENNUSOHJE - INSTALL.txt\"") != std::string::npos);
+    CHECK(workflow.find("path: pack") != std::string::npos);
+
+    const auto help = youhost::shortcutHelpText();
+    CHECK(help.find("INSTALL.md") != std::string::npos);
+    CHECK(help.find("ASENNUSOHJE - INSTALL.txt") != std::string::npos);
+    CHECK(help.find("Scene") == std::string::npos);
+    CHECK(help.find("MIDI") == std::string::npos);
+}
+
 void testWindowContentFits()
 {
     CHECK(youhost::cpuWindowWidth() >= 480);
@@ -944,6 +997,11 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
     CHECK(help.find("INPUT means the audio passes through the plugins to the output and is not recorded") != std::string::npos);
     CHECK(help.find("OFF cuts the channel fully: no audio, no plugins, and no recording") != std::string::npos);
+    CHECK(help.find("INSTALL.md") != std::string::npos);
+    CHECK(help.find("ASENNUSOHJE - INSTALL.txt") != std::string::npos);
+    CHECK(help.find("Open Anyway") != std::string::npos);
+    CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
+    CHECK(help.find("32-64") != std::string::npos);
     CHECK(help.find("The interface always opens with all channels") != std::string::npos);
     CHECK(help.find("Channel use is chosen only with these buttons") != std::string::npos);
     CHECK(help.find("Audio setup ticks") == std::string::npos);
@@ -2024,6 +2082,7 @@ int main()
     testLatencyWindowFits();
     testTimelineNavigation();
     testSessionFileActions();
+    testInstallGuide();
     testWindowContentFits();
     testTakePlan();
     testMeterLayoutScales();

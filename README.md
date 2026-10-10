@@ -16,12 +16,14 @@ Valmis `YouHost.app` ladataan GitHub Actionsin artefaktina tai version mukana Re
 
 Public builds come from GitHub Actions on a free macOS runner. Each successful run on `main` and on a pull request produces one universal app (Apple silicon and Intel).
 
+The install steps, Finnish first and then English, are in [INSTALL.md](INSTALL.md). The downloaded zip has the same text as `ASENNUSOHJE - INSTALL.txt` next to `YouHost.app`.
+
 1. Open the [Actions tab](https://github.com/PaanisYouHost/YouHost/actions/workflows/build-macos.yml).
 2. Choose the newest green **Build YouHost** run.
 3. Download the artifact named **YouHost-macOS-universal**.
-4. Unzip it. GitHub wraps the artifact, so you may need to unzip twice until you see `YouHost.app`.
+4. Unzip it. `YouHost.app` and `ASENNUSOHJE - INSTALL.txt` are side by side.
 
-When a tag named `v*` is pushed (for example `v0.1.0`), the same zip is attached to the [GitHub Release](https://github.com/PaanisYouHost/YouHost/releases) for that tag. That download is a single zip with `YouHost.app` inside.
+When a tag named `v*` is pushed (for example `v0.1.0`), the same zip is attached to the [GitHub Release](https://github.com/PaanisYouHost/YouHost/releases) for that tag. That download is a single zip with `YouHost.app` and `ASENNUSOHJE - INSTALL.txt` inside.
 
 The app is ad-hoc signed and does **not** use the Hardened Runtime. That is deliberate: this build loads other developers' VST3 and AU binaries. There is no Apple Developer ID and no notarization, so Gatekeeper will quarantine a downloaded copy.
 

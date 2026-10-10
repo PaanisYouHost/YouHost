@@ -199,6 +199,14 @@ inline const char* shortcutMeaning(ShortcutId id)
 }
 
 inline constexpr const char* kShortcutNotes =
+    "Installation, in Finnish and then English, is INSTALL.md. "
+    "The same text is ASENNUSOHJE - INSTALL.txt next to YouHost.app in the download. "
+    "Download the zip from the GitHub Actions run page, Artifacts, at the bottom. Unzip (double-click) and drag YouHost.app to Applications. "
+    "First launch: macOS blocks the unsigned app. System Settings > Privacy & Security > Open Anyway, or right-click > Open. "
+    "Terminal: xattr -dr com.apple.quarantine /Applications/YouHost.app. "
+    "Allow the microphone and audio input when asked. Connect the audio interface before launch, then choose the device, sample rate, bit depth, buffer, and session. "
+    "SCAN finds the plugins. Settings and logs are in ~/Library/Application Support/Ambient Audio/YouHost (youhost.log, crash-journal.txt). "
+    "Updating: quit, replace the app in Applications. Sessions remain compatible. The recommended live buffer is 32-64. Do not scan during a show.\n"
     "Click a channel to select it. Shift+click selects the channels from the anchor through the one you click. "
     "Cmd+click, or Ctrl+click, adds or removes that one channel.\n"
     "Make group from selection assigns those channels to one of the 10 groups and folds the group. "
