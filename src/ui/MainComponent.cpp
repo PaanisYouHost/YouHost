@@ -12,6 +12,7 @@
 #include "engine/RecordLock.h"
 #include "engine/RecordStart.h"
 #include "engine/HostLog.h"
+#include "engine/ChannelSelect.h"
 #include "engine/SessionChannels.h"
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
@@ -1983,7 +1984,15 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         case ShortcutId::goToChannel:
             timeline_.focusChannelJump();
             return true;
+        case ShortcutId::selectAll:
+            if (! selectAllShortcutApplies(page_, shortcutBlocked(originating)))
+                return false;
+            engine_.selectAllVisibleChannels();
+            refresh();
+            return true;
         case ShortcutId::makeGroup:
+            if (! makeGroupShortcutApplies(page_, shortcutBlocked(originating)))
+                return false;
             showMakeGroupDialog(engine_);
             refresh();
             return true;

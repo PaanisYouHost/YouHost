@@ -33,6 +33,7 @@ enum class ShortcutId
     saveAs,
     goToChannel,
     makeGroup,
+    selectAll,
     count
 };
 
@@ -71,8 +72,12 @@ struct Binding
 };
 
 inline constexpr Binding kBindings[] = {
+    { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
+      "Select every visible channel on the REC page", false, 0 },
+    { ShortcutId::selectAll, KeyKind::character, 'a', 0, 0, 0, "A",
+      "Select every visible channel on the REC page", false, 0 },
     { ShortcutId::makeGroup, KeyKind::character, 'g', 0, 1, 0, "Cmd+G",
-      "Name a group from the selected channels, pick a colour, and fold it", false, 0 },
+      "On the REC page, name a group from the selected channels, pick a colour, and fold it", false, 0 },
     { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
       "Go to channel. Type the number and press Return.", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
@@ -231,8 +236,13 @@ inline constexpr const char* kShortcutNotes =
     "\n"
     "5. In the startup window, choose the audio card.\n"
     "Click a channel to select it. Shift+click selects the channels from the anchor through the one you click. "
-    "Cmd+click, or Ctrl+click, adds or removes that one channel.\n"
-    "Cmd+G, the Group button, or a right-click opens one dialog for the selected channels. "
+    "Cmd+click, or Ctrl+click, adds or removes that one channel. "
+    "Cmd+A, or A, selects every visible channel on the REC page, so you can colour or group them together. "
+    "It does not select on the HOST page.\n"
+    "On the REC page, Cmd+G does the same thing as the Group button and right-click Make group from selection: "
+    "one dialog for the selected channels. "
+    "Cmd+A, then Cmd+G, groups every visible channel. "
+    "Cmd+G does nothing on the HOST page, and nothing while a text field has focus. "
     "The name is selected so you can type, and the colour swatches sit under it. "
     "Enter or OK creates the group, applies the name and colour, and folds it. Esc cancels. "
     "The group bar stays visible. Click it to open the channels again.\n"
