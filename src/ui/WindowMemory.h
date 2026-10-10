@@ -21,11 +21,15 @@ inline void prepareRememberedWindow(juce::DocumentWindow& window,
     const auto saved = parseWindowState(settings.loadNamedWindow(key).toStdString());
     int screenWidth = 0;
     int screenHeight = 0;
-    const auto area = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay().userArea;
-    if (! area.isEmpty())
+    const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+    if (display != nullptr)
     {
-        screenWidth = area.getWidth();
-        screenHeight = area.getHeight();
+        const auto area = display->userBounds;
+        if (! area.isEmpty())
+        {
+            screenWidth = area.getWidth();
+            screenHeight = area.getHeight();
+        }
     }
     const auto open = windowOpenSize(defaultWidth, defaultHeight, screenWidth, screenHeight, saved);
     if (keepRememberedWindow(saved, defaultWidth, defaultHeight)
