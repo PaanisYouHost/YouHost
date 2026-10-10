@@ -401,37 +401,6 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
     walk(root);
 }
 
-class UnsupportedRows : public juce::Component
-{
-public:
-    void setLines(const std::vector<juce::String>& lines)
-    {
-        if (lines_ == lines)
-            return;
-        lines_ = lines;
-        const int width = std::max(getWidth(), 200);
-        setSize(width, std::max(22, static_cast<int>(lines_.size()) * 22));
-        repaint();
-    }
-
-    void paint(juce::Graphics& graphics) override
-    {
-        graphics.setColour(theme::fainter);
-        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
-        for (int index = 0; index < static_cast<int>(lines_.size()); ++index)
-            graphics.drawText(lines_[static_cast<std::size_t>(index)],
-                              8,
-                              index * 22,
-                              std::max(0, getWidth() - 16),
-                              22,
-                              juce::Justification::centredLeft,
-                              true);
-    }
-
-private:
-    std::vector<juce::String> lines_;
-};
-
 class FloatWindow : public juce::DocumentWindow
 {
 public:
@@ -567,22 +536,7 @@ private:
             : selector_(selector),
               engine_(engine)
         {
-            addAndMakeVisible(note_);
-            addAndMakeVisible(reveal_);
-            addAndMakeVisible(listViewport_);
             addAndMakeVisible(viewport_);
-            note_.setJustificationType(juce::Justification::topLeft);
-            note_.setColour(juce::Label::textColourId, theme::dim);
-            reveal_.setClickingTogglesState(true);
-            reveal_.setTooltip("Shows channels this card does not have. They stay silent and are not processed.");
-            quiet(reveal_);
-            reveal_.onClick = [this]
-            {
-                engine_.setRevealUnsupportedChannels(reveal_.getToggleState());
-                refreshList();
-            };
-            listViewport_.setViewedComponent(&rows_, false);
-            listViewport_.setScrollBarsShown(true, false);
             viewport_.setViewedComponent(&selector_, false);
             viewport_.setScrollBarsShown(true, true);
             addAndMakeVisible(offlineRate_);
@@ -603,14 +557,12 @@ private:
                 if (offlineBuffer_.getSelectedId() > 0)
                     engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
             };
-            refreshList();
             startTimerHz(4);
         }
 
         ~Content() override
         {
             stopTimer();
-            listViewport_.setViewedComponent(nullptr, false);
             viewport_.setViewedComponent(nullptr, false);
         }
 
@@ -628,19 +580,6 @@ private:
                 offlineBuffer_.setBounds(row.removeFromLeft(160));
                 area.removeFromTop(6);
             }
-            note_.setBounds(area.removeFromTop(showList_ ? 44 : 22));
-            area.removeFromTop(6);
-            reveal_.setVisible(showList_);
-            listViewport_.setVisible(showList_);
-            if (showList_)
-            {
-                reveal_.setBounds(area.removeFromTop(28).removeFromLeft(180));
-                area.removeFromTop(6);
-                listViewport_.setBounds(area.removeFromTop(132));
-                area.removeFromTop(8);
-                const int rowWidth = std::max(200, listViewport_.getMaximumVisibleWidth());
-                rows_.setSize(rowWidth, std::max(22, rows_.getHeight()));
-            }
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 160));
@@ -654,57 +593,13 @@ private:
             const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
             offlineRate_.setEnabled(rateOk);
             offlineBuffer_.setEnabled(bufferOk);
-            refreshList();
-        }
-
-        void refreshList()
-        {
-            const auto view = engine_.channelView();
-            const bool list = cardHidesChannels(view);
-            if (! list)
-            {
-                note_.setText("Every channel is on the mixer.", juce::dontSendNotification);
-                reveal_.setToggleState(false, juce::dontSendNotification);
-                rows_.setLines({});
-            }
-            else
-            {
-                juce::String text;
-                if (view.revealed)
-                    text = "Channels past this card are on the mixer and stay silent.";
-                else
-                    text = juce::String(hiddenChannelNote(view)) + ". They stay in the session.";
-                note_.setText(text, juce::dontSendNotification);
-                reveal_.setButtonText(view.revealed ? "Hide unsupported" : "Show on mixer");
-                reveal_.setToggleState(view.revealed, juce::dontSendNotification);
-                std::vector<juce::String> lines;
-                lines.reserve(static_cast<std::size_t>(kMaxChannels - view.cardInputs));
-                for (int channel = view.cardInputs; channel < kMaxChannels; ++channel)
-                {
-                    if (! channelUnsupportedByCard(channel, view))
-                        continue;
-                    lines.emplace_back(unsupportedChannelLine(channel, engine_.channelName(channel).toStdString()));
-                }
-                rows_.setLines(lines);
-            }
-
-            if (list != showList_)
-            {
-                showList_ = list;
-                resized();
-            }
         }
 
         juce::AudioDeviceSelectorComponent& selector_;
         AudioEngine& engine_;
-        juce::Label note_;
-        juce::TextButton reveal_ { "Show on mixer" };
         juce::ComboBox offlineRate_;
         juce::ComboBox offlineBuffer_;
-        UnsupportedRows rows_;
-        juce::Viewport listViewport_;
         juce::Viewport viewport_;
-        bool showList_ = false;
     };
 
     AppSettings& settings_;
@@ -3098,9 +2993,6 @@ void MainComponent::paint(juce::Graphics& graphics)
                << "   " << juce::String(numbers.sampleRate / 1000.0, 1) << " kHz";
     }
     status << "   " << engine_.wavBitDepthLabel();
-    const auto hiddenChannels = engine_.hiddenChannelNote();
-    if (hiddenChannels.isNotEmpty())
-        status << "   " << hiddenChannels;
     status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
     if (engine_.hasSession())
         status << "   " << engine_.sessionName();
@@ -3163,9 +3055,7 @@ void MainComponent::paint(juce::Graphics& graphics)
         graphics.drawText(kRecordArmedHint, recordArmArea_.reduced(12, 0), juce::Justification::centredLeft, true);
     }
 
-    juce::String hint = engine_.hiddenChannelNote();
-    if (hint.isEmpty())
-        hint = engine_.pluginLoadProgress();
+    juce::String hint = engine_.pluginLoadProgress();
     if (hint.isEmpty())
         hint = engine_.openError().isNotEmpty() ? engine_.openError() : juce::String();
     if (hint.isEmpty())

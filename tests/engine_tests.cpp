@@ -2342,8 +2342,9 @@ void testSessionChannelsRateLockAndClose()
 
     const auto help = youhost::shortcutHelpText();
     CHECK(help.find("Offline (no audio) - 128 channels") != std::string::npos);
-    CHECK(help.find("not on this card") != std::string::npos);
-    CHECK(help.find("Show on mixer") != std::string::npos);
+    CHECK(help.find("not on this card") == std::string::npos);
+    CHECK(help.find("Show on mixer") == std::string::npos);
+    CHECK(help.find("Channels past the card stay hidden") != std::string::npos);
     CHECK(help.find("ALL REC") != std::string::npos);
     CHECK(help.find("Leaving REC while recording asks first") != std::string::npos);
     CHECK(help.find("hidden on REC, HOST, and the timeline") != std::string::npos);
