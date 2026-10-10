@@ -818,6 +818,13 @@ void Recorder::addImportedTake(std::int64_t length, const std::array<juce::Strin
     markDirty();
 }
 
+void Recorder::clearChannelNames()
+{
+    const std::lock_guard<std::mutex> lock(stateLock_);
+    for (auto& name : names_)
+        name.clear();
+}
+
 void Recorder::clearTakes()
 {
     stop();

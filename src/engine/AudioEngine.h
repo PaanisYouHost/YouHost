@@ -95,6 +95,8 @@ public:
     void setOutputDb(int channel, float db);
     void setBypassAll(bool bypass);
     bool bypassAll() const;
+    bool isSessionDirty() const noexcept { return sessionDirty_; }
+    int selectedChannel() const;
     float waveformGain() const noexcept { return waveformGain_; }
     void setWaveformGain(float gain);
     void nudgeWaveformGain(int direction);
@@ -125,6 +127,7 @@ public:
     std::vector<StripItem> displayStrips(int channelCount) const;
 
     void selectChannel(int channel, bool extend, bool toggle = false);
+    void setSelectionHandler(std::function<void(int)> handler);
     bool isChannelSelected(int channel) const;
     std::vector<int> selectedChannels() const;
     void toggleRecordReady();
@@ -137,7 +140,8 @@ public:
     void transportNudge(double seconds);
     TransportView transportView() const;
     void startNewSession();
-    bool placeNewSession(const juce::File& folder, bool internalDisk);
+    void resetToCleanSession();
+    bool placeNewSession(const juce::File& folder, bool internalDisk, bool clean = false);
     bool createInternalSession();
     juce::String sessionRecordProblem() const;
     bool sessionIsOnInternalDisk() const noexcept { return sessionOnInternalDisk_; }
@@ -287,6 +291,7 @@ private:
     std::array<SessionGroup, kMaxDisplayGroups> groups_ {};
     std::vector<int> selection_;
     int selectionAnchor_ = 0;
+    std::function<void(int)> selectionHandler_;
     int displayRevision_ = 0;
 
     juce::String deviceName_ { "No device" };

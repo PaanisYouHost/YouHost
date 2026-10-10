@@ -1,4 +1,5 @@
 #include "DropoutWindow.h"
+#include "engine/WindowCatalog.h"
 #include "Theme.h"
 #include "WindowMemory.h"
 #include "engine/DropoutLog.h"
@@ -245,14 +246,14 @@ DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    prepareRememberedWindow(*this, settings_, "windowDropouts", 720, 420, 520, 300);
+    prepareRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight(), 520, 300);
     setVisible(false);
     startTimerHz(4);
 }
 
 DropoutWindow::~DropoutWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts", 720, 420);
+    saveRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight());
     stopTimer();
 }
 
@@ -269,7 +270,7 @@ void DropoutWindow::toggle()
 
 void DropoutWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts", 720, 420);
+    saveRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight());
     setVisible(false);
 }
 

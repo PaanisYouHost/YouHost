@@ -98,6 +98,7 @@ public:
     void jumpMarker(int direction);
     void nudgeSeconds(double seconds);
     void clearTakes();
+    void clearChannelNames();
 
     TransportView view() const;
     void visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const;

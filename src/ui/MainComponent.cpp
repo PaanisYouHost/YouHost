@@ -3,6 +3,7 @@
 #include "Theme.h"
 #include "WindowMemory.h"
 #include "engine/HostLimits.h"
+#include "engine/WindowCatalog.h"
 #include "engine/LatencyCard.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
@@ -227,18 +228,18 @@ public:
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
-        prepareRememberedWindow(*this, settings_, "windowSetup", 720, 420, 560, 320);
+        prepareRememberedWindow(*this, settings_, "windowSetup", setupWindowWidth(), setupWindowHeight(), 560, 320);
         setVisible(false);
     }
 
     ~SetupWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowSetup", 720, 420);
+        saveRememberedWindow(*this, settings_, "windowSetup", setupWindowWidth(), setupWindowHeight());
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowSetup", 720, 420);
+        saveRememberedWindow(*this, settings_, "windowSetup", setupWindowWidth(), setupWindowHeight());
         setVisible(false);
     }
 
@@ -306,7 +307,7 @@ public:
         setContentNonOwned(&content_, false);
         setResizable(true, false);
         setResizeLimits(480, 260, 900, 520);
-        centreWithSize(560, 300);
+        centreWithSize(placeSessionWindowWidth(), placeSessionWindowHeight());
         setVisible(true);
     }
 
@@ -481,7 +482,7 @@ public:
         setContentNonOwned(&content_, false);
         setResizable(true, false);
         setResizeLimits(640, 520, 1400, 1100);
-        centreWithSize(780, 640);
+        centreWithSize(startupWindowWidth(), startupWindowHeight());
         setVisible(true);
     }
 
@@ -657,12 +658,37 @@ private:
                 button->setMouseClickGrabsKeyboardFocus(false);
                 button->onClick = [this, file]
                 {
-                    if (engine_.loadSessionFrom(file))
-                        finish();
-                    else
-                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                               "Could not open that session",
-                                                               engine_.sessionMessage());
+                    const auto open = [safe = juce::Component::SafePointer<Content>(this), file]
+                    {
+                        if (safe == nullptr)
+                            return;
+                        if (safe->engine_.loadSessionFrom(file))
+                            safe->finish();
+                        else
+                            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                                   "Could not open that session",
+                                                                   safe->engine_.sessionMessage());
+                    };
+                    if (! engine_.isSessionDirty())
+                    {
+                        open();
+                        return;
+                    }
+                    juce::AlertWindow::showYesNoCancelBox(
+                        juce::MessageBoxIconType::WarningIcon,
+                        "Save changes?",
+                        "This session has unsaved changes.",
+                        "Save",
+                        "Don't save",
+                        "Cancel",
+                        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), open](int result)
+                        {
+                            if (safe == nullptr || result == 0)
+                                return;
+                            if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
+                                return;
+                            open();
+                        }));
                 };
                 recent_.addAndMakeVisible(*button);
                 recentButtons_.push_back(std::move(button));
@@ -704,12 +730,37 @@ private:
                                                        problem);
                 return;
             }
-            if (engine_.placeNewSession(folder, false))
-                finish();
-            else
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                       "Cannot create the session",
-                                                       engine_.sessionMessage());
+            const auto place = [safe = juce::Component::SafePointer<Content>(this), folder]
+            {
+                if (safe == nullptr)
+                    return;
+                if (safe->engine_.placeNewSession(folder, false, true))
+                    safe->finish();
+                else
+                    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                           "Cannot create the session",
+                                                           safe->engine_.sessionMessage());
+            };
+            if (! engine_.isSessionDirty())
+            {
+                place();
+                return;
+            }
+            juce::AlertWindow::showYesNoCancelBox(
+                juce::MessageBoxIconType::WarningIcon,
+                "Save changes?",
+                "This session has unsaved changes.",
+                "Save",
+                "Don't save",
+                "Cancel",
+                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this), place](int result)
+                {
+                    if (safe == nullptr || result == 0)
+                        return;
+                    if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
+                        return;
+                    place();
+                }));
         }
 
         void openExisting()
@@ -733,12 +784,37 @@ private:
                                           safe->chooser_.reset();
                                           if (safe == nullptr || chosen.getFullPathName().isEmpty())
                                               return;
-                                          if (safe->engine_.loadSessionFrom(chosen))
-                                              safe->finish();
-                                          else
-                                              juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                                                     "Could not open that session",
-                                                                                     safe->engine_.sessionMessage());
+                                          const auto open = [safe, chosen]
+                                          {
+                                              if (safe == nullptr)
+                                                  return;
+                                              if (safe->engine_.loadSessionFrom(chosen))
+                                                  safe->finish();
+                                              else
+                                                  juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                                                         "Could not open that session",
+                                                                                         safe->engine_.sessionMessage());
+                                          };
+                                          if (! safe->engine_.isSessionDirty())
+                                          {
+                                              open();
+                                              return;
+                                          }
+                                          juce::AlertWindow::showYesNoCancelBox(
+                                              juce::MessageBoxIconType::WarningIcon,
+                                              "Save changes?",
+                                              "This session has unsaved changes.",
+                                              "Save",
+                                              "Don't save",
+                                              "Cancel",
+                                              juce::ModalCallbackFunction::create([safe, open](int result)
+                                              {
+                                                  if (safe == nullptr || result == 0)
+                                                      return;
+                                                  if (result == 1 && (! safe->engine_.hasSession() || ! safe->engine_.saveSession()))
+                                                      return;
+                                                  open();
+                                              }));
                                       });
                                   });
         }
@@ -756,6 +832,9 @@ private:
                 {
                     if (result != 1 || safe == nullptr)
                         return;
+                    if (safe->engine_.isSessionDirty() && safe->engine_.hasSession() && ! safe->engine_.saveSession())
+                        return;
+                    safe->engine_.resetToCleanSession();
                     if (safe->engine_.createInternalSession())
                         safe->finish();
                     else
@@ -1162,6 +1241,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     {
         engine_.selectChannel(channel, extend, toggle);
     });
+    engine_.setSelectionHandler([this](int channel) { timeline_.scrollToChannel(channel); });
+    timeline_.setSelectedChannel([this] { return engine_.selectedChannel(); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
     timeline_.setLaneProvider([this](const std::function<void(const std::vector<TimelineLaneView>&)>& paint)
     {
@@ -1342,6 +1423,9 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
         case ShortcutId::fit:
             timeline_.fitAll();
             return true;
+        case ShortcutId::goToChannel:
+            timeline_.focusChannelJump();
+            return true;
         case ShortcutId::lanesTaller:
             timeline_.verticalZoomIn();
             return true;
@@ -1476,7 +1560,45 @@ void MainComponent::dismissStartup()
     grabKeyboardFocus();
 }
 
-void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then)
+void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
+{
+    if (! engine_.isSessionDirty())
+    {
+        action();
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe(this);
+    juce::AlertWindow::showYesNoCancelBox(
+        juce::MessageBoxIconType::WarningIcon,
+        "Save changes?",
+        "This session has unsaved changes.",
+        "Save",
+        "Don't save",
+        "Cancel",
+        juce::ModalCallbackFunction::create([safe, action](int result)
+        {
+            if (safe == nullptr || result == 0)
+                return;
+            if (result == 1)
+            {
+                if (! safe->engine_.hasSession())
+                {
+                    safe->promptForSession("Choose Where to Save This Session", [safe, action](bool placed)
+                    {
+                        if (placed && safe != nullptr)
+                            action();
+                    });
+                    return;
+                }
+                if (! safe->engine_.saveSession())
+                    return;
+            }
+            action();
+        }));
+}
+
+void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean)
 {
     if (placeWindow_ != nullptr || startupWindow_ != nullptr)
         return;
@@ -1486,9 +1608,9 @@ void MainComponent::promptForSession(const juce::String& title, std::function<vo
         title,
         engine_.defaultSessionParent(),
         engine_.missingSessionParentNote(),
-        [safe, then](juce::File chosen, bool internalDisk)
+        [safe, then, clean](juce::File chosen, bool internalDisk)
         {
-            juce::MessageManager::callAsync([safe, then, chosen, internalDisk]
+            juce::MessageManager::callAsync([safe, then, chosen, internalDisk, clean]
             {
                 if (safe == nullptr)
                     return;
@@ -1498,9 +1620,13 @@ void MainComponent::promptForSession(const juce::String& title, std::function<vo
 
                 bool placed = false;
                 if (internalDisk)
+                {
+                    if (clean)
+                        safe->engine_.resetToCleanSession();
                     placed = safe->engine_.createInternalSession();
+                }
                 else if (chosen.getFullPathName().isNotEmpty())
-                    placed = safe->engine_.placeNewSession(chosen, false);
+                    placed = safe->engine_.placeNewSession(chosen, false, clean);
 
                 safe->refresh();
                 if (then != nullptr)
@@ -1512,7 +1638,7 @@ void MainComponent::promptForSession(const juce::String& title, std::function<vo
 
 void MainComponent::newSession()
 {
-    promptForSession("New Session", nullptr);
+    runAfterUnsavedCheck([this] { promptForSession("New Session", nullptr, true); });
 }
 
 void MainComponent::requestRecord()
@@ -1756,10 +1882,12 @@ void MainComponent::openRecent(int index)
     const auto sessions = engine_.recentSessions();
     if (index < 0 || index >= sessions.size())
         return;
-    if (engine_.hasSession())
-        engine_.saveSession();
-    engine_.loadSessionFrom(juce::File(sessions[index]));
-    refresh();
+    const auto folder = juce::File(sessions[index]);
+    runAfterUnsavedCheck([this, folder]
+    {
+        engine_.loadSessionFrom(folder);
+        refresh();
+    });
 }
 
 void MainComponent::showFileMenu()
@@ -1848,11 +1976,57 @@ void MainComponent::syncCopyProgress()
         copyWindow_ = std::make_unique<CopyProgressWindow>(copyProgressValue_);
 }
 
+class HelpWindow : public juce::DocumentWindow
+{
+public:
+    explicit HelpWindow(AppSettings& settings)
+        : juce::DocumentWindow("Shortcuts", theme::panel, juce::DocumentWindow::closeButton),
+          settings_(settings)
+    {
+        text_.setMultiLine(true, true);
+        text_.setReadOnly(true);
+        text_.setScrollbarsShown(true);
+        text_.setCaretVisible(false);
+        text_.setMultiLine(true);
+        text_.setText(juce::String(shortcutHelpText()), juce::dontSendNotification);
+        text_.setColour(juce::TextEditor::backgroundColourId, theme::background);
+        text_.setColour(juce::TextEditor::textColourId, theme::text);
+        text_.setColour(juce::TextEditor::outlineColourId, theme::panelEdge);
+        text_.setFont(juce::Font(juce::FontOptions(14.0f)));
+        setUsingNativeTitleBar(true);
+        setContentNonOwned(&text_, false);
+        const int characters = static_cast<int>(shortcutHelpText().size());
+        prepareRememberedWindow(*this, settings_, "windowHelp", helpWindowWidth(), helpWindowHeightFor(characters), 480, 280);
+        setVisible(false);
+    }
+
+    ~HelpWindow() override
+    {
+        setContentNonOwned(nullptr, false);
+        const int characters = static_cast<int>(shortcutHelpText().size());
+        saveRememberedWindow(*this, settings_, "windowHelp", helpWindowWidth(), helpWindowHeightFor(characters));
+    }
+
+    void closeButtonPressed() override
+    {
+        const int characters = static_cast<int>(shortcutHelpText().size());
+        saveRememberedWindow(*this, settings_, "windowHelp", helpWindowWidth(), helpWindowHeightFor(characters));
+        setVisible(false);
+    }
+
+private:
+    AppSettings& settings_;
+    juce::TextEditor text_;
+};
+
 void MainComponent::showHelp()
 {
-    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
-                                           "YouHost shortcuts",
-                                           juce::String(shortcutHelpText()));
+    if (helpWindow_ == nullptr)
+        helpWindow_ = std::make_unique<HelpWindow>(settings_);
+    const bool show = ! helpWindow_->isVisible();
+    helpWindow_->setVisible(show);
+    if (show)
+        helpWindow_->toFront(true);
 }
 
 void MainComponent::setPeakMode(bool peak, bool fromUser)
@@ -1889,8 +2063,10 @@ void MainComponent::openSession()
     if (fileChooser_ != nullptr)
         return;
 
-    if (engine_.hasSession())
-        engine_.saveSession();
+    runAfterUnsavedCheck([this]
+    {
+    if (fileChooser_ != nullptr)
+        return;
     fileChooser_ = std::make_unique<juce::FileChooser>("Open a Session",
                                                        engine_.suggestedSessionFolder(),
                                                        "*.youhost",
@@ -1909,6 +2085,7 @@ void MainComponent::openSession()
                                       refresh();
                                   });
                               });
+    });
 }
 
 void MainComponent::timerCallback()

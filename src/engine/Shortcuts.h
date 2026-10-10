@@ -31,6 +31,7 @@ enum class ShortcutId
     nudgeForward,
     save,
     saveAs,
+    goToChannel,
     count
 };
 
@@ -69,6 +70,8 @@ struct Binding
 };
 
 inline constexpr Binding kBindings[] = {
+    { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
+      "Go to channel. Type the number and press Return.", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
       "Save a copy of the whole session, including audio, then continue in the new folder", true, 's' },
     { ShortcutId::save, KeyKind::character, 's', 0, 1, 0, "Cmd+S",
@@ -218,9 +221,14 @@ inline constexpr const char* kShortcutNotes =
     "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"
     "The + and - buttons zoom time the same way as T and R. The W+ and W- buttons change waveform height. "
     "That does not change the audio. Cmd or Option plus the wheel over the lanes does the same.\n"
-    "The Fit button does the same as Option+R. With no takes yet the timeline shows 60 seconds. "
-    "Fit shows every take, from 0 to just past the last take, and puts the first lane at the top. "
-    "Lanes stay tall enough to read. The bar on the right scrolls the rest.\n"
+    "FIT is the green button at the left of the timeline controls, on REC and on HOST. "
+    "It does the same as Option+R. With no takes yet the timeline shows 60 seconds. "
+    "FIT shows every take, from 0 to just past the last take, and every lane. "
+    "Lanes stay tall enough to read. The bar on the right scrolls the rest and can be dragged.\n"
+    "Click a channel on REC or HOST and the timeline scrolls that lane into view. "
+    "G focuses Go. Type the channel number and press Return. "
+    "v+ and v- keep the lane under the mouse, or the selected channel, on screen. "
+    "Each lane shows its channel number and name in the top-left corner. That label stays put when you scroll time.\n"
     "The v+ and v- buttons change lane height the same way as Cmd+[ and Cmd+].\n"
     "While recording or playing, the cursor sits about three quarters of the way across the view. "
     "A scroll holds the view until the cursor leaves it.\n"
@@ -230,13 +238,19 @@ inline constexpr const char* kShortcutNotes =
     "Option-click resets to 0. The wheel does not change it. Amber means it is not 0 dB. It is not written to the WAV.\n"
     "Option-drag copies a plugin and its settings. A plain drag moves the same plugin. "
     "A drag is ignored while a plugin on that channel is still loading.\n"
-    "Null test bypasses every plugin and the compensation delay so you can hear the clean input. "
-    "Click again to restore the plugins. The recorded WAV is always the raw input.\n"
+    "ALL PLUGIN BYPASS is the button on HOST. It lights amber while every plugin and the compensation delay are bypassed. "
+    "Loaded plugin slots turn amber and blink slowly until you click the button again. The recorded WAV is always the raw input.\n"
     "LATENCY chooses All aligned or Per group. All aligned lines every included channel up on the slowest plugin. "
     "Per group lines each group up on its own slowest plugin. Ungrouped channels are not delayed. "
     "The window opens large enough to show the compensation value and the alignment note. "
     "A smaller window scrolls that card, so the text stays reachable.\n"
     "FX and PDC on a row are that channel's plugin latency and the extra delay that lines it up.\n"
+    "New starts a clean session: no plugins, no channel names, no colours, groups back to defaults, every channel REC, "
+    "output gain 0 dB, bypass off, and an empty timeline. The device, sample rate, bit depth, and buffer stay as they are. "
+    "New, Open, and Open Recent ask before discarding unsaved changes. Save writes this session. The first save asks for a name and a folder. "
+    "Save As copies the whole folder, including the WAV files, and continues in the copy.\n"
+    "Windows open large enough to show their contents. You can shrink one afterwards, and that size is remembered. "
+    "A smaller window scrolls so the text can still be reached.\n"
     "New sessions are named with the date, DD.MM.YYYY. If that folder already exists, the name becomes DD.MM.YYYY_1, then _2. "
     "A crash copy is named DD.MM.YYYY_crash_HH-MM.\n"
     "Every 5 minutes YouHost writes a backup of the session file into the session's Backups folder and keeps the 10 newest. "

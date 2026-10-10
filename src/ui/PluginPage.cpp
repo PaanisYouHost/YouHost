@@ -1,4 +1,5 @@
 #include "PluginPage.h"
+#include "engine/WindowCatalog.h"
 #include "AppSettings.h"
 #include "ChannelMenu.h"
 #include "MeterColours.h"
@@ -397,18 +398,18 @@ public:
         picker_ = picker.get();
         setUsingNativeTitleBar(true);
         setContentOwned(picker.release(), true);
-        prepareRememberedWindow(*this, settings_, "windowPluginList", 420, 480, 320, 240);
+        prepareRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight(), 320, 240);
         setVisible(false);
     }
 
     ~PluginListWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList", 420, 480);
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList", 420, 480);
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
         setVisible(false);
     }
 
@@ -826,16 +827,22 @@ public:
             if (button.getButtonText() != text)
                 button.setButtonText(text);
             juce::Colour fill = theme::button;
-            if (source.occupied && source.bypassed)
+            const bool blinkBypass = engine_.bypassAll() && source.occupied;
+            if (blinkBypass)
+            {
+                const bool lit = (juce::Time::getMillisecondCounter() / 500u) % 2u == 0u;
+                fill = lit ? juce::Colour(0xffd48a20) : juce::Colour(0xff8a6a22);
+            }
+            else if (source.occupied && source.bypassed)
                 fill = juce::Colour(0xff3a3424);
             else if (source.occupied)
                 fill = theme::buttonOn;
-            if (source.loading)
+            if (! blinkBypass && source.loading)
                 fill = juce::Colour(0xff3d3420);
-            if (engine_.isPluginEditorOpen(channel_, slot))
+            if (! blinkBypass && engine_.isPluginEditorOpen(channel_, slot))
                 fill = fill.brighter(0.2f);
             const int color = engine_.channelColor(channel_);
-            if (color != 0)
+            if (! blinkBypass && color != 0)
                 fill = fill.interpolatedWith(x32Hue(color), 0.28f);
             button.setColour(juce::TextButton::buttonColourId, fill);
             button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
@@ -1058,7 +1065,7 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
     pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
     addAndMakeVisible(nullButton_);
     nullButton_.setMouseClickGrabsKeyboardFocus(false);
-    nullButton_.setTooltip("Bypass every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. The recorded WAV is always the raw input.");
+    nullButton_.setTooltip("ALL PLUGIN BYPASS. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
     nullButton_.onClick = [this]
     {
         engine_.setBypassAll(! engine_.bypassAll());
@@ -1196,8 +1203,9 @@ void PluginPage::refresh()
 
     empty_.setVisible(channels_ == 0);
     const bool bypass = engine_.bypassAll();
-    nullButton_.setButtonText(bypass ? "Bypass all" : "Null test");
-    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xff8a6a22) : theme::button);
+    nullButton_.setButtonText("ALL PLUGIN BYPASS");
+    nullButton_.setToggleState(bypass, juce::dontSendNotification);
+    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xffd48a20) : theme::button);
     nullButton_.setColour(juce::TextButton::textColourOffId, bypass ? juce::Colours::white : theme::text);
     for (auto& row : rows_)
         row->refresh();
@@ -1209,7 +1217,7 @@ void PluginPage::resized()
 {
     auto bounds = getLocalBounds();
     auto bar = bounds.removeFromTop(32);
-    nullButton_.setBounds(bar.removeFromLeft(128).reduced(0, 4));
+    nullButton_.setBounds(bar.removeFromLeft(176).reduced(0, 4));
     viewport_.setBounds(bounds);
     int height = 0;
     for (int rowHeight : heights_)

@@ -12,6 +12,8 @@
 #include "engine/LatencyCompensation.h"
 #include "engine/X32Colours.h"
 #include "engine/LatencyCard.h"
+#include "engine/SessionActions.h"
+#include "engine/WindowCatalog.h"
 #include "engine/LatencyMath.h"
 #include "engine/WindowFit.h"
 #include "engine/MeterLayout.h"
@@ -447,6 +449,138 @@ void testLatencyWindowFits()
     CHECK(youhost::keepRememberedWindow(legacyState, card.contentWidth, card.contentHeight));
 }
 
+void testTimelineNavigation()
+{
+    CHECK(youhost::laneCornerLabel(12, "Kick", false) == "12  Kick");
+    CHECK(youhost::laneCornerLabel(4, "", false) == "4");
+    CHECK(youhost::laneCornerLabel(4, "4", false) == "4");
+    CHECK(youhost::laneCornerLabel(0, "Drums", true) == "Drums");
+    CHECK(youhost::parseGoToChannel(" 12") == 12);
+    CHECK(youhost::parseGoToChannel("0") == 0);
+    CHECK(youhost::parseGoToChannel("12a") == 0);
+
+    const int revealed = youhost::laneScrollToReveal(40, 8, 0, 20);
+    CHECK(revealed <= 20);
+    CHECK(revealed + 8 > 20);
+    CHECK(youhost::laneScrollToReveal(40, 8, 10, 12) == 10);
+
+    const int anchored = youhost::laneScrollKeepingAnchor(32, 0, 16, 8, 3);
+    CHECK(anchored <= 3);
+    CHECK(anchored + 8 > 3);
+    CHECK(youhost::laneUnderPointer(50.0f, 0.0f, 160.0f, 8, 4) == 6);
+
+    const std::vector<std::vector<int>> lanes = { { 0, 1 }, { 5 } };
+    CHECK(youhost::laneIndexContaining(lanes, 5) == 1);
+    CHECK(youhost::laneIndexContaining(lanes, 3) == -1);
+}
+
+void testSessionFileActions()
+{
+    CHECK(youhost::sessionModelIsClean(youhost::cleanSessionModel()));
+    CHECK(youhost::sessionReplaceAsks(true));
+    CHECK(! youhost::sessionReplaceAsks(false));
+    CHECK(! youhost::sessionReplaceProceeds(true, youhost::UnsavedChoice::cancel));
+    CHECK(youhost::sessionReplaceProceeds(true, youhost::UnsavedChoice::discard));
+    CHECK(youhost::sessionReplaceProceeds(false, youhost::UnsavedChoice::cancel));
+    CHECK(youhost::sessionReplaceSavesFirst(true, youhost::UnsavedChoice::save));
+    CHECK(! youhost::sessionReplaceSavesFirst(true, youhost::UnsavedChoice::discard));
+
+    youhost::SessionDocumentModel dirty;
+    dirty.align = "group";
+    dirty.channels.push_back({});
+    dirty.channels.back().index = 3;
+    dirty.channels.back().name = "Old";
+    CHECK(! youhost::sessionModelIsClean(dirty));
+    CHECK(youhost::sessionModelIsClean(youhost::replaceSessionModel(youhost::cleanSessionModel())));
+
+    youhost::SessionDocumentModel session = youhost::cleanSessionModel();
+    youhost::SessionChannelRecord channel;
+    channel.index = 4;
+    channel.name = "Kick";
+    channel.color = 3;
+    channel.group = 1;
+    channel.listen = "rec";
+    youhost::SessionSlotRecord slot;
+    slot.occupied = true;
+    slot.index = 0;
+    slot.pluginName = "EQ";
+    slot.state = "abc";
+    channel.slots.push_back(slot);
+    session.channels.push_back(channel);
+    youhost::SessionTakeRecord take;
+    take.start = 0;
+    take.length = 100;
+    take.files.push_back(youhost::SessionFileRecord { 4, "Kick.wav" });
+    session.takes.push_back(take);
+
+    youhost::SessionNode written = youhost::writeSessionModel(session);
+    const auto xml = youhost::writeSessionXml(written);
+    youhost::SessionNode parsed;
+    CHECK(youhost::parseSessionXml(xml, parsed));
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(parsed, round));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].name == "Kick");
+    CHECK(round.channels[0].color == 3);
+    CHECK(round.channels[0].group == 1);
+    CHECK(round.channels[0].listen == "rec");
+    CHECK(round.channels[0].slots.size() == 1);
+    CHECK(round.channels[0].slots[0].pluginName == "EQ");
+    CHECK(round.takes.size() == 1);
+    CHECK(round.takes[0].files.size() == 1);
+    CHECK(round.takes[0].files[0].name == "Kick.wav");
+
+    youhost::SessionDocumentModel previous = round;
+    youhost::SessionChannelRecord leftover;
+    leftover.index = 9;
+    leftover.name = "Leftover";
+    leftover.color = 6;
+    previous.channels.push_back(leftover);
+    const auto opened = youhost::replaceSessionModel(round);
+    CHECK(opened.channels.size() == 1);
+    CHECK(opened.channels[0].name == "Kick");
+    CHECK(opened.channels[0].color == 3);
+
+    const auto plan = youhost::planSessionCopy({ "session.youhost" }, { "Kick.wav", "Snare.wav" }, { "01" });
+    CHECK(plan.size() == 4);
+    CHECK(plan[0].relativePath == "session.youhost");
+    CHECK(plan[1].relativePath == "audio/Kick.wav");
+    CHECK(plan[2].relativePath == "audio/Snare.wav");
+    CHECK(plan[3].relativePath == "Backups/01/session.youhost");
+    CHECK(youhost::folderAfterSaveAs("/old", "/new", true) == "/new");
+    CHECK(youhost::folderAfterSaveAs("/old", "/new", false) == "/old");
+
+    const auto help = youhost::shortcutHelpText();
+    CHECK(help.find("ALL PLUGIN BYPASS") != std::string::npos);
+    CHECK(help.find("FIT") != std::string::npos);
+    CHECK(help.find("Go to channel") != std::string::npos);
+    CHECK(help.find("Scene") == std::string::npos);
+    CHECK(help.find("MIDI") == std::string::npos);
+}
+
+void testWindowContentFits()
+{
+    CHECK(youhost::cpuWindowWidth() >= 480);
+    CHECK(youhost::cpuWindowHeight() >= youhost::cpuCardHeight(7));
+    CHECK(youhost::blockReachable(youhost::cpuCardHeight(7) - 48, 48, youhost::cpuCardHeight(7), 180));
+    CHECK(youhost::dropoutWindowHeight() >= youhost::dropoutWindowContentHeight(4));
+    CHECK(youhost::blockReachable(youhost::dropoutBodyHeight(4) - 40, 40, youhost::dropoutBodyHeight(4), 160));
+    CHECK(youhost::scannerWindowWidth() >= youhost::scannerButtonRowWidth());
+    CHECK(youhost::scannerWindowHeight() >= youhost::scannerControlHeight());
+    CHECK(youhost::groupRenameWindowHeight() >= youhost::groupRenameContentHeight());
+    CHECK(youhost::pluginListWindowHeight() >= youhost::pluginPickerContentHeight());
+    CHECK(youhost::setupWindowHeight() >= 480);
+    CHECK(youhost::startupWindowHeight() >= 640);
+    const int helpCharacters = static_cast<int>(youhost::shortcutHelpText().size());
+    const int helpContent = youhost::helpContentHeight(helpCharacters, youhost::helpWindowWidth() - 48);
+    const int helpWindow = youhost::helpWindowHeightFor(helpCharacters);
+    CHECK(helpWindow >= 280);
+    CHECK(youhost::blockReachable(std::max(0, helpContent - 20), 16, helpContent, std::max(1, helpWindow - 36)));
+    const auto card = youhost::layoutLatencyCard(youhost::kLatencyPreferredWidth);
+    CHECK(card.note.top + card.note.height <= card.contentHeight);
+    CHECK(youhost::blockReachable(card.compensation.top, card.compensation.height, card.contentHeight, 160));
+}
+
 void testTakePlan()
 {
     youhost::TakeSpan takes[] = { { 0, 1000 }, { 1000, 500 } };
@@ -793,13 +927,15 @@ void testShortcutsMatchTheHelp()
     expect(youhost::ShortcutId::nudgeForward, 0, youhost::KeyKind::right, true, false, false);
     expect(youhost::ShortcutId::save, 's', youhost::KeyKind::character, false, true, false);
     expect(youhost::ShortcutId::saveAs, 's', youhost::KeyKind::character, true, true, false);
+    expect(youhost::ShortcutId::goToChannel, 'g', youhost::KeyKind::character, false, false, false);
 
     CHECK(help.find("5  Open or close SCAN") == std::string::npos);
     CHECK(help.find("5  Open or close LATENCY") != std::string::npos);
     CHECK(help.find("S  Open or close SCAN") != std::string::npos);
     CHECK(help.find("3 or D  Open or close DROPOUTS") != std::string::npos);
     CHECK(help.find("W+") != std::string::npos);
-    CHECK(help.find("Null test") != std::string::npos);
+    CHECK(help.find("ALL PLUGIN BYPASS") != std::string::npos);
+    CHECK(help.find("Null test") == std::string::npos);
     CHECK(help.find("Save As") != std::string::npos);
     CHECK(help.find("Backup") != std::string::npos);
     CHECK(help.find("Shift+click") != std::string::npos);
@@ -1886,6 +2022,9 @@ int main()
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
     testLatencyWindowFits();
+    testTimelineNavigation();
+    testSessionFileActions();
+    testWindowContentFits();
     testTakePlan();
     testMeterLayoutScales();
     testOffChannelStaysSilent();

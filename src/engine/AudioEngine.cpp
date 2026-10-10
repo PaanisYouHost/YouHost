@@ -1226,7 +1226,8 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
             LaneDesc description;
             description.number = channel + 1;
             description.color = channelColor_[static_cast<std::size_t>(channel)];
-            description.title = std::to_string(channel + 1);
+            if (recorder_ != nullptr)
+                description.title = recorder_->channelName(channel).toStdString();
             description.members.push_back(channel);
             descriptions.push_back(std::move(description));
         }
@@ -1276,6 +1277,7 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
             lane.color = description.color;
             lane.group = description.group;
             lane.title = description.title;
+            lane.members = description.members;
             for (int index = 0; index < count; ++index)
                 addRegion(lane, description, takes[index]);
             if (live != nullptr)
@@ -1578,19 +1580,65 @@ TransportView AudioEngine::transportView() const
     return recorder_->view();
 }
 
-void AudioEngine::startNewSession()
+void AudioEngine::resetToCleanSession()
 {
     if (recorder_ != nullptr)
+    {
         recorder_->stop();
-    recordReady_ = false;
-    if (sessionFolder_ != juce::File())
-        saveSession();
-    if (recorder_ != nullptr)
         recorder_->clearTakes();
+        recorder_->clearChannelNames();
+    }
+    recordReady_ = false;
+    if (rack_ != nullptr)
+        rack_->clearAll(false);
+    setBypassAll(false);
+
+    std::uint64_t low = 0;
+    std::uint64_t high = 0;
+    std::array<bool, kMaxChannels> audible {};
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        listen_[index] = ChannelListen::record;
+        outputDb_[index] = 0.0f;
+        outputGain_[index].store(1.0f, std::memory_order_relaxed);
+        channelColor_[index] = 0;
+        channelGroup_[index] = -1;
+        strips_[index].excludeFromCompensation = false;
+        audible[index] = true;
+        setChannelOnBit(low, high, channel, true);
+        if (recorder_ != nullptr)
+            recorder_->setArmed(channel, true);
+    }
+    channelOnLo_.store(low, std::memory_order_relaxed);
+    channelOnHi_.store(high, std::memory_order_relaxed);
+    if (rack_ != nullptr)
+        rack_->setAudibleAll(audible);
+
+    groups_ = {};
+    selection_.clear();
+    selectionAnchor_ = 0;
+    alignGroup_ = 0;
+    waveformGain_ = 1.0f;
+    sessionPeak_ = false;
+    sessionReferenceDb_ = kDefaultRmsReferenceDb;
     sessionFolder_ = juce::File();
     sessionOnInternalDisk_ = false;
+    hasPreservedSession_ = false;
+    preservedSession_ = {};
     sessionDirty_ = false;
+    if (meterRestoreHandler_ != nullptr)
+        meterRestoreHandler_(sessionPeak_, sessionReferenceDb_);
+    if (timelineHandler_ != nullptr)
+        timelineHandler_({});
+    syncCompensation();
+    ++displayRevision_;
     sessionMessage_ = "New session. Choose a name and a folder.";
+}
+
+void AudioEngine::startNewSession()
+{
+    resetToCleanSession();
 }
 
 bool AudioEngine::isInternalFallback(const juce::File& folder) const
@@ -1641,7 +1689,7 @@ juce::String AudioEngine::sessionRecordProblem() const
     return {};
 }
 
-bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk)
+bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk, bool clean)
 {
     if (folder.getFullPathName().isEmpty())
         return false;
@@ -1649,12 +1697,14 @@ bool AudioEngine::placeNewSession(const juce::File& folder, bool internalDisk)
     if (recorder_ != nullptr)
         recorder_->stop();
     recordReady_ = false;
-    if (sessionFolder_ != juce::File() && sessionFolder_ != folder)
+    if (! clean && sessionFolder_ != juce::File() && sessionFolder_ != folder)
     {
         if (! saveSession())
             return false;
     }
-    if (recorder_ != nullptr)
+    if (clean)
+        resetToCleanSession();
+    else if (recorder_ != nullptr)
         recorder_->clearTakes();
 
     sessionOnInternalDisk_ = internalDisk;
@@ -1916,6 +1966,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
         recorder_->stop();
 
     restoringSession_ = true;
+    setBypassAll(false);
     sessionFolder_ = juce::File(layout.folder);
     sessionPeak_ = data.peakMeter;
     sessionReferenceDb_ = data.rmsReferenceDb;
@@ -2449,6 +2500,22 @@ void AudioEngine::selectChannel(int channel, bool extend, bool toggle)
     current = pickChannels(current, channel, kMaxChannels, pick);
     selection_ = std::move(current.channels);
     selectionAnchor_ = current.anchor;
+    if (selectionHandler_ != nullptr)
+        selectionHandler_(channel);
+}
+
+void AudioEngine::setSelectionHandler(std::function<void(int)> handler)
+{
+    selectionHandler_ = std::move(handler);
+}
+
+int AudioEngine::selectedChannel() const
+{
+    if (selection_.empty())
+        return -1;
+    if (isChannelSelected(selectionAnchor_))
+        return selectionAnchor_;
+    return selection_.front();
 }
 
 bool AudioEngine::isChannelSelected(int channel) const

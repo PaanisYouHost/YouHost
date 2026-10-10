@@ -94,6 +94,7 @@ struct TimelineLaneView
     int color = 0;
     bool group = false;
     std::string title;
+    std::vector<int> members;
     std::vector<TimelineRegionView> regions;
 };
 

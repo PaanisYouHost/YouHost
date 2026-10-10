@@ -61,7 +61,8 @@ private:
     void layoutMeters();
     void openStartup();
     void dismissStartup();
-    void promptForSession(const juce::String& title, std::function<void(bool placed)> then);
+    void promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean = false);
+    void runAfterUnsavedCheck(std::function<void()> action);
     void newSession();
     void requestRecord();
     void startRecordingIfReady();
@@ -128,6 +129,7 @@ private:
     std::unique_ptr<BitDepthSlot> bitDepthSlot_;
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
+    std::unique_ptr<juce::DocumentWindow> helpWindow_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;

@@ -1,4 +1,5 @@
 #include "ChannelMenu.h"
+#include "engine/WindowCatalog.h"
 #include "Theme.h"
 #include "X32Look.h"
 
@@ -404,7 +405,7 @@ void renameGroup(AudioEngine& engine, int group)
         juce::MessageManager::callAsync([window] { window->exitModalState(0); });
     });
     window->setContentOwned(content, true);
-    window->centreWithSize(520, 168);
+    window->centreWithSize(groupRenameWindowWidth(), groupRenameWindowHeight());
     window->setResizable(false, false);
     window->setUsingNativeTitleBar(true);
     window->enterModalState(true, nullptr, true);
@@ -427,7 +428,7 @@ void showMakeGroupDialog(AudioEngine& engine)
         juce::MessageManager::callAsync([window] { window->exitModalState(0); });
     });
     window->setContentOwned(content, true);
-    window->centreWithSize(440, 180);
+    window->centreWithSize(groupRenameWindowWidth(), groupRenameWindowHeight());
     window->setResizable(false, false);
     window->setUsingNativeTitleBar(true);
     content->setWantsKeyboardFocus(true);

@@ -1412,6 +1412,9 @@ void PluginRack::clearAll(bool markDirty)
                     retiredPlugins.push_back(std::move(model.plugin));
             }
         }
+        for (auto& excluded : excluded_)
+            excluded = false;
+        bypassAll_.store(0, std::memory_order_relaxed);
         publishUnlocked();
     }
 

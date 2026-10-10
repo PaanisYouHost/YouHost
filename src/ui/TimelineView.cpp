@@ -45,6 +45,7 @@ TimelineView::TimelineView()
     addAndMakeVisible(verticalOutButton_);
     addAndMakeVisible(verticalInButton_);
     addAndMakeVisible(fitButton_);
+    addAndMakeVisible(gotoBox_);
     addAndMakeVisible(waveOutButton_);
     addAndMakeVisible(waveInButton_);
     scroll_.addListener(this);
@@ -53,8 +54,10 @@ TimelineView::TimelineView()
     laneScrollBar_.setAutoHide(false);
     scroll_.setColour(juce::ScrollBar::thumbColourId, theme::panelEdge);
     scroll_.setColour(juce::ScrollBar::trackColourId, theme::background);
-    laneScrollBar_.setColour(juce::ScrollBar::thumbColourId, theme::panelEdge);
-    laneScrollBar_.setColour(juce::ScrollBar::trackColourId, theme::background);
+    laneScrollBar_.setColour(juce::ScrollBar::thumbColourId, juce::Colour(0xffc5ccd8));
+    laneScrollBar_.setColour(juce::ScrollBar::trackColourId, juce::Colour(0xff2a3140));
+    scroll_.setColour(juce::ScrollBar::thumbColourId, juce::Colour(0xffc5ccd8));
+    scroll_.setColour(juce::ScrollBar::trackColourId, juce::Colour(0xff2a3140));
     for (auto* button : { &zoomOutButton_, &zoomInButton_, &verticalOutButton_, &verticalInButton_, &fitButton_,
                           &waveOutButton_, &waveInButton_ })
         quietButton(*button);
@@ -62,7 +65,20 @@ TimelineView::TimelineView()
     zoomInButton_.setTooltip("Zoom in (T).");
     verticalOutButton_.setTooltip("Shorter lanes (Cmd+]).");
     verticalInButton_.setTooltip("Taller lanes (Cmd+[).");
-    fitButton_.setTooltip("Fit every take across the width and put the first lane at the top (Option+R).");
+    fitButton_.setTooltip("Fit every take across the width and every lane down the timeline (Option+R).");
+    fitButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2f6f4e));
+    fitButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    gotoBox_.setTextToShowWhenEmpty("Go", theme::fainter);
+    gotoBox_.setInputRestrictions(3, "0123456789");
+    gotoBox_.setJustification(juce::Justification::centred);
+    gotoBox_.setTooltip("Go to channel. Type the channel number and press Return. G focuses this field.");
+    gotoBox_.onReturnKey = [this]
+    {
+        const int number = parseGoToChannel(gotoBox_.getText().toStdString());
+        if (number > 0)
+            scrollToChannel(number - 1);
+        gotoBox_.setText({}, juce::dontSendNotification);
+    };
     waveOutButton_.setTooltip("Shorter waveform. Display only. Cmd or Option plus the wheel does this too.");
     waveInButton_.setTooltip("Taller waveform. Display only. A full-scale peak still fills the lane at the default.");
     zoomOutButton_.onClick = [this] { zoomOut(); };
@@ -203,11 +219,68 @@ void TimelineView::zoomBy(int delta)
     repaint();
 }
 
+void TimelineView::setSelectedChannel(std::function<int()> channel)
+{
+    selectedChannel_ = std::move(channel);
+}
+
+void TimelineView::rememberLanes(const std::vector<TimelineLaneView>& lanes)
+{
+    knownLanes_ = static_cast<int>(lanes.size());
+    laneMembers_.resize(lanes.size());
+    for (std::size_t index = 0; index < lanes.size(); ++index)
+        laneMembers_[index] = lanes[index].members;
+}
+
+void TimelineView::scrollToChannel(int channel)
+{
+    if (channel < 0 || laneProvider_ == nullptr)
+        return;
+    int found = -1;
+    laneProvider_([this, channel, &found](const std::vector<TimelineLaneView>& lanes)
+    {
+        rememberLanes(lanes);
+        found = laneIndexContaining(laneMembers_, channel);
+    });
+    if (found < 0)
+        return;
+    laneScroll_ = laneScrollToReveal(std::max(1, laneCount()), std::max(1, lanesShown()), laneScroll_, found);
+    syncScroll();
+    repaint();
+}
+
+void TimelineView::focusChannelJump()
+{
+    gotoBox_.grabKeyboardFocus();
+    gotoBox_.selectAll();
+}
+
+int TimelineView::zoomAnchorLane() const
+{
+    const auto position = getMouseXYRelative().toFloat();
+    const auto area = waveformArea();
+    const int shown = std::max(1, lanesShown());
+    if (area.contains(position))
+        return laneUnderPointer(position.y, area.getY(), area.getHeight(), shown, laneScroll_);
+    if (selectedChannel_ != nullptr)
+    {
+        const int lane = laneIndexContaining(laneMembers_, selectedChannel_());
+        if (lane >= 0)
+            return lane;
+    }
+    return laneScroll_;
+}
+
 void TimelineView::verticalZoomBy(int delta)
 {
-    const int maxStep = maxVerticalZoomStep(laneCount());
+    const int total = std::max(1, laneCount());
+    const int oldShown = std::max(1, lanesShown());
+    const int oldScroll = laneScroll_;
+    const int anchor = zoomAnchorLane();
+    const int maxStep = maxVerticalZoomStep(total);
     verticalStep_ = std::clamp(verticalStep_ + delta, 0, maxStep);
-    clampLaneScroll();
+    const int newShown = std::max(1, lanesShown());
+    laneScroll_ = laneScrollKeepingAnchor(total, oldScroll, oldShown, newShown, anchor);
     syncScroll();
     repaint();
 }
@@ -282,9 +355,9 @@ void TimelineView::clampLaneScroll()
 juce::Rectangle<float> TimelineView::waveformArea() const
 {
     auto bounds = getLocalBounds().toFloat().reduced(8.0f, 6.0f);
-    bounds.removeFromBottom(28.0f);
+    bounds.removeFromBottom(32.0f);
     bounds.removeFromTop(14.0f);
-    bounds.removeFromRight(14.0f);
+    bounds.removeFromRight(18.0f);
     return bounds;
 }
 
@@ -307,7 +380,11 @@ void TimelineView::locateAt(float x)
 
 void TimelineView::resized()
 {
-    auto bottom = getLocalBounds().removeFromBottom(28).reduced(8, 4);
+    auto bottom = getLocalBounds().removeFromBottom(32).reduced(8, 4);
+    fitButton_.setBounds(bottom.removeFromLeft(64));
+    bottom.removeFromLeft(4);
+    gotoBox_.setBounds(bottom.removeFromLeft(46));
+    bottom.removeFromLeft(6);
     zoomInButton_.setBounds(bottom.removeFromRight(26));
     bottom.removeFromRight(3);
     zoomOutButton_.setBounds(bottom.removeFromRight(26));
@@ -319,14 +396,12 @@ void TimelineView::resized()
     waveInButton_.setBounds(bottom.removeFromRight(32));
     bottom.removeFromRight(3);
     waveOutButton_.setBounds(bottom.removeFromRight(32));
-    bottom.removeFromRight(3);
-    fitButton_.setBounds(bottom.removeFromRight(40));
-    bottom.removeFromRight(6);
-    auto lanes = getLocalBounds().reduced(8, 6);
-    lanes.removeFromBottom(28);
-    lanes.removeFromTop(14);
-    laneScrollBar_.setBounds(lanes.removeFromRight(14));
+    bottom.removeFromRight(4);
     scroll_.setBounds(bottom);
+    auto lanes = getLocalBounds().reduced(8, 6);
+    lanes.removeFromBottom(32);
+    lanes.removeFromTop(14);
+    laneScrollBar_.setBounds(lanes.removeFromRight(18));
     clampLaneScroll();
     syncScroll();
 }
@@ -340,7 +415,7 @@ void TimelineView::mouseDown(const juce::MouseEvent& event)
         dragStartHeight_ = getHeight();
         return;
     }
-    if (event.position.y >= static_cast<float>(getHeight() - 28))
+    if (event.position.y >= static_cast<float>(getHeight() - 32))
         return;
     locateAt(event.position.x);
 }
@@ -353,7 +428,7 @@ void TimelineView::mouseDrag(const juce::MouseEvent& event)
             onHeight_(dragStartHeight_ + (event.getScreenY() - dragStartY_));
         return;
     }
-    if (event.position.y >= static_cast<float>(getHeight() - 28))
+    if (event.position.y >= static_cast<float>(getHeight() - 32))
         return;
     locateAt(event.position.x);
 }
@@ -460,7 +535,7 @@ void TimelineView::paint(juce::Graphics& graphics)
     const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes)
     {
     const int total = static_cast<int>(lanes.size());
-    knownLanes_ = total;
+    rememberLanes(lanes);
     const int shown = std::max(1, lanesVisible(std::max(1, total), verticalStep_, inner.getHeight()));
     const float laneHeight = inner.getHeight() / static_cast<float>(shown);
     const bool showNumbers = laneNumberVisible(laneHeight);
@@ -551,10 +626,15 @@ void TimelineView::paint(juce::Graphics& graphics)
         }
         if (showNumbers)
         {
+            const auto label = juce::String::fromUTF8(laneCornerLabel(lane.number, lane.title, lane.group).c_str());
+            const float tagHeight = std::min(16.0f, std::max(10.0f, laneHeight - 2.0f));
+            auto tag = juce::Rectangle<float>(row.getX() + 2.0f, row.getY() + 1.0f,
+                                              std::min(200.0f, std::max(24.0f, row.getWidth() - 4.0f)), tagHeight);
+            graphics.setColour(theme::panel.withAlpha(0.88f));
+            graphics.fillRoundedRectangle(tag, 3.0f);
             graphics.setColour(theme::text);
-            graphics.setFont(juce::Font(juce::FontOptions(std::min(12.0f, laneHeight - 1.0f))));
-            const auto label = lane.title.empty() ? juce::String(lane.number) : juce::String::fromUTF8(lane.title.c_str());
-            graphics.drawText(label, row.reduced(3.0f, 0.0f), juce::Justification::centredLeft, false);
+            graphics.setFont(juce::Font(juce::FontOptions(std::min(12.0f, tagHeight - 1.0f))));
+            graphics.drawText(label, tag.reduced(4.0f, 0.0f), juce::Justification::centredLeft, true);
         }
     }
     };
