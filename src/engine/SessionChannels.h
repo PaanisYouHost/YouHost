@@ -34,7 +34,8 @@ enum class AudioCardKind
 {
     none,
     builtin,
-    real
+    real,
+    virtualDevice
 };
 
 inline bool containsFolded(std::string_view haystack, std::string_view needle) noexcept
@@ -68,6 +69,27 @@ inline AudioCardKind audioCardKind(std::string_view name) noexcept
 {
     if (name.empty() || name == "No device" || name == "none" || isOfflineDeviceName(name))
         return AudioCardKind::none;
+
+    // Network and bus drivers count as hardware even when the name says "virtual".
+    const char* hardware[] = {
+        "dante",
+        "soundgrid",
+        "thunderbolt",
+        "avb",
+        "x-usb",
+        "x32",
+        "wing",
+        "edirol",
+        "ua-1a",
+        "fast track",
+        "fasttrack",
+        "scarlett",
+        "usb",
+    };
+    for (const char* pattern : hardware)
+        if (containsFolded(name, pattern))
+            return AudioCardKind::real;
+
     const char* builtin[] = {
         "built-in",
         "builtin",
@@ -80,6 +102,20 @@ inline AudioCardKind audioCardKind(std::string_view name) noexcept
     for (const char* pattern : builtin)
         if (containsFolded(name, pattern))
             return AudioCardKind::builtin;
+
+    const char* virtualDevice[] = {
+        "audio bridge",
+        "pro tools aggregate",
+        "microsoft teams",
+        "teams audio",
+        "mjaudiorecorder",
+        "koostelaite",
+        "aggregate",
+        "loopback",
+    };
+    for (const char* pattern : virtualDevice)
+        if (containsFolded(name, pattern))
+            return AudioCardKind::virtualDevice;
     return AudioCardKind::real;
 }
 
@@ -171,6 +207,160 @@ inline std::string deviceKeptOnSessionOpen(std::string_view selected, std::strin
 {
     (void) savedInSession;
     return std::string(selected);
+}
+
+inline constexpr const char* kVirtualDeviceHeading = "Virtual / aggregate devices";
+
+struct ListedDevice
+{
+    std::string name;
+    int inputs = 0;
+    int outputs = 0;
+};
+
+enum class DeviceRowKind
+{
+    hardware,
+    heading,
+    virtualDevice,
+    builtin,
+    offline
+};
+
+struct DeviceRow
+{
+    DeviceRowKind kind = DeviceRowKind::hardware;
+    std::string name;
+    std::string label;
+    bool selectable = true;
+};
+
+inline std::string deviceEntryLabel(std::string_view name, int inputs, int outputs)
+{
+    if (isOfflineDeviceName(name))
+        return std::string(kOfflineDeviceName);
+    if (inputs < 0)
+        inputs = 0;
+    if (outputs < 0)
+        outputs = 0;
+    std::string label(name);
+    label += " - ";
+    label += std::to_string(inputs);
+    label += " in / ";
+    label += std::to_string(outputs);
+    label += " out";
+    return label;
+}
+
+inline bool deviceNamePresent(const std::vector<ListedDevice>& devices, std::string_view name)
+{
+    for (const auto& device : devices)
+        if (device.name == name)
+            return true;
+    return false;
+}
+
+// Last explicit virtual choice, then the last real interface, then any real
+// interface, then a MacBook built-in. Virtual devices are not a fallback.
+inline std::string chooseStartupDevice(std::string_view savedName,
+                                       std::string_view userChosenName,
+                                       const std::vector<ListedDevice>& present)
+{
+    if (! userChosenName.empty() && deviceNamePresent(present, userChosenName)
+        && audioCardKind(userChosenName) == AudioCardKind::virtualDevice)
+        return std::string(userChosenName);
+
+    if (! savedName.empty() && deviceNamePresent(present, savedName)
+        && audioCardKind(savedName) == AudioCardKind::real)
+        return std::string(savedName);
+    if (! userChosenName.empty() && deviceNamePresent(present, userChosenName)
+        && audioCardKind(userChosenName) == AudioCardKind::real)
+        return std::string(userChosenName);
+
+    for (const auto& device : present)
+        if (audioCardKind(device.name) == AudioCardKind::real)
+            return device.name;
+
+    if (! savedName.empty() && deviceNamePresent(present, savedName)
+        && audioCardKind(savedName) == AudioCardKind::builtin)
+        return std::string(savedName);
+    for (const auto& device : present)
+        if (audioCardKind(device.name) == AudioCardKind::builtin)
+            return device.name;
+    return {};
+}
+
+inline bool deviceFilterMatches(std::string_view label, std::string_view filter)
+{
+    if (filter.empty())
+        return true;
+    return containsFolded(label, filter);
+}
+
+inline std::vector<DeviceRow> buildDeviceList(const std::vector<ListedDevice>& devices, std::string_view filter)
+{
+    std::vector<ListedDevice> hardware;
+    std::vector<ListedDevice> virtualDevices;
+    std::vector<ListedDevice> builtin;
+    for (const auto& device : devices)
+    {
+        if (device.name.empty() || isOfflineDeviceName(device.name))
+            continue;
+        const auto label = deviceEntryLabel(device.name, device.inputs, device.outputs);
+        if (! deviceFilterMatches(label, filter) && ! deviceFilterMatches(device.name, filter))
+            continue;
+        switch (audioCardKind(device.name))
+        {
+            case AudioCardKind::virtualDevice:
+                virtualDevices.push_back(device);
+                break;
+            case AudioCardKind::builtin:
+                builtin.push_back(device);
+                break;
+            case AudioCardKind::real:
+                hardware.push_back(device);
+                break;
+            case AudioCardKind::none:
+                break;
+        }
+    }
+
+    std::vector<DeviceRow> rows;
+    const auto pushDevice = [&rows](const ListedDevice& device, DeviceRowKind kind)
+    {
+        DeviceRow row;
+        row.kind = kind;
+        row.name = device.name;
+        row.label = deviceEntryLabel(device.name, device.inputs, device.outputs);
+        row.selectable = true;
+        rows.push_back(std::move(row));
+    };
+    for (const auto& device : hardware)
+        pushDevice(device, DeviceRowKind::hardware);
+    if (! virtualDevices.empty())
+    {
+        DeviceRow heading;
+        heading.kind = DeviceRowKind::heading;
+        heading.label = kVirtualDeviceHeading;
+        heading.selectable = false;
+        rows.push_back(std::move(heading));
+        for (const auto& device : virtualDevices)
+            pushDevice(device, DeviceRowKind::virtualDevice);
+    }
+    for (const auto& device : builtin)
+        pushDevice(device, DeviceRowKind::builtin);
+
+    const auto offlineLabel = std::string(kOfflineDeviceName);
+    if (deviceFilterMatches(offlineLabel, filter))
+    {
+        DeviceRow offline;
+        offline.kind = DeviceRowKind::offline;
+        offline.name = kOfflineDeviceName;
+        offline.label = offlineLabel;
+        offline.selectable = true;
+        rows.push_back(std::move(offline));
+    }
+    return rows;
 }
 
 } // namespace youhost

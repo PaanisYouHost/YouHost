@@ -10,6 +10,8 @@
 #include "engine/SessionFiles.h"
 #include "engine/DeviceWatch.h"
 #include "engine/RecordLock.h"
+#include "engine/RecordStart.h"
+#include "engine/HostLog.h"
 #include "engine/SessionChannels.h"
 #include "engine/Shortcuts.h"
 
@@ -131,6 +133,16 @@ int referenceDbFor(int id)
     return kDefaultRmsReferenceDb;
 }
 
+void showTransportResult(const juce::String& problem)
+{
+    if (problem.isEmpty())
+        return;
+    const auto title = problem.contains("locked") ? juce::String("Recording is locked")
+                       : (problem.contains("Playback") || problem.contains("Nothing recorded")) ? juce::String("Playback")
+                                                                                                : juce::String("Recording did not start");
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, problem);
+}
+
 void showRadio(juce::TextButton& rms, juce::TextButton& peak, bool showPeak)
 {
     rms.setToggleState(! showPeak, juce::dontSendNotification);
@@ -143,10 +155,30 @@ void quiet(juce::Button& button)
     button.setWantsKeyboardFocus(false);
 }
 
-void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
+juce::String deviceRawName(const juce::ComboBox& box, int itemId)
+{
+    const auto map = box.getProperties()["youhostDeviceMap"].toString();
+    const auto key = juce::String(itemId) + "=";
+    for (auto line : juce::StringArray::fromLines(map))
+        if (line.startsWith(key))
+            return line.fromFirstOccurrenceOf("=", false, false);
+    return {};
+}
+
+void rememberDeviceRaw(juce::ComboBox& box, int itemId, const juce::String& name)
+{
+    auto map = box.getProperties()["youhostDeviceMap"].toString();
+    if (map.isNotEmpty())
+        map << "\n";
+    map << itemId << "=" << name;
+    box.getProperties().set("youhostDeviceMap", map);
+}
+
+void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine, const juce::String& filter)
 {
     const bool deviceOk = recordActionAllowed(RecordDisrupt::changeDevice, engine.isRecording(), engine.recordLockArmed());
     const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine.isRecording(), engine.recordLockArmed());
+    const auto connected = engine.connectedDevices();
     std::function<void(juce::Component&)> walk;
     walk = [&](juce::Component& node)
     {
@@ -156,24 +188,29 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
                 continue;
             if (auto* box = dynamic_cast<juce::ComboBox*>(child))
             {
-                bool deviceList = false;
-                for (int index = 0; index < box->getNumItems(); ++index)
+                bool deviceList = box->getProperties().contains("youhostDeviceList");
+                if (! deviceList)
                 {
-                    const auto text = box->getItemText(index);
-                    if (text.contains("none") || text == juce::String(kOfflineDeviceName))
-                        deviceList = true;
+                    for (int index = 0; index < box->getNumItems(); ++index)
+                    {
+                        const auto text = box->getItemText(index);
+                        if (text.contains("none") || text == juce::String(kOfflineDeviceName) || text == juce::String(kVirtualDeviceHeading))
+                            deviceList = true;
+                        for (const auto& device : connected)
+                            if (text == juce::String(device.name) || text.startsWith(juce::String(device.name) + " - "))
+                                deviceList = true;
+                    }
                 }
                 if (deviceList)
                 {
-                    if (box->indexOfItemId(kOfflineDeviceItemId) < 0)
-                        box->addItem(kOfflineDeviceName, kOfflineDeviceItemId);
+                    box->getProperties().set("youhostDeviceList", true);
                     if (! box->getProperties().contains("youhostOffline"))
                     {
-                        auto previous = box->onChange;
                         box->getProperties().set("youhostOffline", true);
-                        box->onChange = [box, previous, &engine]
+                        box->onChange = [box, &engine]
                         {
-                            if (box->getSelectedId() == kOfflineDeviceItemId)
+                            const int selected = box->getSelectedId();
+                            if (selected == kOfflineDeviceItemId)
                             {
                                 if (! recordActionAllowed(RecordDisrupt::offlineSwitch, engine.isRecording(), engine.recordLockArmed()))
                                 {
@@ -186,15 +223,53 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
                             }
                             if (! recordActionAllowed(RecordDisrupt::changeDevice, engine.isRecording(), engine.recordLockArmed()))
                                 return;
-                            box->getProperties().set("youhostLastDevice", box->getSelectedId());
+                            const auto raw = deviceRawName(*box, selected);
+                            if (raw.isEmpty())
+                                return;
+                            box->getProperties().set("youhostLastDevice", selected);
+                            engine.noteUserChoseDevice(raw);
                             if (engine.offlineTemplate())
                                 engine.setOfflineTemplate(false);
-                            if (previous != nullptr)
-                                previous();
+                            engine.openNamedDevice(raw);
                         };
                     }
-                    if (engine.offlineTemplate() && box->getSelectedId() != kOfflineDeviceItemId)
+
+                    const auto rows = buildDeviceList(connected, filter.toStdString());
+                    juce::String signature;
+                    for (const auto& row : rows)
+                        signature << (row.selectable ? "d:" : "h:") << juce::String(row.label) << "\n";
+                    const auto previousSignature = box->getProperties()["youhostDeviceSignature"].toString();
+                    if (signature != previousSignature)
+                    {
+                        const auto selectedRaw = deviceRawName(*box, box->getSelectedId());
+                        const auto fallback = box->getText();
+                        box->clear(juce::dontSendNotification);
+                        box->getProperties().set("youhostDeviceMap", juce::String());
+                        int nextId = 1;
+                        int keepId = 0;
+                        for (const auto& row : rows)
+                        {
+                            if (! row.selectable)
+                            {
+                                box->addSectionHeading(juce::String(row.label));
+                                continue;
+                            }
+                            const int itemId = row.kind == DeviceRowKind::offline ? kOfflineDeviceItemId : nextId++;
+                            box->addItem(juce::String(row.label), itemId);
+                            rememberDeviceRaw(*box, itemId, juce::String(row.name));
+                            if (selectedRaw == juce::String(row.name) || fallback == juce::String(row.name) || fallback == juce::String(row.label))
+                                keepId = itemId;
+                        }
+                        box->getProperties().set("youhostDeviceSignature", signature);
+                        if (engine.offlineTemplate())
+                            box->setSelectedId(kOfflineDeviceItemId, juce::dontSendNotification);
+                        else if (keepId != 0)
+                            box->setSelectedId(keepId, juce::dontSendNotification);
+                    }
+                    else if (engine.offlineTemplate() && box->getSelectedId() != kOfflineDeviceItemId)
+                    {
                         box->setSelectedId(kOfflineDeviceItemId, juce::dontSendNotification);
+                    }
                     box->setEnabled(deviceOk);
                 }
                 else
@@ -378,8 +453,15 @@ private:
         {
             addAndMakeVisible(note_);
             addAndMakeVisible(reveal_);
+            addAndMakeVisible(deviceFind_);
             addAndMakeVisible(listViewport_);
             addAndMakeVisible(viewport_);
+            deviceFind_.setTextToShowWhenEmpty("Find device", theme::fainter);
+            deviceFind_.setTooltip("Filter the audio device list.");
+            deviceFind_.onTextChange = [this]
+            {
+                syncOfflineDeviceEntry(selector_, engine_, deviceFind_.getText().trim());
+            };
             note_.setJustificationType(juce::Justification::topLeft);
             note_.setColour(juce::Label::textColourId, theme::dim);
             reveal_.setClickingTogglesState(true);
@@ -450,6 +532,8 @@ private:
                 const int rowWidth = std::max(200, listViewport_.getMaximumVisibleWidth());
                 rows_.setSize(rowWidth, std::max(22, rows_.getHeight()));
             }
+            deviceFind_.setBounds(area.removeFromTop(28));
+            area.removeFromTop(6);
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 160));
@@ -458,7 +542,7 @@ private:
     private:
         void timerCallback() override
         {
-            syncOfflineDeviceEntry(selector_, engine_);
+            syncOfflineDeviceEntry(selector_, engine_, deviceFind_.getText().trim());
             const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
             const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
             offlineRate_.setEnabled(rateOk);
@@ -507,6 +591,7 @@ private:
         juce::AudioDeviceSelectorComponent& selector_;
         AudioEngine& engine_;
         juce::Label note_;
+        juce::TextEditor deviceFind_;
         juce::TextButton reveal_ { "Show on mixer" };
         juce::ComboBox offlineRate_;
         juce::ComboBox offlineBuffer_;
@@ -761,7 +846,14 @@ private:
               parent_(engine.defaultSessionParent())
         {
             addAndMakeVisible(intro_);
+            addAndMakeVisible(deviceFind_);
             addAndMakeVisible(deviceViewport_);
+            deviceFind_.setTextToShowWhenEmpty("Find device", theme::fainter);
+            deviceFind_.setTooltip("Filter the audio device list.");
+            deviceFind_.onTextChange = [this]
+            {
+                syncOfflineDeviceEntry(selector_, engine_, deviceFind_.getText().trim());
+            };
             addAndMakeVisible(nameLabel_);
             addAndMakeVisible(name_);
             addAndMakeVisible(locationLabel_);
@@ -837,6 +929,8 @@ private:
             auto area = getLocalBounds().reduced(16, 12);
             intro_.setBounds(area.removeFromTop(68));
             area.removeFromTop(6);
+            deviceFind_.setBounds(area.removeFromTop(28));
+            area.removeFromTop(6);
             deviceViewport_.setBounds(area.removeFromTop(168));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 140));
@@ -887,7 +981,7 @@ private:
         void timerCallback() override
         {
             hideTestButtons(selector_);
-            syncOfflineDeviceEntry(selector_, engine_);
+            syncOfflineDeviceEntry(selector_, engine_, deviceFind_.getText().trim());
             if (! engine_.offlineTemplate())
                 attachBitDepthSlot(selector_, bitSlot_);
             bitSlot_.setSelectedId(engine_.wavBitDepth());
@@ -1204,6 +1298,7 @@ private:
         juce::File parent_;
         std::unique_ptr<juce::FileChooser> chooser_;
         juce::Label intro_;
+        juce::TextEditor deviceFind_;
         juce::Viewport deviceViewport_;
         juce::Label nameLabel_;
         juce::TextEditor name_;
@@ -1558,15 +1653,18 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu)) + "). Per-core usage and the audio callback.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
-    stopButton_.onClick = [this] { engine_.transportStop(); refresh(); };
+    stopButton_.onClick = [this]
+    {
+        showTransportResult(engine_.transportStop());
+        refresh();
+    };
     playButton_.onClick = [this]
     {
-        if (engine_.transportView().mode != TransportMode::stopped)
-            return;
-        if (engine_.isRecordReady())
+        if (engine_.isRecordReady() && engine_.transportView().mode == TransportMode::stopped)
             requestRecord();
         else
-            engine_.transportPlay();
+            showTransportResult(engine_.transportPlay());
+        refresh();
     };
     recButton_.onClick = [this] { engine_.toggleRecordReady(); refresh(); };
     helpButton_.onClick = [this] { showHelp(); };
@@ -1878,22 +1976,18 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
             timeline_.verticalZoomOut();
             return true;
         case ShortcutId::recordNow:
-            if (! recordActionAllowed(RecordDisrupt::commandSpace, engine_.isRecording(), engine_.recordLockArmed()))
-                return true;
             requestRecord();
             return true;
         case ShortcutId::playOrStop:
         {
             const auto mode = engine_.transportView().mode;
-            if (mode == TransportMode::stopped)
-            {
-                if (engine_.isRecordReady())
-                    requestRecord();
-                else
-                    engine_.transportPlay();
-            }
-            else if (recordActionAllowed(RecordDisrupt::space, engine_.isRecording(), engine_.recordLockArmed()))
-                engine_.transportStop();
+            if (mode == TransportMode::stopped && engine_.isRecordReady())
+                requestRecord();
+            else if (mode == TransportMode::stopped)
+                showTransportResult(engine_.transportPlay());
+            else
+                showTransportResult(engine_.transportStop());
+            refresh();
             return true;
         }
         case ShortcutId::previousTake:
@@ -2141,9 +2235,14 @@ void MainComponent::newSession()
 void MainComponent::requestRecord()
 {
     if (startupWindow_ != nullptr || placeWindow_ != nullptr)
+    {
+        appendHostLog(settings_, "record start failed: the session window is still open");
+        showTransportResult("Close the session window before recording.");
         return;
+    }
     if (! engine_.hasSession())
     {
+        appendHostLog(settings_, "record start failed: This session has no folder yet. Recording did not start.");
         promptForSession("Choose Where to Record", [this](bool placed)
         {
             if (placed)
@@ -2156,16 +2255,7 @@ void MainComponent::requestRecord()
 
 void MainComponent::startRecordingIfReady()
 {
-    const auto problem = engine_.sessionRecordProblem();
-    if (problem.isNotEmpty())
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                               "Cannot record",
-                                               problem);
-        refresh();
-        return;
-    }
-    engine_.transportRecord();
+    showTransportResult(engine_.transportRecord());
     refresh();
 }
 
@@ -2762,6 +2852,12 @@ void MainComponent::refresh()
     if (recordLock_ != nullptr)
         recordLock_->setLocked(engine_.recordLockArmed());
     const bool recording = engine_.isRecording();
+    const bool showArmHint = engine_.isRecordReady() && ! recording;
+    if (showArmHint != armHintVisible_)
+    {
+        armHintVisible_ = showArmHint;
+        resized();
+    }
     const bool armedLock = engine_.recordLockArmed();
     if (engine_.recordingLocked() != lockLayout_)
     {
@@ -2826,7 +2922,7 @@ void MainComponent::refresh()
     auto transport = engine_.transportView();
     if (transport.naturalEnd || transport.failed)
     {
-        engine_.transportStop();
+        engine_.finishTransport();
         transport = engine_.transportView();
     }
     if (transport.mode == TransportMode::recording)
@@ -2971,6 +3067,15 @@ void MainComponent::paint(juce::Graphics& graphics)
         graphics.drawText("RECORDING LOCKED", recordLockArea_, juce::Justification::centred, true);
     }
 
+    if (! recordArmArea_.isEmpty())
+    {
+        graphics.setColour(juce::Colour(0xff5a1e28));
+        graphics.fillRoundedRectangle(recordArmArea_.toFloat(), 6.0f);
+        graphics.setColour(juce::Colour(0xffff3344));
+        graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
+        graphics.drawText(kRecordArmedHint, recordArmArea_.reduced(12, 0), juce::Justification::centredLeft, true);
+    }
+
     juce::String hint = engine_.hiddenChannelNote();
     if (hint.isEmpty())
         hint = engine_.pluginLoadProgress();
@@ -3073,6 +3178,16 @@ void MainComponent::resized()
     cluster.removeFromLeft(8);
     timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
     modeLabel_.setBounds(cluster.reduced(4, 8));
+
+    if (armHintVisible_)
+    {
+        area.removeFromTop(4);
+        recordArmArea_ = area.removeFromTop(28);
+    }
+    else
+    {
+        recordArmArea_ = {};
+    }
 
     auto transportGap = area.removeFromTop(4);
     transportRule_ = transportGap.withSizeKeepingCentre(transportGap.getWidth(), 1);

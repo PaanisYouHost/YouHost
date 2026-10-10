@@ -11,6 +11,7 @@
 #include "X32Colours.h"
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
+#include "RecordStart.h"
 #include "Recorder.h"
 #include "SessionChannels.h"
 #include "SessionDocument.h"
@@ -151,9 +152,14 @@ public:
     std::vector<int> selectedChannels() const;
     void toggleRecordReady();
     bool isRecordReady() const noexcept { return recordReady_; }
-    void transportRecord();
-    void transportStop();
-    void transportPlay();
+    juce::String transportRecord();
+    juce::String transportStop();
+    juce::String transportPlay();
+    juce::String pressTransport(TransportPress press);
+    void finishTransport();
+    std::vector<ListedDevice> connectedDevices();
+    void openNamedDevice(const juce::String& name);
+    void noteUserChoseDevice(const juce::String& name);
     void transportLocate(std::int64_t sample);
     void transportJump(int direction);
     void transportNudge(double seconds);
@@ -228,6 +234,9 @@ private:
 
     void publishConfig(juce::AudioIODevice& device);
     void publishSessionChannelLimit();
+    void reconcileStartupDevice();
+    RecordAttempt makeRecordAttempt();
+    void logTransport(const juce::String& line);
     SessionChannelView currentChannelView() const;
     void saveSetupIfAllowed();
     void syncRecorderFolder();
@@ -352,6 +361,8 @@ private:
     int preparedBuffer_ = 0;
     juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;
     juce::String wantedName_;
+    std::vector<ListedDevice> deviceInventory_;
+    juce::uint32 deviceInventoryMs_ = 0;
     juce::String startupFallbackName_;
     juce::String startupDeviceNote_;
     juce::String rateWarning_;

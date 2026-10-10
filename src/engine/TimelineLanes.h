@@ -1,9 +1,13 @@
 #pragma once
 
+#include "DisplayLayout.h"
+#include "HostLimits.h"
 #include "TakePlan.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -123,6 +127,163 @@ inline std::vector<WavePeak> mergePeakLayers(const std::vector<const std::vector
         merged[index] = { low, high };
     }
     return merged;
+}
+
+// JUCE-free picture of one recorded take. Peak pointers stay valid for the visit.
+struct TimelineTakeSource
+{
+    int number = 0;
+    std::int64_t start = 0;
+    std::int64_t length = 0;
+    std::array<const std::vector<WavePeak>*, kMaxChannels> peaks {};
+    std::array<bool, kMaxChannels> recorded {};
+};
+
+struct TimelineChannelInfo
+{
+    std::string name;
+    int color = 0;
+    int group = -1;
+};
+
+struct TimelineGroupInfo
+{
+    bool collapsed = false;
+    int color = 0;
+    std::string name;
+};
+
+// Builds the lanes a timeline paint draws. Names come from the caller so the
+// paint never locks the recorder again to read them.
+inline void buildTimelineLanes(const TimelineTakeSource* takes,
+                                int count,
+                                const TimelineTakeSource* live,
+                                const TimelineChannelInfo* channels,
+                                int shown,
+                                const TimelineGroupInfo* groups,
+                                int groupCount,
+                                const std::function<void(const std::vector<TimelineLaneView>&)>& fn)
+{
+    if (fn == nullptr)
+        return;
+    if (shown < 0)
+        shown = 0;
+    if (shown > kMaxChannels)
+        shown = kMaxChannels;
+    if (count < 0)
+        count = 0;
+
+    std::array<bool, kMaxChannels> heard {};
+    const auto markHeard = [&heard, shown](const TimelineTakeSource* view)
+    {
+        if (view == nullptr)
+            return;
+        for (int channel = 0; channel < shown; ++channel)
+        {
+            const auto index = static_cast<std::size_t>(channel);
+            const auto* peaks = view->peaks[index];
+            if (view->recorded[index] || (peaks != nullptr && ! peaks->empty()))
+                heard[index] = true;
+        }
+    };
+    for (int index = 0; index < count; ++index)
+        markHeard(takes + index);
+    markHeard(live);
+
+    struct LaneDesc
+    {
+        bool group = false;
+        int number = 0;
+        int color = 0;
+        std::string title;
+        std::vector<int> members;
+    };
+
+    std::vector<LaneDesc> descriptions;
+    std::array<bool, kMaxDisplayGroups> groupDone {};
+    for (int channel = 0; channel < shown; ++channel)
+    {
+        if (! heard[static_cast<std::size_t>(channel)])
+            continue;
+        const int group = channels != nullptr ? channels[channel].group : -1;
+        const bool collapsed = group >= 0 && group < groupCount && groups != nullptr && groups[group].collapsed;
+        if (collapsed)
+        {
+            if (groupDone[static_cast<std::size_t>(group)])
+                continue;
+            groupDone[static_cast<std::size_t>(group)] = true;
+            LaneDesc description;
+            description.group = true;
+            description.color = groups[group].color;
+            description.title = groups[group].name.empty() ? "Group " + std::to_string(group + 1) : groups[group].name;
+            for (int member = 0; member < shown; ++member)
+                if (channels[member].group == group && heard[static_cast<std::size_t>(member)])
+                    description.members.push_back(member);
+            descriptions.push_back(std::move(description));
+            continue;
+        }
+
+        LaneDesc description;
+        description.number = channel + 1;
+        description.color = channels != nullptr ? channels[channel].color : 0;
+        description.title = channels != nullptr ? channels[channel].name : std::string();
+        description.members.push_back(channel);
+        descriptions.push_back(std::move(description));
+    }
+
+    std::vector<std::vector<WavePeak>> ownedMerges;
+    ownedMerges.reserve(descriptions.size() * static_cast<std::size_t>(count + 1));
+    std::vector<TimelineLaneView> lanes;
+    lanes.reserve(descriptions.size());
+
+    const auto addRegion = [&](TimelineLaneView& lane, const LaneDesc& description, const TimelineTakeSource& take)
+    {
+        bool any = false;
+        for (const int member : description.members)
+        {
+            const auto index = static_cast<std::size_t>(member);
+            const auto* peaks = take.peaks[index];
+            if (take.recorded[index] || (peaks != nullptr && ! peaks->empty()))
+                any = true;
+        }
+        if (! any)
+            return;
+
+        TimelineRegionView region;
+        region.number = take.number;
+        region.start = take.start;
+        region.length = take.length;
+        if (description.members.size() == 1)
+        {
+            region.peaks = take.peaks[static_cast<std::size_t>(description.members.front())];
+        }
+        else
+        {
+            std::vector<const std::vector<WavePeak>*> layers;
+            for (const int member : description.members)
+                if (take.peaks[static_cast<std::size_t>(member)] != nullptr)
+                    layers.push_back(take.peaks[static_cast<std::size_t>(member)]);
+            ownedMerges.push_back(mergePeakLayers(layers));
+            region.peaks = &ownedMerges.back();
+        }
+        lane.regions.push_back(region);
+    };
+
+    for (const auto& description : descriptions)
+    {
+        TimelineLaneView lane;
+        lane.number = description.number;
+        lane.color = description.color;
+        lane.group = description.group;
+        lane.title = description.title;
+        lane.members = description.members;
+        for (int index = 0; index < count; ++index)
+            addRegion(lane, description, takes[index]);
+        if (live != nullptr)
+            addRegion(lane, description, *live);
+        lanes.push_back(std::move(lane));
+    }
+    fn(lanes);
 }
 
 } // namespace youhost

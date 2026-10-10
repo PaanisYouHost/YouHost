@@ -6,6 +6,7 @@
 #include "WaveformScale.h"
 #include "DeviceWatch.h"
 #include "RecordLock.h"
+#include "RecordStart.h"
 #include "HostLog.h"
 #include "MeterScale.h"
 #include "SessionDisk.h"
@@ -320,6 +321,8 @@ void AudioEngine::start(bool allowInput)
     deviceManager_.addChangeListener(this);
     deviceManager_.addAudioCallback(this);
     started_ = true;
+    if (allowInput)
+        reconcileStartupDevice();
     pollDeviceStats();
     if (! awaitingSavedDevice_)
         saveSetupIfAllowed();
@@ -744,6 +747,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     // Record tap is a lock-free copy of the raw input. Playback, when active,
     // replaces that input before meters and plugins. Neither path takes a lock.
+    // The tap scans every channel. sessionAudioLimit_ is only the plugin CPU
+    // limit: using it as the scan length made Play open no files.
     const int sessionChannels = sessionAudioLimit_.load(std::memory_order_relaxed);
     if (recorder_ != nullptr)
         recorder_->processRecord(inputChannelData,
@@ -751,7 +756,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                  config.routing.inputPacked.data(),
                                  kMaxChannels,
                                  numSamples,
-                                 sessionChannels);
+                                 kMaxChannels);
 
     const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
     const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
@@ -1326,122 +1331,69 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
     if (fn == nullptr || recorder_ == nullptr)
         return;
 
-    recorder_->visitRecordedTakes([this, &fn](const RecordedTakeView* takes, int count, const RecordedTakeView* live)
+    recorder_->visitRecordedTakes([this, &fn](const RecordedTakeView* takes,
+                                             int count,
+                                             const RecordedTakeView* live,
+                                             const std::array<std::string, kMaxChannels>& names)
     {
         const int shown = visibleChannels();
-        std::array<bool, kMaxChannels> heard {};
-        auto markHeard = [&heard, shown](const RecordedTakeView* view)
+        std::array<TimelineTakeSource, 64> smallTakes;
+        std::vector<TimelineTakeSource> largeTakes;
+        const TimelineTakeSource* sources = nullptr;
+        if (count > 0 && takes != nullptr)
         {
-            if (view == nullptr)
-                return;
-            for (int channel = 0; channel < shown; ++channel)
+            TimelineTakeSource* storage = nullptr;
+            if (count <= static_cast<int>(smallTakes.size()))
             {
-                const auto index = static_cast<std::size_t>(channel);
-                const auto* peaks = view->peaks[index];
-                if (view->recorded[index] || (peaks != nullptr && ! peaks->empty()))
-                    heard[index] = true;
-            }
-        };
-        for (int index = 0; index < count; ++index)
-            markHeard(takes + index);
-        markHeard(live);
-
-        struct LaneDesc
-        {
-            bool group = false;
-            int number = 0;
-            int color = 0;
-            std::string title;
-            std::vector<int> members;
-        };
-
-        std::vector<LaneDesc> descriptions;
-        std::array<bool, kMaxDisplayGroups> groupDone {};
-        for (int channel = 0; channel < shown; ++channel)
-        {
-            if (! heard[static_cast<std::size_t>(channel)])
-                continue;
-            const int group = channelGroup_[static_cast<std::size_t>(channel)];
-            if (group >= 0 && group < kMaxDisplayGroups && groups_[static_cast<std::size_t>(group)].collapsed)
-            {
-                if (groupDone[static_cast<std::size_t>(group)])
-                    continue;
-                groupDone[static_cast<std::size_t>(group)] = true;
-                LaneDesc description;
-                description.group = true;
-                description.color = groups_[static_cast<std::size_t>(group)].color;
-                const auto name = groups_[static_cast<std::size_t>(group)].name;
-                description.title = name.isNotEmpty() ? name.toStdString() : "Group " + std::to_string(group + 1);
-                for (int member = 0; member < shown; ++member)
-                    if (channelGroup_[static_cast<std::size_t>(member)] == group && heard[static_cast<std::size_t>(member)])
-                        description.members.push_back(member);
-                descriptions.push_back(std::move(description));
-                continue;
-            }
-
-            LaneDesc description;
-            description.number = channel + 1;
-            description.color = channelColor_[static_cast<std::size_t>(channel)];
-            if (recorder_ != nullptr)
-                description.title = recorder_->channelName(channel).toStdString();
-            description.members.push_back(channel);
-            descriptions.push_back(std::move(description));
-        }
-
-        std::vector<std::vector<WavePeak>> ownedMerges;
-        ownedMerges.reserve(descriptions.size() * static_cast<std::size_t>(count + 1));
-        std::vector<TimelineLaneView> lanes;
-        lanes.reserve(descriptions.size());
-
-        auto addRegion = [&](TimelineLaneView& lane, const LaneDesc& description, const RecordedTakeView& take)
-        {
-            bool any = false;
-            for (const int member : description.members)
-            {
-                const auto index = static_cast<std::size_t>(member);
-                const auto* peaks = take.peaks[index];
-                if (take.recorded[index] || (peaks != nullptr && ! peaks->empty()))
-                    any = true;
-            }
-            if (! any)
-                return;
-
-            TimelineRegionView region;
-            region.number = take.number;
-            region.start = take.start;
-            region.length = take.length;
-            if (description.members.size() == 1)
-            {
-                region.peaks = take.peaks[static_cast<std::size_t>(description.members.front())];
+                storage = smallTakes.data();
             }
             else
             {
-                std::vector<const std::vector<WavePeak>*> layers;
-                for (const int member : description.members)
-                    if (take.peaks[static_cast<std::size_t>(member)] != nullptr)
-                        layers.push_back(take.peaks[static_cast<std::size_t>(member)]);
-                ownedMerges.push_back(mergePeakLayers(layers));
-                region.peaks = &ownedMerges.back();
+                largeTakes.resize(static_cast<std::size_t>(count));
+                storage = largeTakes.data();
             }
-            lane.regions.push_back(region);
-        };
-
-        for (const auto& description : descriptions)
-        {
-            TimelineLaneView lane;
-            lane.number = description.number;
-            lane.color = description.color;
-            lane.group = description.group;
-            lane.title = description.title;
-            lane.members = description.members;
             for (int index = 0; index < count; ++index)
-                addRegion(lane, description, takes[index]);
-            if (live != nullptr)
-                addRegion(lane, description, *live);
-            lanes.push_back(std::move(lane));
+            {
+                const auto& take = takes[index];
+                auto& source = storage[index];
+                source.number = take.number;
+                source.start = take.start;
+                source.length = take.length;
+                source.peaks = take.peaks;
+                source.recorded = take.recorded;
+            }
+            sources = storage;
         }
 
-        fn(lanes);
+        TimelineTakeSource liveSource;
+        const TimelineTakeSource* livePtr = nullptr;
+        if (live != nullptr)
+        {
+            liveSource.number = live->number;
+            liveSource.start = live->start;
+            liveSource.length = live->length;
+            liveSource.peaks = live->peaks;
+            liveSource.recorded = live->recorded;
+            livePtr = &liveSource;
+        }
+
+        std::array<TimelineChannelInfo, kMaxChannels> channels {};
+        for (int channel = 0; channel < shown; ++channel)
+        {
+            const auto index = static_cast<std::size_t>(channel);
+            channels[index].name = names[index];
+            channels[index].color = channelColor_[index];
+            channels[index].group = channelGroup_[index];
+        }
+        std::array<TimelineGroupInfo, kMaxDisplayGroups> groups {};
+        for (int group = 0; group < kMaxDisplayGroups; ++group)
+        {
+            const auto index = static_cast<std::size_t>(group);
+            groups[index].collapsed = groups_[index].collapsed;
+            groups[index].color = groups_[index].color;
+            groups[index].name = groups_[index].name.toStdString();
+        }
+        buildTimelineLanes(sources, count, livePtr, channels.data(), shown, groups.data(), kMaxDisplayGroups, fn);
     });
 }
 
@@ -1666,35 +1618,177 @@ void AudioEngine::toggleRecordReady()
     recordReady_ = ! recordReady_;
 }
 
-void AudioEngine::transportRecord()
+void AudioEngine::logTransport(const juce::String& line)
 {
-    if (recordingLocked())
-        return;
-    if (sessionCopyProgress() >= 0.0f)
-    {
-        sessionMessage_ = "Finish saving the copy before recording.";
-        return;
-    }
-    recordReady_ = true;
-    const auto problem = sessionRecordProblem();
-    if (problem.isNotEmpty())
-    {
-        sessionMessage_ = problem;
-        return;
-    }
-    if (recorder_ == nullptr)
-        return;
-    const auto routing = currentConfig().routing;
-    const int sessionChannels = std::clamp(sessionAudioLimit_.load(std::memory_order_relaxed), 0, kMaxChannels);
-    recorder_->record(routing.inputPacked.data(), sessionChannels);
-    noteSessionEdit();
+    if (line.isNotEmpty())
+        appendHostLog(settings_, line);
 }
 
-void AudioEngine::transportStop()
+RecordAttempt AudioEngine::makeRecordAttempt()
 {
-    if (recordingLocked())
-        return;
-    recordReady_ = false;
+    RecordAttempt attempt;
+    attempt.buttonArmed = recordReady_;
+    attempt.lockArmed = recordLockArmed_;
+    attempt.recording = isRecording();
+    attempt.playing = recorder_ != nullptr && recorder_->isPlaying();
+    attempt.hasSession = hasSession();
+    const auto folderProblem = sessionRecordProblem();
+    attempt.folderWritable = ! attempt.hasSession || folderProblem.isEmpty();
+    if (folderProblem.isNotEmpty())
+        attempt.folderProblem = folderProblem.toStdString();
+    attempt.offline = offlineTemplate_;
+    attempt.deviceLive = ! attempt.offline && deviceOpen_.load(std::memory_order_relaxed);
+    attempt.copyBusy = sessionCopyProgress() >= 0.0f;
+    attempt.deviceRate = sampleRate_.load(std::memory_order_relaxed);
+    attempt.preferredRate = preferredRate_;
+    if (recorder_ != nullptr)
+        attempt.timelineRate = recorder_->timelineSampleRate();
+
+    auto packed = currentConfig().routing.inputPacked;
+    int openInputs = 0;
+    for (const auto index : packed)
+        if (index >= 0)
+            ++openInputs;
+    if (openInputs == 0 && attempt.deviceLive)
+    {
+        if (auto* live = deviceManager_.getCurrentAudioDevice())
+        {
+            const auto mask = live->getActiveInputChannels();
+            packed.fill(-1);
+            std::int16_t next = 0;
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+                if (mask[channel])
+                    packed[static_cast<std::size_t>(channel)] = next++;
+        }
+    }
+
+    const auto transport = transportView();
+    attempt.hasTakes = ! transport.takes.empty();
+    attempt.takeNumber = static_cast<int>(transport.takes.size()) + 1;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        attempt.channels[index].rec = channelListen(channel) == ChannelListen::record;
+        attempt.channels[index].inputOpen = packed[index] >= 0;
+        attempt.names[index] = channelName(channel).toStdString();
+    }
+    return attempt;
+}
+
+juce::String AudioEngine::pressTransport(TransportPress press)
+{
+    if (press == TransportPress::commandSpace)
+        recordReady_ = true;
+
+    const auto decision = resolveTransport(makeRecordAttempt(), press);
+    if (decision.startRecording)
+    {
+        recordReady_ = true;
+        if (recorder_ == nullptr)
+        {
+            logTransport("record start failed: recorder is missing");
+            sessionMessage_ = "Recording did not start.";
+            return sessionMessage_;
+        }
+        std::array<bool, kMaxChannels> armed {};
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+            armed[static_cast<std::size_t>(channel)] = channelListen(channel) == ChannelListen::record;
+        recorder_->replaceArmed(armed);
+        if (offlineTemplate_)
+            recorder_->setDevice(preferredRate_ > 0.0 ? preferredRate_ : 48000.0, false);
+        else if (deviceOpen_.load(std::memory_order_relaxed))
+        {
+            const double rate = sampleRate_.load(std::memory_order_relaxed);
+            if (rate > 0.0)
+                recorder_->setDevice(rate, true);
+        }
+
+        auto packed = currentConfig().routing.inputPacked;
+        if (offlineTemplate_)
+        {
+            packed.fill(-1);
+            for (const int channel : decision.channels)
+                if (channel >= 0 && channel < kMaxChannels)
+                    packed[static_cast<std::size_t>(channel)] = static_cast<std::int16_t>(channel);
+        }
+        else
+        {
+            int openInputs = 0;
+            for (const auto index : packed)
+                if (index >= 0)
+                    ++openInputs;
+            if (openInputs == 0)
+            {
+                if (auto* live = deviceManager_.getCurrentAudioDevice())
+                {
+                    const auto mask = live->getActiveInputChannels();
+                    packed.fill(-1);
+                    std::int16_t next = 0;
+                    for (int channel = 0; channel < kMaxChannels; ++channel)
+                        if (mask[channel])
+                            packed[static_cast<std::size_t>(channel)] = next++;
+                }
+            }
+        }
+
+        // The array length is kMaxChannels. A card count of 0 used to mark every input closed.
+        const auto error = recorder_->record(packed.data(), kMaxChannels, offlineTemplate_);
+        if (error.isNotEmpty())
+        {
+            logTransport("record start failed: " + error);
+            sessionMessage_ = error;
+            return error;
+        }
+        logTransport(juce::String(decision.log));
+        noteSessionEdit();
+        return {};
+    }
+
+    if (decision.stop)
+    {
+        logTransport(juce::String(decision.log));
+        finishTransport();
+        recordReady_ = false;
+        return {};
+    }
+
+    if (decision.startPlayback)
+    {
+        logTransport(juce::String(decision.log));
+        if (recorder_ != nullptr)
+            recorder_->play();
+        const bool playing = recorder_ != nullptr && recorder_->isPlaying();
+        if (! playing)
+        {
+            const auto status = recorder_ != nullptr ? transportView().status : juce::String("Playback did not start.");
+            const auto reason = status.isNotEmpty() ? status : juce::String("Playback did not start.");
+            logTransport("play failed: " + reason);
+            sessionMessage_ = reason;
+            return reason;
+        }
+        return {};
+    }
+
+    logTransport(juce::String(decision.log));
+    if (decision.alert.empty())
+        return {};
+    sessionMessage_ = juce::String(decision.alert);
+    return sessionMessage_;
+}
+
+juce::String AudioEngine::transportRecord()
+{
+    recordReady_ = true;
+    return pressTransport(TransportPress::commandSpace);
+}
+
+juce::String AudioEngine::transportStop()
+{
+    return pressTransport(TransportPress::stop);
+}
+
+void AudioEngine::finishTransport()
+{
     if (recorder_ == nullptr)
         return;
     const bool recording = recorder_->isRecording();
@@ -1706,18 +1800,113 @@ void AudioEngine::transportStop()
         noteSessionEdit();
 }
 
-void AudioEngine::transportPlay()
+juce::String AudioEngine::transportPlay()
 {
-    if (recorder_ == nullptr)
-        return;
-    if (recorder_->isRecording() || recorder_->isPlaying())
-        return;
-    if (recordReady_)
+    return pressTransport(TransportPress::play);
+}
+
+std::vector<ListedDevice> AudioEngine::connectedDevices()
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    if (! deviceInventory_.empty() && now - deviceInventoryMs_ < 1500u)
+        return deviceInventory_;
+
+    std::vector<ListedDevice> found;
+    for (auto* type : deviceManager_.getAvailableDeviceTypes())
     {
-        transportRecord();
+        if (type == nullptr)
+            continue;
+        type->scanForDevices();
+        juce::StringArray names = type->getDeviceNames(false);
+        if (type->hasSeparateInputsAndOutputs())
+        {
+            for (const auto& inputName : type->getDeviceNames(true))
+                if (! names.contains(inputName))
+                    names.add(inputName);
+        }
+        for (const auto& name : names)
+        {
+            if (name.isEmpty())
+                continue;
+            ListedDevice item;
+            item.name = name.toStdString();
+            if (auto* live = deviceManager_.getCurrentAudioDevice())
+            {
+                if (live->getName() == name && live->isOpen())
+                {
+                    item.inputs = live->getInputChannelNames().size();
+                    item.outputs = live->getOutputChannelNames().size();
+                    found.push_back(std::move(item));
+                    continue;
+                }
+            }
+            const std::unique_ptr<juce::AudioIODevice> probe(type->createDevice(name, name));
+            if (probe != nullptr)
+            {
+                item.inputs = probe->getInputChannelNames().size();
+                item.outputs = probe->getOutputChannelNames().size();
+            }
+            found.push_back(std::move(item));
+        }
+    }
+    deviceInventory_ = std::move(found);
+    deviceInventoryMs_ = now;
+    return deviceInventory_;
+}
+
+void AudioEngine::openNamedDevice(const juce::String& name)
+{
+    if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
+        return;
+    if (! recordActionAllowed(RecordDisrupt::changeDevice, isRecording(), recordLockArmed_))
+        return;
+    offlineTemplate_ = false;
+    revealUnsupported_ = false;
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup(setup);
+    setup.inputDeviceName = name;
+    setup.outputDeviceName = name;
+    setup.useDefaultInputChannels = true;
+    setup.useDefaultOutputChannels = true;
+    wantedName_ = name;
+    awaitingSavedDevice_ = false;
+    startupDeviceNote_.clear();
+    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+    if (error.isNotEmpty())
+        openError_ = error;
+    deviceInventoryMs_ = 0;
+}
+
+void AudioEngine::noteUserChoseDevice(const juce::String& name)
+{
+    if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
+        return;
+    settings_.saveUserChosenDevice(name);
+}
+
+void AudioEngine::reconcileStartupDevice()
+{
+    const auto present = connectedDevices();
+    const auto choice = chooseStartupDevice(wantedName_.toStdString(),
+                                            settings_.loadUserChosenDevice().toStdString(),
+                                            present);
+    auto* device = deviceManager_.getCurrentAudioDevice();
+    const auto opened = device != nullptr ? device->getName().toStdString() : std::string();
+    if (choice.empty())
+    {
+        if (audioCardKind(opened) == AudioCardKind::virtualDevice)
+        {
+            closingDevice_.store(true, std::memory_order_release);
+            deviceManager_.closeAudioDevice();
+            closingDevice_.store(false, std::memory_order_release);
+            appendHostLog(settings_, "startup left virtual device \"" + juce::String(opened) + "\" closed");
+        }
         return;
     }
-    recorder_->play();
+    if (opened == choice)
+        return;
+    appendHostLog(settings_, "startup device \"" + juce::String(choice) + "\"");
+    openNamedDevice(juce::String(choice));
 }
 
 void AudioEngine::transportLocate(std::int64_t sample)
@@ -2516,6 +2705,8 @@ void AudioEngine::applyDisplay(const SessionData& data)
         const int group = source.group;
         channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
         listen_[static_cast<std::size_t>(channel)] = source.listen;
+        if (recorder_ != nullptr)
+            recorder_->setArmed(channel, channelListenRecords(source.listen));
         outputDb_[static_cast<std::size_t>(channel)] = snapOutputDb(source.outputDb);
         outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(outputDb_[static_cast<std::size_t>(channel)]),
                                                             std::memory_order_relaxed);

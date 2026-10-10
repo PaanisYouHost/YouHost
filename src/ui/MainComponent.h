@@ -173,6 +173,8 @@ private:
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> deviceLostArea_;
     juce::Rectangle<int> recordLockArea_;
+    juce::Rectangle<int> recordArmArea_;
+    bool armHintVisible_ = false;
     int timelineHeight_ = 0;
     juce::Rectangle<int> hintArea_;
     juce::Rectangle<int> bridgeArea_;

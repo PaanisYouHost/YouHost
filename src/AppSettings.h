@@ -312,6 +312,22 @@ public:
         }
     }
 
+    juce::String loadUserChosenDevice()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("userChosenDevice");
+        return {};
+    }
+
+    void saveUserChosenDevice(const juce::String& name)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("userChosenDevice", name);
+            settings->saveIfNeeded();
+        }
+    }
+
     int loadTimelineHeight()
     {
         if (auto* settings = properties_.getUserSettings())

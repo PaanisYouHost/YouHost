@@ -60,7 +60,7 @@ Recorder::~Recorder()
 
 void Recorder::setAudioFolder(const juce::File& folder)
 {
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     audioFolder_ = folder;
 }
 
@@ -69,7 +69,7 @@ void Recorder::setDevice(double sampleRate, bool callbacksLive)
     deviceRate_.store(sampleRate, std::memory_order_relaxed);
     setCallbacksLive(callbacksLive);
 
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     if (takes_.empty() && mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::stopped))
         timelineRate_.store(sampleRate, std::memory_order_relaxed);
 }
@@ -94,51 +94,86 @@ void Recorder::setTimelineSampleRate(double sampleRate) noexcept
         timelineRate_.store(sampleRate, std::memory_order_relaxed);
 }
 
-void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const
+void Recorder::visitRecordedTakes(const std::function<void(const RecordedTakeView* takes,
+                                                          int count,
+                                                          const RecordedTakeView* live,
+                                                          const std::array<std::string, kMaxChannels>& names)>& fn) const
 {
     if (fn == nullptr)
         return;
 
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    // Copy under the lock, then call the visitor with the mutex released.
+    // The disk thread also takes stateLock_ while it appends peaks, and the
+    // visitor used to call channelName(), which locked the same mutex again.
+    std::vector<std::array<std::vector<WavePeak>, kMaxChannels>> peakCopies;
+    std::array<std::vector<WavePeak>, kMaxChannels> livePeakCopies;
     std::vector<RecordedTakeView> views;
-    views.reserve(takes_.size());
-    int number = 1;
-    for (const auto& take : takes_)
-    {
-        RecordedTakeView view;
-        view.number = number++;
-        view.start = take.start;
-        view.length = take.length;
-        for (int channel = 0; channel < kMaxChannels; ++channel)
-        {
-            const auto index = static_cast<std::size_t>(channel);
-            view.recorded[index] = take.files[index].isNotEmpty();
-            if (! take.channelPeaks[index].empty())
-                view.peaks[index] = &take.channelPeaks[index];
-        }
-        views.push_back(view);
-    }
-
     RecordedTakeView live;
-    const RecordedTakeView* livePtr = nullptr;
-    const auto liveLength = std::max(diskSamples_.load(std::memory_order_relaxed),
-                                     audioSamples_.load(std::memory_order_relaxed));
-    if (mode_.load(std::memory_order_relaxed) == static_cast<int>(TransportMode::recording) && liveLength > 0)
+    bool liveValid = false;
+    std::array<std::string, kMaxChannels> names;
     {
-        live.number = number;
-        live.start = takeStart_.load(std::memory_order_relaxed);
-        live.length = liveLength;
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+            names[static_cast<std::size_t>(channel)] = names_[static_cast<std::size_t>(channel)].toStdString();
+
+        peakCopies.resize(takes_.size());
+        views.reserve(takes_.size());
+        int number = 1;
+        for (std::size_t takeIndex = 0; takeIndex < takes_.size(); ++takeIndex)
+        {
+            const auto& take = takes_[takeIndex];
+            RecordedTakeView view;
+            view.number = number++;
+            view.start = take.start;
+            view.length = take.length;
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                view.recorded[index] = take.files[index].isNotEmpty();
+                if (! take.channelPeaks[index].empty())
+                    peakCopies[takeIndex][index] = take.channelPeaks[index];
+            }
+            views.push_back(view);
+        }
+
+        const auto liveLength = std::max(diskSamples_.load(std::memory_order_relaxed),
+                                         audioSamples_.load(std::memory_order_relaxed));
+        if (mode_.load(std::memory_order_relaxed) == static_cast<int>(TransportMode::recording) && liveLength > 0)
+        {
+            live.number = number;
+            live.start = takeStart_.load(std::memory_order_relaxed);
+            live.length = liveLength;
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                live.recorded[index] = takeFiles_[index].isNotEmpty();
+                if (! liveChannelPeaks_[index].empty())
+                    livePeakCopies[index] = liveChannelPeaks_[index];
+            }
+            liveValid = true;
+        }
+    }
+
+    for (std::size_t takeIndex = 0; takeIndex < views.size(); ++takeIndex)
+    {
         for (int channel = 0; channel < kMaxChannels; ++channel)
         {
             const auto index = static_cast<std::size_t>(channel);
-            live.recorded[index] = takeFiles_[index].isNotEmpty();
-            if (! liveChannelPeaks_[index].empty())
-                live.peaks[index] = &liveChannelPeaks_[index];
+            if (! peakCopies[takeIndex][index].empty())
+                views[takeIndex].peaks[index] = &peakCopies[takeIndex][index];
         }
-        livePtr = &live;
+    }
+    if (liveValid)
+    {
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            const auto index = static_cast<std::size_t>(channel);
+            if (! livePeakCopies[index].empty())
+                live.peaks[index] = &livePeakCopies[index];
+        }
     }
 
-    fn(views.empty() ? nullptr : views.data(), static_cast<int>(views.size()), livePtr);
+    fn(views.empty() ? nullptr : views.data(), static_cast<int>(views.size()), liveValid ? &live : nullptr, names);
 }
 
 void Recorder::setDirtyHandler(std::function<void()> handler)
@@ -325,17 +360,23 @@ void Recorder::setArmed(int channel, bool armed)
     if (channel < 0 || channel >= kMaxChannels)
         return;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         armed_[static_cast<std::size_t>(channel)] = armed;
     }
     markDirty();
+}
+
+void Recorder::replaceArmed(const std::array<bool, kMaxChannels>& armed)
+{
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
+    armed_ = armed;
 }
 
 bool Recorder::isArmed(int channel) const
 {
     if (channel < 0 || channel >= kMaxChannels)
         return false;
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     return armed_[static_cast<std::size_t>(channel)];
 }
 
@@ -344,7 +385,7 @@ void Recorder::setChannelName(int channel, const juce::String& name)
     if (channel < 0 || channel >= kMaxChannels)
         return;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         names_[static_cast<std::size_t>(channel)] = name.trim().substring(0, 40);
     }
     markDirty();
@@ -354,19 +395,19 @@ juce::String Recorder::channelName(int channel) const
 {
     if (channel < 0 || channel >= kMaxChannels)
         return {};
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     return names_[static_cast<std::size_t>(channel)];
 }
 
 void Recorder::setWavBitDepth(int bits)
 {
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     wavBitDepth_ = normaliseWavBitDepth(bits);
 }
 
 int Recorder::wavBitDepth() const
 {
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     return wavBitDepth_;
 }
 
@@ -404,32 +445,38 @@ void Recorder::releaseStreams()
     notify();
 }
 
-void Recorder::record(const std::int16_t* inputPacked, int packedCount)
+juce::String Recorder::record(const std::int16_t* inputPacked, int packedCount, bool allowWithoutDevice)
 {
     if (isRecording())
-        return;
+        return "Recording is already running.";
     if (isPlaying())
         stop();
 
     const double rate = deviceRate_.load(std::memory_order_relaxed);
-    if (rate <= 0.0 || ! callbacksLive_.load(std::memory_order_acquire))
+    if (! (rate > 0.0))
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
-        status_ = "Choose an audio device before recording.";
-        return;
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
+        status_ = "There is no sample rate. Recording did not start.";
+        return status_;
+    }
+    if (! allowWithoutDevice && ! callbacksLive_.load(std::memory_order_acquire))
+    {
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
+        status_ = "The audio device is not running. Recording did not start.";
+        return status_;
     }
 
     const double timeline = timelineRate_.load(std::memory_order_relaxed);
     bool hasTakes = false;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         hasTakes = ! takes_.empty();
     }
     if (timeline > 0.0 && hasTakes && ! ratesMatch(timeline, rate))
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "This session was recorded at a different sample rate.";
-        return;
+        return status_;
     }
 
     juce::File folder;
@@ -439,7 +486,7 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     int bits = kDefaultWavBitDepth;
     std::int64_t start = 0;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         folder = audioFolder_;
         armSnapshot = armed_;
         nameSnapshot = names_;
@@ -451,9 +498,9 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
 
     if (folder.getFullPathName().isEmpty())
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
-        status_ = "No session folder yet.";
-        return;
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
+        status_ = "This session has no folder yet. Recording did not start.";
+        return status_;
     }
     folder.createDirectory();
 
@@ -461,11 +508,15 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     std::array<juce::String, kMaxChannels> files {};
     std::vector<OpenWriter> writers;
     int armedChannels = 0;
+    int triedChannels = 0;
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
         const bool hasInput = inputPacked != nullptr && channel < packedCount && inputPacked[channel] >= 0;
-        if (! armSnapshot[static_cast<std::size_t>(channel)] || ! hasInput)
+        if (! armSnapshot[static_cast<std::size_t>(channel)])
             continue;
+        if (! hasInput && ! allowWithoutDevice)
+            continue;
+        ++triedChannels;
 
         const auto fileName = juce::String(takeWaveName(takeNumber,
                                                         channel + 1,
@@ -499,9 +550,14 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
 
     if (armedChannels == 0)
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
-        status_ = "Turn on a channel that has an input.";
-        return;
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
+        if (triedChannels > 0)
+            status_ = "Could not create the WAV files in " + folder.getFullPathName() + ". Recording did not start.";
+        else if (allowWithoutDevice)
+            status_ = "Every channel is OFF. Recording did not start.";
+        else
+            status_ = "No REC channel has an input on this device. Recording did not start.";
+        return status_;
     }
 
     waitUntilIdle();
@@ -519,7 +575,7 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     channelBucketHigh_.fill(0.0f);
     channelBucketCount_.fill(0);
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         for (auto& peaks : liveChannelPeaks_)
             peaks.clear();
     }
@@ -534,13 +590,14 @@ void Recorder::record(const std::int16_t* inputPacked, int packedCount)
     timelineRate_.store(rate, std::memory_order_relaxed);
 
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Recording take " + juce::String(takeNumber);
     }
 
     mode_.store(static_cast<int>(TransportMode::recording), std::memory_order_release);
     notify();
     markDirty();
+    return {};
 }
 
 void Recorder::finishWriters()
@@ -557,7 +614,7 @@ void Recorder::deleteEmptyTakeFiles()
     juce::File folder;
     std::array<juce::String, kMaxChannels> files {};
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         folder = audioFolder_;
         files = takeFiles_;
     }
@@ -575,7 +632,7 @@ void Recorder::commitTake()
     std::array<juce::String, kMaxChannels> files {};
     std::int64_t start = 0;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         peaks.swap(livePeaks_);
         channelPeaks.swap(liveChannelPeaks_);
         files = takeFiles_;
@@ -587,7 +644,7 @@ void Recorder::commitTake()
     if (written <= 0 && heard <= 0)
     {
         deleteEmptyTakeFiles();
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Recording stopped.";
         publishEnd();
         return;
@@ -601,7 +658,7 @@ void Recorder::commitTake()
     take.peaks = std::move(peaks);
     take.channelPeaks = std::move(channelPeaks);
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         takes_.push_back(std::move(take));
         status_ = "Take " + juce::String(static_cast<int>(takes_.size())) + " saved.";
         if (written <= 0)
@@ -663,7 +720,7 @@ void Recorder::stop()
         commitTake();
         if (diskFailed)
         {
-            const std::lock_guard<std::mutex> lock(stateLock_);
+            const std::lock_guard<CheckedMutex> lock(stateLock_);
             status_ = "The disk could not keep up. The take was saved up to the last flush.";
         }
     }
@@ -674,7 +731,7 @@ void Recorder::stop()
         for (auto& ring : playRings_)
             ring.clear();
         releaseStreams();
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Stopped.";
     }
 }
@@ -690,13 +747,13 @@ void Recorder::play()
     const double timeline = timelineRate_.load(std::memory_order_relaxed);
     if (rate <= 0.0 || ! callbacksLive_.load(std::memory_order_acquire))
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Choose an audio device before playback.";
         return;
     }
     if (timeline > 0.0 && ! ratesMatch(timeline, rate))
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Set the device to the session sample rate before playback.";
         return;
     }
@@ -704,13 +761,13 @@ void Recorder::play()
     std::vector<StoredTake> takes;
     juce::File folder;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         takes = takes_;
         folder = audioFolder_;
     }
     if (takes.empty())
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Nothing recorded yet.";
         return;
     }
@@ -743,7 +800,7 @@ void Recorder::play()
         ring.clear();
 
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Playback - virtual soundcheck.";
     }
     mode_.store(static_cast<int>(TransportMode::playing), std::memory_order_release);
@@ -754,7 +811,7 @@ void Recorder::locate(std::int64_t sample)
 {
     if (isRecording())
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Stop recording before moving the playhead.";
         return;
     }
@@ -781,7 +838,7 @@ void Recorder::jumpMarker(int direction)
 {
     std::vector<TakeSpan> spans;
     {
-        const std::lock_guard<std::mutex> lock(stateLock_);
+        const std::lock_guard<CheckedMutex> lock(stateLock_);
         spans.reserve(takes_.size());
         for (const auto& take : takes_)
             spans.push_back({ take.start, take.length });
@@ -812,7 +869,7 @@ void Recorder::addImportedTake(std::int64_t length, const std::array<juce::Strin
     if (isRecording() || isPlaying())
         stop();
 
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     StoredTake take;
     take.start = contentEndUnlocked();
     take.length = length;
@@ -828,7 +885,7 @@ void Recorder::addImportedTake(std::int64_t length, const std::array<juce::Strin
 
 void Recorder::clearChannelNames()
 {
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     for (auto& name : names_)
         name.clear();
 }
@@ -837,7 +894,7 @@ bool Recorder::channelHasTake(int channel) const
 {
     if (channel < 0 || channel >= kMaxChannels)
         return false;
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     for (const auto& take : takes_)
         if (take.files[static_cast<std::size_t>(channel)].isNotEmpty())
             return true;
@@ -847,7 +904,7 @@ bool Recorder::channelHasTake(int channel) const
 void Recorder::clearTakes()
 {
     stop();
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     takes_.clear();
     livePeaks_.clear();
     publishEnd();
@@ -868,7 +925,7 @@ TransportView Recorder::view() const
     result.failed = failed_.load(std::memory_order_acquire);
     result.naturalEnd = naturalEnd_.load(std::memory_order_acquire);
 
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     result.status = status_;
     result.length = contentEndUnlocked();
     result.takes.reserve(takes_.size());
@@ -899,7 +956,7 @@ TransportView Recorder::view() const
 
 void Recorder::captureSession(SessionData& data) const
 {
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     data.sampleRate = timelineRate_.load(std::memory_order_relaxed);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
@@ -935,7 +992,7 @@ void Recorder::captureSession(SessionData& data) const
 void Recorder::restoreSession(const SessionData& data, const juce::File& audioFolder)
 {
     stop();
-    const std::lock_guard<std::mutex> lock(stateLock_);
+    const std::lock_guard<CheckedMutex> lock(stateLock_);
     audioFolder_ = audioFolder;
     wavBitDepth_ = normaliseWavBitDepth(data.wavBitDepth);
     takes_.clear();
@@ -1011,7 +1068,7 @@ bool Recorder::drainOnce()
         {
             if (peakBucketCount_ > 0)
             {
-                const std::lock_guard<std::mutex> lock(stateLock_);
+                const std::lock_guard<CheckedMutex> lock(stateLock_);
                 livePeaks_.push_back({ peakBucketLow_, peakBucketHigh_ });
                 for (const auto& open : writers_)
                 {
@@ -1066,7 +1123,7 @@ bool Recorder::drainOnce()
         peakBucketHigh_ = std::max(peakBucketHigh_, high);
         if (++peakBucketCount_ >= kPeakSamples)
         {
-            const std::lock_guard<std::mutex> lock(stateLock_);
+            const std::lock_guard<CheckedMutex> lock(stateLock_);
             livePeaks_.push_back({ peakBucketLow_, peakBucketHigh_ });
             for (const auto& open : writers_)
             {
