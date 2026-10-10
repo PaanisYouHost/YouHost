@@ -587,32 +587,47 @@ void testInstallGuide()
     CHECK(finnish < english);
 
     const char* required[] = {
-        "Artifacts",
-        "YouHost-macOS-universal",
         "YouHost.app",
         "Applications",
+        "Ohjelmat",
         "Open Anyway",
         "Avaa silti",
+        "Privacy & Security",
+        "Tietosuoja ja suojaus",
         "xattr -dr com.apple.quarantine /Applications/YouHost.app",
-        "SCAN",
-        "~/Library/Application Support/Ambient Audio/YouHost",
-        "youhost.log",
-        "crash-journal.txt",
-        "32-64",
-        "Do not scan plugins during a show.",
-        "Älä skannaa plugineja keikan aikana.",
-        "ASENNUSOHJE - INSTALL.txt",
+        "Right-click YouHost.app and choose Open",
+        "Klikkaa YouHost.appia oikealla ja valitse Avaa",
+        "microphone and audio input",
+        "mikrofoni ja äänitulo",
+        "choose the audio card",
+        "valitse äänikortti",
     };
     for (const char* phrase : required)
         CHECK(guide.find(phrase) != std::string::npos);
+
+    const char* banned[] = {
+        "GitHub",
+        "Actions",
+        "Artifacts",
+        "Artefakti",
+        "http",
+        "www.",
+        "download",
+        "Download",
+        "Lataa",
+        "website",
+    };
+    for (const char* phrase : banned)
+        CHECK(guide.find(phrase) == std::string::npos);
 
     CHECK(workflow.find("pack/ASENNUSOHJE - INSTALL.txt") != std::string::npos);
     CHECK(workflow.find("cp \"INSTALL.md\" \"pack/ASENNUSOHJE - INSTALL.txt\"") != std::string::npos);
     CHECK(workflow.find("path: pack") != std::string::npos);
 
     const auto help = youhost::shortcutHelpText();
-    CHECK(help.find("INSTALL.md") != std::string::npos);
-    CHECK(help.find("ASENNUSOHJE - INSTALL.txt") != std::string::npos);
+    CHECK(help.find(guide) != std::string::npos);
+    for (const char* phrase : banned)
+        CHECK(help.find(phrase) == std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);
     CHECK(help.find("MIDI") == std::string::npos);
 }
@@ -1003,11 +1018,13 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
     CHECK(help.find("INPUT means the audio passes through the plugins to the output and is not recorded") != std::string::npos);
     CHECK(help.find("OFF cuts the channel fully: no audio, no plugins, and no recording") != std::string::npos);
-    CHECK(help.find("INSTALL.md") != std::string::npos);
-    CHECK(help.find("ASENNUSOHJE - INSTALL.txt") != std::string::npos);
+    CHECK(help.find("YouHost — ASENNUSOHJE") != std::string::npos);
+    CHECK(help.find("YouHost — INSTALL") != std::string::npos);
     CHECK(help.find("Open Anyway") != std::string::npos);
     CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
-    CHECK(help.find("32-64") != std::string::npos);
+    CHECK(help.find("choose the audio card") != std::string::npos);
+    CHECK(help.find("GitHub") == std::string::npos);
+    CHECK(help.find("Artifacts") == std::string::npos);
     CHECK(help.find("The interface always opens with all channels") != std::string::npos);
     CHECK(help.find("Channel use is chosen only with these buttons") != std::string::npos);
     CHECK(help.find("Audio setup ticks") == std::string::npos);
