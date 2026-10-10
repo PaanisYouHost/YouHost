@@ -6,6 +6,11 @@ namespace youhost
 // Fixed topology from the architecture notes. The recorder and the plugin rack
 // use this same channel count. They do not grow this array.
 inline constexpr int kMaxChannels = 128;
+
+// JUCE draws a device menu when the maximum is above zero, and it draws
+// per-channel checkboxes only when the minimum is below the card's channel
+// count. This bound keeps the menus and leaves the checkboxes out.
+inline constexpr int kDeviceSelectorChannels = 512;
 inline constexpr int kSlotsPerChannel = 4;
 
 inline constexpr float kRmsWindowSeconds = 0.300f;

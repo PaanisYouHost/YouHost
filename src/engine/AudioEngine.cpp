@@ -1059,6 +1059,19 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         rack_->updateRouting(currentConfig().routing);
     }
 
+    // A card change keeps the session. Visibility follows the new input count.
+    // The rate rule is the same as opening a session: higher rates are announced.
+    if (! restoringSession_ && ! offlineTemplate_ && hasSession() && recorder_ != nullptr && rate > 0.0)
+    {
+        const auto adoption = adoptCardSampleRate(recorder_->timelineSampleRate(), rate);
+        if (adoption.changed)
+        {
+            recorder_->setTimelineSampleRate(adoption.rate);
+            sessionRateNotice_ = juce::String(adoption.notice);
+            appendHostLog(settings_, "device switch kept session, rate " + juce::String(formatRateKhz(adoption.rate)) + " kHz");
+        }
+    }
+
     lastInputMask_ = inputMask;
     lastOutputMask_ = outputMask;
     if (remember && live->getName() == wantedName_)
@@ -1859,7 +1872,10 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
         return;
     if (! recordActionAllowed(RecordDisrupt::changeDevice, isRecording(), recordLockArmed_))
+    {
+        sessionMessage_ = juce::String(deviceSwitchBlockedReason(isRecording(), recordLockArmed_));
         return;
+    }
     offlineTemplate_ = false;
     revealUnsupported_ = false;
     juce::AudioDeviceManager::AudioDeviceSetup setup;

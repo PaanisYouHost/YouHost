@@ -1,6 +1,7 @@
 #pragma once
 
 #include "HostLimits.h"
+#include "RecordLock.h"
 
 #include <string>
 #include <string_view>
@@ -67,7 +68,8 @@ inline bool containsFolded(std::string_view haystack, std::string_view needle) n
 
 inline AudioCardKind audioCardKind(std::string_view name) noexcept
 {
-    if (name.empty() || name == "No device" || name == "none" || isOfflineDeviceName(name))
+    if (name.empty() || name == "No device" || name == "none" || name == "<< none >>"
+        || isOfflineDeviceName(name))
         return AudioCardKind::none;
 
     // Network and bus drivers count as hardware even when the name says "virtual".
@@ -235,14 +237,34 @@ struct DeviceRow
     bool selectable = true;
 };
 
+// A device change does not rewrite channel names, plugins, or groups.
+struct KeptSessionChannel
+{
+    std::string name;
+    int group = -1;
+    std::string plugin;
+};
+
+inline KeptSessionChannel channelAfterDeviceSwitch(const KeptSessionChannel& channel, int)
+{
+    return channel;
+}
+
+inline std::string deviceSwitchBlockedReason(bool recording, bool lockArmed)
+{
+    if (recordLockEngaged(lockArmed, recording))
+        return "Recording is locked. Click the padlock to unlock, then stop the take before changing the audio device.";
+    if (recording)
+        return "Stop the take before changing the audio device.";
+    return {};
+}
+
 inline std::string deviceEntryLabel(std::string_view name, int inputs, int outputs)
 {
     if (isOfflineDeviceName(name))
         return std::string(kOfflineDeviceName);
-    if (inputs < 0)
-        inputs = 0;
-    if (outputs < 0)
-        outputs = 0;
+    if (inputs < 0 || outputs < 0)
+        return std::string(name);
     std::string label(name);
     label += " - ";
     label += std::to_string(inputs);

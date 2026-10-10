@@ -70,6 +70,14 @@ public:
         blit(graphics, bounds, face, highlighted, down, FaceKind::raised);
     }
 
+    juce::PopupMenu::Options getOptionsForComboBoxPopupMenu(juce::ComboBox& box, juce::Label& label) override
+    {
+        // Channel counts make the device names longer than the closed combo.
+        // The open menu has to show "Offline (no audio) - 128 channels" in full.
+        return juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu(box, label)
+            .withMinimumWidth(juce::jmax(box.getWidth(), 560));
+    }
+
     void drawComboBox(juce::Graphics& graphics, int width, int height, bool isButtonDown,
                       int buttonX, int buttonY, int buttonW, int buttonH, juce::ComboBox& box) override
     {

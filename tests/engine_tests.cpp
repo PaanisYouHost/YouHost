@@ -2053,6 +2053,7 @@ void testSessionChannelsRateLockAndClose()
     CHECK(youhost::audioCardKind("Dante Virtual Soundcard") == youhost::AudioCardKind::real);
     CHECK(youhost::audioCardKind("") == youhost::AudioCardKind::none);
     CHECK(youhost::audioCardKind("No device") == youhost::AudioCardKind::none);
+    CHECK(youhost::audioCardKind("<< none >>") == youhost::AudioCardKind::none);
     CHECK(youhost::audioCardKind(youhost::kOfflineDeviceName) == youhost::AudioCardKind::none);
 
     CHECK(youhost::audioCardKind("WING") == youhost::AudioCardKind::real);
@@ -2305,7 +2306,8 @@ void testSessionChannelsRateLockAndClose()
     CHECK(help.find(youhost::kRecordArmedHint) != std::string::npos);
     CHECK(help.find("Virtual / aggregate devices") != std::string::npos);
     CHECK(help.find("youhost.log") != std::string::npos);
-    CHECK(help.find("Find device") != std::string::npos);
+    CHECK(help.find("beside the sample rate") != std::string::npos);
+    CHECK(help.find("Find device") == std::string::npos);
     CHECK(help.find("Session moves to 48 kHz") != std::string::npos);
     CHECK(help.find("Save, Save As, Don't Save, or Cancel") != std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);
@@ -2657,6 +2659,69 @@ void testDeviceListGrouping()
         CHECK(row.label != youhost::kVirtualDeviceHeading);
 }
 
+void testStartupAndSetupShareTheDeviceMenu()
+{
+    const std::vector<youhost::ListedDevice> present = {
+        { "Pro Tools Audio Bridge 32", 32, 32 },
+        { "WING 2", 48, 48 },
+        { "MacBook Pro Microphone", 1, 0 },
+    };
+    const auto startup = youhost::buildDeviceList(present, "");
+    const auto setup = youhost::buildDeviceList(present, "");
+    CHECK(startup.size() == setup.size());
+    CHECK(! startup.empty());
+    CHECK(startup.back().label == youhost::kOfflineDeviceName);
+    CHECK(setup.back().label == youhost::kOfflineDeviceName);
+    CHECK(startup.back().selectable);
+    CHECK(startup.front().name == "WING 2");
+    CHECK(startup.front().label == "WING 2 - 48 in / 48 out");
+
+    bool sawHeading = false;
+    bool virtualAfterHeading = false;
+    for (const auto& row : startup)
+    {
+        if (row.label == youhost::kVirtualDeviceHeading)
+        {
+            sawHeading = true;
+            CHECK(! row.selectable);
+        }
+        if (row.name == "Pro Tools Audio Bridge 32")
+        {
+            virtualAfterHeading = sawHeading;
+            CHECK(row.label == "Pro Tools Audio Bridge 32 - 32 in / 32 out");
+        }
+    }
+    CHECK(sawHeading);
+    CHECK(virtualAfterHeading);
+
+    youhost::KeptSessionChannel channel;
+    channel.name = "Kick";
+    channel.group = 3;
+    channel.plugin = "De-Feedback";
+    const auto kept = youhost::channelAfterDeviceSwitch(channel, 48);
+    CHECK(kept.name == "Kick");
+    CHECK(kept.group == 3);
+    CHECK(kept.plugin == "De-Feedback");
+    CHECK(youhost::sessionChannelView(32, true, false, false).visible == 32);
+    CHECK(youhost::sessionChannelView(48, true, false, false).visible == 48);
+    CHECK(youhost::sessionChannelView(0, false, true, false).visible == youhost::kMaxChannels);
+
+    const auto blocked = youhost::deviceSwitchBlockedReason(true, false);
+    CHECK(blocked.find("Stop the take") != std::string::npos);
+    const auto locked = youhost::deviceSwitchBlockedReason(true, true);
+    CHECK(locked.find("Recording is locked") != std::string::npos);
+    CHECK(youhost::deviceSwitchBlockedReason(false, true).empty());
+    CHECK(youhost::deviceSwitchBlockedReason(false, false).empty());
+
+    const auto higher = youhost::adoptCardSampleRate(48000.0, 96000.0);
+    CHECK(higher.changed);
+    CHECK(higher.notice == "Session moves to 96 kHz");
+    const auto lower = youhost::adoptCardSampleRate(96000.0, 48000.0);
+    CHECK(lower.changed);
+    CHECK(lower.notice.empty());
+    CHECK(lower.rate == 48000.0);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -2715,6 +2780,7 @@ int main()
     testTimelinePaintDoesNotReenterLock();
     testRecordStartTransport();
     testDeviceListGrouping();
+    testStartupAndSetupShareTheDeviceMenu();
 
     if (failures != 0)
     {
