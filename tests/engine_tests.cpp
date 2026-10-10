@@ -930,6 +930,36 @@ void testChannelPick()
     sparse = youhost::pickChannels(sparse, 7, 32, youhost::ChannelPick::toggle);
     sparse = youhost::pickChannels(sparse, 9, 32, youhost::ChannelPick::toggle);
     CHECK(sparse.channels.size() == 4);
+
+    int membership[4] = { -1, 0, 0, -1 };
+    bool collapsed[youhost::kMaxDisplayGroups] = {};
+    collapsed[0] = true;
+    youhost::StripItem strips[8];
+    const int written = youhost::layoutChannelStrips(4, membership, collapsed, strips, 8);
+    int shown[8];
+    const int shownCount = youhost::shownChannelNumbers(strips, written, shown, 8);
+    const auto folded = youhost::selectAllChannels(shown, shownCount);
+    CHECK(folded.channels.size() == 2);
+    CHECK(folded.channels[0] == 0);
+    CHECK(folded.channels[1] == 3);
+    CHECK(folded.anchor == 0);
+    CHECK(youhost::makeGroupShortcutApplies(1, false));
+    CHECK(! youhost::makeGroupShortcutApplies(2, false));
+    CHECK(! youhost::makeGroupShortcutApplies(1, true));
+    const auto grouped = youhost::planNewGroup(! folded.channels.empty(), 0, "All", 2);
+    CHECK(grouped.created);
+    CHECK(grouped.collapsed);
+    CHECK(grouped.name == "All");
+
+    collapsed[0] = false;
+    const int openWritten = youhost::layoutChannelStrips(4, membership, collapsed, strips, 8);
+    const int openCount = youhost::shownChannelNumbers(strips, openWritten, shown, 8);
+    const auto open = youhost::selectAllChannels(shown, openCount);
+    CHECK(open.channels.size() == 4);
+    CHECK(open.channels.front() == 0);
+    CHECK(open.channels.back() == 3);
+    CHECK(youhost::planNewGroup(! open.channels.empty(), 1, "", 0).name == "Group 2");
+    CHECK(! youhost::planNewGroup(open.channels.empty(), 1, "All", 0).created);
 }
 
 void testSessionNames()
@@ -1058,6 +1088,17 @@ void testShortcutsMatchTheHelp()
     expect(youhost::ShortcutId::save, 's', youhost::KeyKind::character, false, true, false);
     expect(youhost::ShortcutId::saveAs, 's', youhost::KeyKind::character, true, true, false);
     expect(youhost::ShortcutId::goToChannel, 'g', youhost::KeyKind::character, false, false, false);
+    expect(youhost::ShortcutId::makeGroup, 'g', youhost::KeyKind::character, false, true, false);
+    expect(youhost::ShortcutId::selectAll, 'a', youhost::KeyKind::character, false, true, false);
+    expect(youhost::ShortcutId::selectAll, 'a', youhost::KeyKind::character, false, false, false);
+    youhost::KeyQuery shiftedA;
+    shiftedA.kind = youhost::KeyKind::character;
+    shiftedA.character = 'a';
+    shiftedA.shift = true;
+    CHECK(! youhost::matchShortcut(shiftedA).has_value());
+    CHECK(youhost::selectAllShortcutApplies(1, false));
+    CHECK(! youhost::selectAllShortcutApplies(1, true));
+    CHECK(! youhost::selectAllShortcutApplies(2, false));
 
     CHECK(help.find("5  Open or close SCAN") == std::string::npos);
     CHECK(help.find("5  Open or close LATENCY") != std::string::npos);
@@ -1070,6 +1111,13 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Backup") != std::string::npos);
     CHECK(help.find("Shift+click") != std::string::npos);
     CHECK(help.find("Cmd+click") != std::string::npos);
+    CHECK(help.find("Cmd+A or A  Select every visible channel on the REC page") != std::string::npos);
+    CHECK(help.find("does not select on the HOST page") != std::string::npos);
+    CHECK(help.find("Cmd+G  On the REC page, name a group from the selected channels") != std::string::npos);
+    CHECK(help.find("Make group from selection") != std::string::npos);
+    CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
+    CHECK(help.find("Cmd+G does nothing on the HOST page") != std::string::npos);
+    CHECK(help.find("nothing while a text field has focus") != std::string::npos);
     CHECK(help.find("Option-drag") != std::string::npos);
     CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
     CHECK(help.find("INPUT means the audio passes through the plugins to the output and is not recorded") != std::string::npos);
