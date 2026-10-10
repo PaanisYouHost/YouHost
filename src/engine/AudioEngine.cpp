@@ -433,11 +433,28 @@ const AudioThreadConfig& AudioEngine::currentConfig() const
 
 SessionChannelView AudioEngine::channelView() const
 {
-    if (offlineTemplate_)
-        return sessionChannelView(0, false, true, false);
     const bool open = deviceOpen_.load(std::memory_order_relaxed);
     const int inputs = open ? inputCount() : 0;
-    return sessionChannelView(inputs, open, false, revealUnsupported_);
+    return sessionChannelView(sessionChannelCount_, inputs, open, offlineTemplate_);
+}
+
+void AudioEngine::setSessionChannelCount(int count)
+{
+    if (isRecording())
+        return;
+    const int next = normaliseSessionChannelCount(count);
+    if (next == sessionChannelCount_)
+        return;
+    sessionChannelCount_ = next;
+    publishSessionChannelLimit();
+    if (sessionFolder_ != juce::File())
+        noteSessionEdit();
+    ++displayRevision_;
+}
+
+bool AudioEngine::channelHasNoInput(int channel) const
+{
+    return youhost::channelHasNoInput(channel, channelView());
 }
 
 void AudioEngine::setOfflineTemplate(bool offline)
@@ -513,9 +530,23 @@ juce::String AudioEngine::takeSessionRateNotice()
     return notice;
 }
 
-void AudioEngine::setSelectionListen(ChannelListen mode)
+bool AudioEngine::selectionListenNeedsConfirm(ChannelListen mode) const
+{
+    if (! isRecording() || mode == ChannelListen::record)
+        return false;
+    const auto selected = selectedChannels();
+    const auto targets = channelsForGlobalListen(selected.data(), static_cast<int>(selected.size()), visibleChannels());
+    for (const int channel : targets)
+        if (channelListen(channel) == ChannelListen::record)
+            return true;
+    return false;
+}
+
+void AudioEngine::setSelectionListen(ChannelListen mode, bool confirmed)
 {
     if (! recordActionAllowed(RecordDisrupt::globalListen, isRecording(), recordLockArmed_))
+        return;
+    if (! confirmed && selectionListenNeedsConfirm(mode))
         return;
     const auto selected = selectedChannels();
     const auto targets = channelsForGlobalListen(selected.data(), static_cast<int>(selected.size()), visibleChannels());
@@ -527,10 +558,9 @@ void AudioEngine::publishSessionChannelLimit()
 {
     const auto view = channelView();
     sessionVisible_.store(view.visible, std::memory_order_relaxed);
-    const int audioLimit = view.cardInputs;
-    sessionAudioLimit_.store(audioLimit, std::memory_order_relaxed);
+    sessionAudioLimit_.store(view.processed, std::memory_order_relaxed);
     if (rack_ != nullptr)
-        rack_->setActiveChannels(audioLimit);
+        rack_->setActiveChannels(view.processed);
 }
 
 void AudioEngine::setRevealUnsupportedChannels(bool reveal)
@@ -2052,6 +2082,7 @@ SessionData AudioEngine::captureSessionData()
     if (recorder_ != nullptr)
         recorder_->captureSession(data);
     captureDisplay(data);
+    data.channelCount = sessionChannelCount_;
     data.page = sessionPage_;
     data.waveformGain = waveformGain_;
     data.alignGroup = alignGroup_;
@@ -2141,6 +2172,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     sessionReferenceDb_ = data.rmsReferenceDb;
     setWavBitDepth(data.wavBitDepth, false);
     sessionPage_ = data.page == 2 ? 2 : 1;
+    sessionChannelCount_ = normaliseSessionChannelCount(data.channelCount);
     if (meterRestoreHandler_ != nullptr)
         meterRestoreHandler_(sessionPeak_, sessionReferenceDb_);
     if (pageRestoreHandler_ != nullptr)
@@ -2182,6 +2214,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
             group = live->getWorkgroup();
         rack_->prepare(cardRate, buffer > 0 ? buffer : 512, currentConfig().routing, group);
     }
+    publishSessionChannelLimit();
 
     settings_.saveLastSessionFolder(sessionFolder_.getFullPathName());
     settings_.rememberRecentSession(sessionFolder_.getFullPathName());

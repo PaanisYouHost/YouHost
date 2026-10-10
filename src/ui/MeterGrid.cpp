@@ -4,6 +4,7 @@
 #include "X32Look.h"
 #include "engine/ChannelListen.h"
 #include "engine/MeterScale.h"
+#include "engine/SessionChannels.h"
 #include "engine/Shortcuts.h"
 
 #include <cmath>
@@ -529,7 +530,7 @@ void MeterGrid::paint(juce::Graphics& graphics)
     {
         graphics.setColour(theme::dim);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
-        graphics.drawFittedText("This interface has no input channels.",
+        graphics.drawFittedText("No session channels.",
                                 getLocalBounds().reduced(8),
                                 juce::Justification::centred,
                                 3);
@@ -582,6 +583,9 @@ void MeterGrid::paint(juce::Graphics& graphics)
             graphics.drawFittedText(cell.title, body.toNearestInt(), juce::Justification::centred, 4);
             continue;
         }
+
+        if (cell.noInput)
+            graphics.beginTransparencyLayer(0.4f);
 
         graphics.setColour(theme::background);
         graphics.fillRect(bounds);
@@ -662,6 +666,19 @@ void MeterGrid::paint(juce::Graphics& graphics)
         {
             graphics.setColour(theme::green);
             graphics.drawRoundedRectangle(bounds.reduced(1.5f), 3.0f, 2.5f);
+        }
+
+        if (cell.noInput)
+        {
+            graphics.endTransparencyLayer();
+            graphics.setColour(theme::text);
+            graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(12.0f, 16.0f, width * 0.42f)).withStyle("Bold")));
+            graphics.drawText(juce::String(cell.channel + 1), parts.number, juce::Justification::centred, false);
+            graphics.setColour(theme::background);
+            graphics.fillRect(parts.name);
+            graphics.setColour(theme::amber);
+            graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 11.0f, width * 0.22f)).withStyle("Bold")));
+            graphics.drawText(kNoInputLabel, parts.name, juce::Justification::centred, true);
         }
 
         if (&cell != &cells_.back())

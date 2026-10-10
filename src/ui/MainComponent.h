@@ -64,6 +64,7 @@ private:
     void layoutMeters();
     void openStartup();
     void dismissStartup();
+    void applyGlobalListen(ChannelListen mode);
     void promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean = false);
     void runAfterUnsavedCheck(std::function<void()> action);
     void newSession();
@@ -124,9 +125,9 @@ private:
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
-    juce::TextButton globalRecButton_ { "REC" };
-    juce::TextButton globalInputButton_ { "INPUT" };
-    juce::TextButton globalOffButton_ { "OFF" };
+    juce::TextButton globalRecButton_ { "ALL REC" };
+    juce::TextButton globalInputButton_ { "ALL INPUT" };
+    juce::TextButton globalOffButton_ { "ALL OFF" };
     std::unique_ptr<RecordLockButton> recordLock_;
     std::function<void(bool)> afterCopy_;
     bool copyWasRunning_ = false;

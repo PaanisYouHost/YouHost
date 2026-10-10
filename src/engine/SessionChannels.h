@@ -10,7 +10,9 @@ namespace youhost
 {
 
 // One extra row at the bottom of the audio device list. It is never the default.
-inline constexpr const char* kOfflineDeviceName = "Offline (no audio) - 128 channels";
+// The session channel count is chosen separately.
+inline constexpr const char* kOfflineDeviceName = "Offline (no audio)";
+inline constexpr const char* kNoInputLabel = "no input";
 inline constexpr int kOfflineDeviceItemId = 100000;
 
 inline bool isOfflineDeviceName(std::string_view name) noexcept
@@ -92,55 +94,64 @@ inline int clampCardInputs(int cardInputs) noexcept
     return cardInputs;
 }
 
+inline constexpr int kSessionChannelCounts[] = { 8, 16, 32, 48, 64, 128 };
+inline constexpr int kSessionChannelCountChoices = 6;
+
+// Missing or unknown counts round up to the next choice, so a session never
+// hides a channel a file already asked to show. 128 is the default.
+inline int normaliseSessionChannelCount(int count) noexcept
+{
+    if (count <= 0)
+        return kMaxChannels;
+    for (const int allowed : kSessionChannelCounts)
+        if (count <= allowed)
+            return allowed;
+    return kMaxChannels;
+}
+
 struct SessionChannelView
 {
     bool offline = false;
     bool deviceOpen = false;
     int cardInputs = 0;
+    int sessionChannels = kMaxChannels;
     int visible = 0;
-    int hidden = 0;
-    bool revealed = false;
+    int processed = 0;
+    int silent = 0;
 };
 
-// The session always stores 128 channels. A selected device shows its own
-// count. Offline shows all 128 and processes none. Revealing unsupported
-// channels puts them on the mixer; they stay silent.
-inline SessionChannelView sessionChannelView(int cardInputs, bool deviceOpen, bool offline, bool revealUnsupported) noexcept
+// The session count is independent of the card. Channel N is device input N
+// and output N. Channels past the card stay visible, silent, and unprocessed.
+inline SessionChannelView sessionChannelView(int sessionChannels, int cardInputs, bool deviceOpen, bool offline) noexcept
 {
     SessionChannelView view;
     view.offline = offline;
     view.deviceOpen = deviceOpen && ! offline;
+    view.sessionChannels = normaliseSessionChannelCount(sessionChannels);
     view.cardInputs = view.deviceOpen ? clampCardInputs(cardInputs) : 0;
-    view.revealed = view.deviceOpen && revealUnsupported && view.cardInputs < kMaxChannels;
-    if (offline || view.revealed)
-        view.visible = kMaxChannels;
-    else if (view.deviceOpen)
-        view.visible = view.cardInputs;
-    else
-        view.visible = 0;
-    view.hidden = view.deviceOpen ? kMaxChannels - view.visible : 0;
+    view.visible = view.sessionChannels;
+    view.processed = view.cardInputs < view.visible ? view.cardInputs : view.visible;
+    view.silent = view.visible - view.processed;
     return view;
 }
 
 inline std::string hiddenChannelNote(const SessionChannelView& view)
 {
-    if (view.hidden <= 0)
+    if (view.silent <= 0)
         return {};
-    std::string text = std::to_string(view.hidden);
-    text += view.hidden == 1 ? " channel hidden (card has " : " channels hidden (card has ";
-    text += std::to_string(view.cardInputs);
-    text += ")";
+    std::string text = std::to_string(view.silent);
+    text += view.silent == 1 ? " channel has no input" : " channels have no input";
     return text;
 }
 
-inline bool channelUnsupportedByCard(int channel, const SessionChannelView& view) noexcept
+inline bool channelHasNoInput(int channel, const SessionChannelView& view) noexcept
 {
-    return view.deviceOpen && channel >= view.cardInputs && channel < kMaxChannels;
+    return channel >= 0 && channel < view.visible && channel >= view.cardInputs;
 }
 
 inline bool channelUsesCpu(int channel, const SessionChannelView& view) noexcept
 {
-    return channel >= 0 && channel < view.cardInputs;
+    return channel >= 0 && channel < view.processed;
 }
 
 inline bool timelineShowsChannel(int channel, int visible) noexcept
@@ -148,12 +159,7 @@ inline bool timelineShowsChannel(int channel, int visible) noexcept
     return channel >= 0 && channel < visible;
 }
 
-inline bool cardHidesChannels(const SessionChannelView& view) noexcept
-{
-    return view.deviceOpen && view.cardInputs < kMaxChannels;
-}
-
-inline std::string unsupportedChannelLine(int channel, std::string_view name)
+inline std::string noInputChannelLine(int channel, std::string_view name)
 {
     std::string text = std::to_string(channel + 1);
     text += "  ";
@@ -162,7 +168,7 @@ inline std::string unsupportedChannelLine(int channel, std::string_view name)
         text += name;
         text += "  ";
     }
-    text += "Unsupported by this card";
+    text += kNoInputLabel;
     return text;
 }
 

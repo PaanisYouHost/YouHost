@@ -63,6 +63,7 @@ struct SessionData
     float waveformGain = 1.0f;
     int alignGroup = 0;
     double sampleRate = 0.0;
+    int channelCount = kMaxChannels;
     SessionTimelineState timeline {};
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};

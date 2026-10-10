@@ -41,6 +41,14 @@ void showUnsavedChoice(std::function<void(int result)> callback)
     window->enterModalState(true, juce::ModalCallbackFunction::create(std::move(callback)), true);
 }
 
+void fillSessionChannelCount(juce::ComboBox& box, int selected)
+{
+    box.clear(juce::dontSendNotification);
+    for (const int count : kSessionChannelCounts)
+        box.addItem(juce::String(count), count);
+    box.setSelectedId(normaliseSessionChannelCount(selected), juce::dontSendNotification);
+}
+
 class BitDepthSlot : public juce::Component
 {
 public:
@@ -210,37 +218,6 @@ void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
     walk(root);
 }
 
-class UnsupportedRows : public juce::Component
-{
-public:
-    void setLines(const std::vector<juce::String>& lines)
-    {
-        if (lines_ == lines)
-            return;
-        lines_ = lines;
-        const int width = std::max(getWidth(), 200);
-        setSize(width, std::max(22, static_cast<int>(lines_.size()) * 22));
-        repaint();
-    }
-
-    void paint(juce::Graphics& graphics) override
-    {
-        graphics.setColour(theme::fainter);
-        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
-        for (int index = 0; index < static_cast<int>(lines_.size()); ++index)
-            graphics.drawText(lines_[static_cast<std::size_t>(index)],
-                              8,
-                              index * 22,
-                              std::max(0, getWidth() - 16),
-                              22,
-                              juce::Justification::centredLeft,
-                              true);
-    }
-
-private:
-    std::vector<juce::String> lines_;
-};
-
 class FloatWindow : public juce::DocumentWindow
 {
 public:
@@ -377,21 +354,9 @@ private:
               engine_(engine)
         {
             addAndMakeVisible(note_);
-            addAndMakeVisible(reveal_);
-            addAndMakeVisible(listViewport_);
             addAndMakeVisible(viewport_);
             note_.setJustificationType(juce::Justification::topLeft);
             note_.setColour(juce::Label::textColourId, theme::dim);
-            reveal_.setClickingTogglesState(true);
-            reveal_.setTooltip("Shows channels this card does not have. They stay silent and are not processed.");
-            quiet(reveal_);
-            reveal_.onClick = [this]
-            {
-                engine_.setRevealUnsupportedChannels(reveal_.getToggleState());
-                refreshList();
-            };
-            listViewport_.setViewedComponent(&rows_, false);
-            listViewport_.setScrollBarsShown(true, false);
             viewport_.setViewedComponent(&selector_, false);
             viewport_.setScrollBarsShown(true, true);
             addAndMakeVisible(offlineRate_);
@@ -419,7 +384,6 @@ private:
         ~Content() override
         {
             stopTimer();
-            listViewport_.setViewedComponent(nullptr, false);
             viewport_.setViewedComponent(nullptr, false);
         }
 
@@ -437,19 +401,8 @@ private:
                 offlineBuffer_.setBounds(row.removeFromLeft(160));
                 area.removeFromTop(6);
             }
-            note_.setBounds(area.removeFromTop(showList_ ? 44 : 22));
+            note_.setBounds(area.removeFromTop(44));
             area.removeFromTop(6);
-            reveal_.setVisible(showList_);
-            listViewport_.setVisible(showList_);
-            if (showList_)
-            {
-                reveal_.setBounds(area.removeFromTop(28).removeFromLeft(180));
-                area.removeFromTop(6);
-                listViewport_.setBounds(area.removeFromTop(132));
-                area.removeFromTop(8);
-                const int rowWidth = std::max(200, listViewport_.getMaximumVisibleWidth());
-                rows_.setSize(rowWidth, std::max(22, rows_.getHeight()));
-            }
             viewport_.setBounds(area);
             const int width = std::max(520, viewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 160));
@@ -469,51 +422,23 @@ private:
         void refreshList()
         {
             const auto view = engine_.channelView();
-            const bool list = cardHidesChannels(view);
-            if (! list)
-            {
-                note_.setText("Every channel is on the mixer.", juce::dontSendNotification);
-                reveal_.setToggleState(false, juce::dontSendNotification);
-                rows_.setLines({});
-            }
+            juce::String text;
+            if (view.silent > 0)
+                text = juce::String(hiddenChannelNote(view))
+                       + ". They stay on the mixer, marked no input, and are not processed.";
+            else if (view.deviceOpen)
+                text = "Every session channel has an input on this card.";
             else
-            {
-                juce::String text;
-                if (view.revealed)
-                    text = "Channels past this card are on the mixer and stay silent.";
-                else
-                    text = juce::String(hiddenChannelNote(view)) + ". They stay in the session.";
-                note_.setText(text, juce::dontSendNotification);
-                reveal_.setButtonText(view.revealed ? "Hide unsupported" : "Show on mixer");
-                reveal_.setToggleState(view.revealed, juce::dontSendNotification);
-                std::vector<juce::String> lines;
-                lines.reserve(static_cast<std::size_t>(kMaxChannels - view.cardInputs));
-                for (int channel = view.cardInputs; channel < kMaxChannels; ++channel)
-                {
-                    if (! channelUnsupportedByCard(channel, view))
-                        continue;
-                    lines.emplace_back(unsupportedChannelLine(channel, engine_.channelName(channel).toStdString()));
-                }
-                rows_.setLines(lines);
-            }
-
-            if (list != showList_)
-            {
-                showList_ = list;
-                resized();
-            }
+                text = "Session channels stay on the mixer, marked no input, until a device is connected.";
+            note_.setText(text, juce::dontSendNotification);
         }
 
         juce::AudioDeviceSelectorComponent& selector_;
         AudioEngine& engine_;
         juce::Label note_;
-        juce::TextButton reveal_ { "Show on mixer" };
         juce::ComboBox offlineRate_;
         juce::ComboBox offlineBuffer_;
-        UnsupportedRows rows_;
-        juce::Viewport listViewport_;
         juce::Viewport viewport_;
-        bool showList_ = false;
     };
 
     AppSettings& settings_;
@@ -542,14 +467,15 @@ public:
     SessionPlaceWindow(const juce::String& title,
                        juce::File parent,
                        juce::String parentNote,
-                       std::function<void(juce::File folder, bool internalDisk)> done)
+                       int channelCount,
+                       std::function<void(juce::File folder, bool internalDisk, int channelCount)> done)
         : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
-          content_(std::move(parent), std::move(parentNote), std::move(done))
+          content_(std::move(parent), std::move(parentNote), channelCount, std::move(done))
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
         setResizable(true, false);
-        setResizeLimits(480, 260, 900, 520);
+        setResizeLimits(480, 300, 900, 560);
         centreWithSize(placeSessionWindowWidth(), placeSessionWindowHeight());
         setVisible(true);
     }
@@ -569,12 +495,14 @@ private:
     class Content : public juce::Component
     {
     public:
-        Content(juce::File parent, juce::String parentNote, std::function<void(juce::File, bool)> done)
+        Content(juce::File parent, juce::String parentNote, int channelCount, std::function<void(juce::File, bool, int)> done)
             : parent_(std::move(parent)),
               done_(std::move(done))
         {
             addAndMakeVisible(nameLabel_);
             addAndMakeVisible(name_);
+            addAndMakeVisible(channelLabel_);
+            addAndMakeVisible(channelCount_);
             addAndMakeVisible(locationLabel_);
             addAndMakeVisible(location_);
             addAndMakeVisible(note_);
@@ -583,7 +511,10 @@ private:
             addAndMakeVisible(internal_);
             addAndMakeVisible(cancel_);
             nameLabel_.setText("Session name", juce::dontSendNotification);
+            channelLabel_.setText("Channels", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
+            fillSessionChannelCount(channelCount_, channelCount);
+            channelCount_.setTooltip("Session channel count. Channel N is device input N and output N. Channels past the card stay marked no input.");
             name_.setText(suggestedNewSessionName(parent_), juce::dontSendNotification);
             name_.setSelectAllWhenFocused(true);
             location_.setJustificationType(juce::Justification::centredLeft);
@@ -607,7 +538,7 @@ private:
             if (done_ == nullptr)
                 return;
             auto done = std::move(done_);
-            done(juce::File(), false);
+            done(juce::File(), false, 0);
         }
 
         void resized() override
@@ -616,6 +547,10 @@ private:
             auto row = area.removeFromTop(28);
             nameLabel_.setBounds(row.removeFromLeft(110));
             name_.setBounds(row);
+            area.removeFromTop(8);
+            row = area.removeFromTop(28);
+            channelLabel_.setBounds(row.removeFromLeft(110));
+            channelCount_.setBounds(row.removeFromLeft(120));
             area.removeFromTop(8);
             row = area.removeFromTop(28);
             locationLabel_.setBounds(row.removeFromLeft(110));
@@ -675,7 +610,7 @@ private:
             if (done_ == nullptr)
                 return;
             auto done = std::move(done_);
-            done(folder, false);
+            done(folder, false, channelCount_.getSelectedId());
         }
 
         void confirmInternal()
@@ -692,15 +627,17 @@ private:
                     if (result != 1 || safe == nullptr || safe->done_ == nullptr)
                         return;
                     auto done = std::move(safe->done_);
-                    done(juce::File(), true);
+                    done(juce::File(), true, safe->channelCount_.getSelectedId());
                 }));
         }
 
         juce::File parent_;
-        std::function<void(juce::File, bool)> done_;
+        std::function<void(juce::File, bool, int)> done_;
         std::unique_ptr<juce::FileChooser> chooser_;
         juce::Label nameLabel_;
         juce::TextEditor name_;
+        juce::Label channelLabel_;
+        juce::ComboBox channelCount_;
         juce::Label locationLabel_;
         juce::Label location_;
         juce::Label note_;
@@ -762,6 +699,8 @@ private:
         {
             addAndMakeVisible(intro_);
             addAndMakeVisible(deviceViewport_);
+            addAndMakeVisible(channelLabel_);
+            addAndMakeVisible(channelCount_);
             addAndMakeVisible(nameLabel_);
             addAndMakeVisible(name_);
             addAndMakeVisible(locationLabel_);
@@ -773,11 +712,19 @@ private:
             addAndMakeVisible(internal_);
             addAndMakeVisible(recentLabel_);
             addAndMakeVisible(recentViewport_);
-            intro_.setText("Choose the interface, sample rate, and buffer size, then create a session or open one. "
+            intro_.setText("Choose the interface, sample rate, buffer size, and session channel count, then create a session or open one. "
                            "Recordings usually go on an external drive. The interface opens with all channels. "
                            "Channel use is chosen only with the REC, INPUT, and OFF buttons.",
                            juce::dontSendNotification);
             intro_.setJustificationType(juce::Justification::topLeft);
+            channelLabel_.setText("Channels", juce::dontSendNotification);
+            fillSessionChannelCount(channelCount_, engine_.sessionChannelCount());
+            channelCount_.setTooltip("Session channel count. Channel N is device input N and output N. Channels past the card stay marked no input and use no CPU.");
+            channelCount_.onChange = [this]
+            {
+                if (channelCount_.getSelectedId() > 0)
+                    engine_.setSessionChannelCount(channelCount_.getSelectedId());
+            };
             nameLabel_.setText("Session name", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
             recentLabel_.setText("Open recent", juce::dontSendNotification);
@@ -837,7 +784,7 @@ private:
             auto area = getLocalBounds().reduced(16, 12);
             intro_.setBounds(area.removeFromTop(68));
             area.removeFromTop(6);
-            deviceViewport_.setBounds(area.removeFromTop(168));
+            deviceViewport_.setBounds(area.removeFromTop(132));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 140));
             const bool offline = engine_.offlineTemplate();
@@ -860,7 +807,11 @@ private:
                 auto bitArea = rateRow.removeFromLeft(260);
                 bitSlot_.setBounds(bitArea.withTrimmedLeft(84));
             }
-            area.removeFromTop(10);
+            area.removeFromTop(8);
+            auto channelRow = area.removeFromTop(28);
+            channelLabel_.setBounds(channelRow.removeFromLeft(110));
+            channelCount_.setBounds(channelRow.removeFromLeft(120));
+            area.removeFromTop(6);
             auto row = area.removeFromTop(28);
             nameLabel_.setBounds(row.removeFromLeft(110));
             name_.setBounds(row);
@@ -1110,6 +1061,8 @@ private:
             {
                 if (safe == nullptr)
                     return;
+                if (safe->channelCount_.getSelectedId() > 0)
+                    safe->engine_.setSessionChannelCount(safe->channelCount_.getSelectedId());
                 if (safe->engine_.placeNewSession(folder, false, true))
                     safe->finish();
                 else
@@ -1178,6 +1131,8 @@ private:
                         if (safe == nullptr)
                             return;
                         safe->engine_.resetToCleanSession();
+                        if (safe->channelCount_.getSelectedId() > 0)
+                            safe->engine_.setSessionChannelCount(safe->channelCount_.getSelectedId());
                         if (safe->engine_.createInternalSession())
                             safe->finish();
                         else
@@ -1205,6 +1160,8 @@ private:
         std::unique_ptr<juce::FileChooser> chooser_;
         juce::Label intro_;
         juce::Viewport deviceViewport_;
+        juce::Label channelLabel_;
+        juce::ComboBox channelCount_;
         juce::Label nameLabel_;
         juce::TextEditor name_;
         juce::Label locationLabel_;
@@ -1598,12 +1555,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     helpButton_.setTooltip(juce::String(shortcutHelpText()));
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
-    globalRecButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::record); refresh(); };
-    globalInputButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::input); refresh(); };
-    globalOffButton_.onClick = [this] { engine_.setSelectionListen(ChannelListen::off); refresh(); };
-    globalRecButton_.setTooltip("Set the selected channels to REC. With no selection, every visible channel.");
-    globalInputButton_.setTooltip("Set the selected channels to INPUT. With no selection, every visible channel.");
-    globalOffButton_.setTooltip("Set the selected channels to OFF. With no selection, every visible channel.");
+    globalRecButton_.onClick = [this] { applyGlobalListen(ChannelListen::record); };
+    globalInputButton_.onClick = [this] { applyGlobalListen(ChannelListen::input); };
+    globalOffButton_.onClick = [this] { applyGlobalListen(ChannelListen::off); };
+    globalRecButton_.setTooltip("Set every session channel to REC. With a selection, only those channels.");
+    globalInputButton_.setTooltip("Set every session channel to INPUT. With a selection, only those channels. Leaving REC while recording asks first.");
+    globalOffButton_.setTooltip("Set every session channel to OFF. With a selection, only those channels. Leaving REC while recording asks first.");
     recordLock_->onClick = [this]
     {
         engine_.setRecordLockArmed(! engine_.recordLockArmed());
@@ -2067,6 +2024,34 @@ void MainComponent::requestApplicationQuit(std::function<void()> quit)
     runAfterUnsavedCheck(std::move(quit));
 }
 
+void MainComponent::applyGlobalListen(ChannelListen mode)
+{
+    const bool recording = engine_.isRecording();
+    if (! recordActionAllowed(RecordDisrupt::globalListen, recording, engine_.recordLockArmed()))
+        return;
+    if (! engine_.selectionListenNeedsConfirm(mode))
+    {
+        engine_.setSelectionListen(mode, true);
+        refresh();
+        return;
+    }
+
+    juce::AlertWindow::showOkCancelBox(
+        juce::MessageBoxIconType::WarningIcon,
+        "Leave REC while recording?",
+        "Those channels stop being written to this take.",
+        "Switch",
+        "Cancel",
+        nullptr,
+        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<MainComponent>(this), mode](int result)
+        {
+            if (result != 1 || safe == nullptr)
+                return;
+            safe->engine_.setSelectionListen(mode, true);
+            safe->refresh();
+        }));
+}
+
 void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean)
 {
     if (placeWindow_ != nullptr || startupWindow_ != nullptr)
@@ -2077,9 +2062,10 @@ void MainComponent::promptForSession(const juce::String& title, std::function<vo
         title,
         engine_.defaultSessionParent(),
         engine_.missingSessionParentNote(),
-        [safe, then, clean](juce::File chosen, bool internalDisk)
+        engine_.sessionChannelCount(),
+        [safe, then, clean](juce::File chosen, bool internalDisk, int channelCount)
         {
-            juce::MessageManager::callAsync([safe, then, chosen, internalDisk, clean]
+            juce::MessageManager::callAsync([safe, then, chosen, internalDisk, channelCount, clean]
             {
                 if (safe == nullptr)
                     return;
@@ -2088,14 +2074,23 @@ void MainComponent::promptForSession(const juce::String& title, std::function<vo
                 safe->placeWindow_.reset();
 
                 bool placed = false;
+                const auto applyCount = [safe, channelCount]
+                {
+                    if (channelCount > 0)
+                        safe->engine_.setSessionChannelCount(channelCount);
+                };
                 if (internalDisk)
                 {
                     if (clean)
                         safe->engine_.resetToCleanSession();
+                    applyCount();
                     placed = safe->engine_.createInternalSession();
                 }
                 else if (chosen.getFullPathName().isNotEmpty())
+                {
+                    applyCount();
                     placed = safe->engine_.placeNewSession(chosen, false, clean);
+                }
 
                 safe->refresh();
                 if (then != nullptr)
@@ -2713,6 +2708,7 @@ void MainComponent::publishMeters(bool repaintLevels)
             cell.channel = item.channel;
             cell.color = engine_.channelColor(item.channel);
             cell.selected = engine_.isChannelSelected(item.channel);
+            cell.noInput = engine_.channelHasNoInput(item.channel);
             cell.title = engine_.channelName(item.channel);
             cell.reading.rms = engine_.rmsFor(item.channel);
             cell.reading.peak = engine_.peakFor(item.channel);
@@ -2750,6 +2746,20 @@ void MainComponent::refresh()
     globalRecButton_.setEnabled(listenOk);
     globalInputButton_.setEnabled(listenOk);
     globalOffButton_.setEnabled(listenOk);
+    const bool hasSelection = ! engine_.selectedChannels().empty();
+    const auto recText = hasSelection ? juce::String("REC") : juce::String("ALL REC");
+    const auto inputText = hasSelection ? juce::String("INPUT") : juce::String("ALL INPUT");
+    const auto offText = hasSelection ? juce::String("OFF") : juce::String("ALL OFF");
+    if (globalRecButton_.getButtonText() != recText)
+        globalRecButton_.setButtonText(recText);
+    if (globalInputButton_.getButtonText() != inputText)
+        globalInputButton_.setButtonText(inputText);
+    if (globalOffButton_.getButtonText() != offText)
+        globalOffButton_.setButtonText(offText);
+    const juce::String scope = hasSelection ? "the selected channels" : "every session channel";
+    globalRecButton_.setTooltip("Set " + scope + " to REC.");
+    globalInputButton_.setTooltip("Set " + scope + " to INPUT. Leaving REC while recording asks first.");
+    globalOffButton_.setTooltip("Set " + scope + " to OFF. Leaving REC while recording asks first.");
     meterGrid_.setListenChangesEnabled(listenOk);
     const bool loading = engine_.isLoadingPlugins();
     if (loading != heavyPaintSuspended_)
@@ -3002,10 +3012,6 @@ void MainComponent::resized()
     allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
-    views.removeFromLeft(4);
-    globalRecButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
-    globalInputButton_.setBounds(views.removeFromLeft(62).reduced(0, 2));
-    globalOffButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
     latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
     views.removeFromRight(4);
     cpuButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
@@ -3101,7 +3107,14 @@ void MainComponent::resized()
     const int timelineHeight = timelineHeight_ > 0 ? juce::jlimit(72, std::max(160, getHeight() / 2), timelineHeight_)
                                                    : automatic;
     timeline_.setBounds(area.removeFromTop(timelineHeight));
-    area.removeFromTop(8);
+    area.removeFromTop(6);
+    auto listenRow = area.removeFromTop(32);
+    globalRecButton_.setBounds(listenRow.removeFromLeft(88).reduced(0, 2));
+    listenRow.removeFromLeft(4);
+    globalInputButton_.setBounds(listenRow.removeFromLeft(100).reduced(0, 2));
+    listenRow.removeFromLeft(4);
+    globalOffButton_.setBounds(listenRow.removeFromLeft(84).reduced(0, 2));
+    area.removeFromTop(6);
     if (recorder)
     {
         bridgeArea_ = area;

@@ -4,6 +4,7 @@
 #include "DisplayLayout.h"
 #include "HostLimits.h"
 #include "MeterScale.h"
+#include "SessionChannels.h"
 
 #include <algorithm>
 #include <cctype>
@@ -23,7 +24,7 @@ namespace youhost
 // A newer YouHost opens any older file and fills missing fields with defaults.
 // An older YouHost opens a newer file by ignoring attributes and elements it
 // does not know. It must not fail, and a save must keep those unknown fields.
-inline constexpr int kSessionFormatVersion = 6;
+inline constexpr int kSessionFormatVersion = 7;
 
 struct SessionTimelineState
 {
@@ -137,7 +138,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return false;
     };
 
-    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate" }))
+    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate", "channels" }))
         return true;
     if (listed("Meters", { "peak", "reference" }))
         return true;
@@ -295,6 +296,7 @@ struct SessionDocumentModel
     double wave = 1.0;
     std::string align = "all";
     double rate = 0.0;
+    int channelCount = kMaxChannels;
     bool peak = false;
     int reference = kDefaultRmsReferenceDb;
     bool hasMeters = false;
@@ -322,6 +324,9 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
     if (const auto* align = sessionAttribute(root, "align"))
         model.align = *align == "group" ? "group" : "all";
     model.rate = sessionAttributeDouble(root, "rate", 0.0);
+    model.channelCount = kMaxChannels;
+    if (sessionHasAttribute(root, "channels"))
+        model.channelCount = normaliseSessionChannelCount(sessionAttributeInt(root, "channels", kMaxChannels));
 
     if (const auto* meters = sessionChild(root, "Meters"))
     {
@@ -468,6 +473,7 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
     sessionSetAttribute(root, "align", model.align == "group" ? "group" : "all");
     if (model.rate > 0.0)
         sessionSetAttribute(root, "rate", std::to_string(model.rate));
+    sessionSetAttribute(root, "channels", std::to_string(normaliseSessionChannelCount(model.channelCount)));
 
     SessionNode meters;
     meters.name = "Meters";

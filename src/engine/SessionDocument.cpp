@@ -120,6 +120,7 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
     root.setAttribute("align", data.alignGroup == 1 ? "group" : "all");
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
+    root.setAttribute("channels", normaliseSessionChannelCount(data.channelCount));
 
     auto* meters = root.createNewChildElement("Meters");
     meters->setAttribute("peak", data.peakMeter);
@@ -240,6 +241,9 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     data.timeline = timelineFromNode(data.preserved);
     data.page = root->getIntAttribute("page", 1) == 2 ? 2 : 1;
     data.sampleRate = root->getDoubleAttribute("rate", 0.0);
+    data.channelCount = root->hasAttribute("channels")
+                            ? normaliseSessionChannelCount(root->getIntAttribute("channels", kMaxChannels))
+                            : kMaxChannels;
     data.waveformGain = static_cast<float>(root->getDoubleAttribute("wave", 1.0));
     data.alignGroup = root->getStringAttribute("align") == "group" ? 1 : 0;
     data.wavBitDepth = normaliseWavBitDepth(root->getIntAttribute("bits", kDefaultWavBitDepth));

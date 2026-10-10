@@ -69,6 +69,18 @@ inline ChannelListen cycleChannelListen(ChannelListen mode) noexcept
     return ChannelListen::record;
 }
 
+// True when a global INPUT or OFF would move a channel off REC during a take.
+// REC itself, and any change while the transport is stopped, applies at once.
+inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const int* targetModes, int targetCount) noexcept
+{
+    if (! recording || next == ChannelListen::record || targetModes == nullptr || targetCount <= 0)
+        return false;
+    for (int index = 0; index < targetCount; ++index)
+        if (targetModes[index] == static_cast<int>(ChannelListen::record))
+            return true;
+    return false;
+}
+
 // Global REC, INPUT, and OFF apply to the selection. With nothing selected
 // they apply to every visible channel.
 inline std::vector<int> channelsForGlobalListen(const int* selected, int selectedCount, int visible)

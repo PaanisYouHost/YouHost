@@ -1731,6 +1731,7 @@ void testSessionCompatibility()
     youhost::SessionDocumentModel loaded;
     CHECK(youhost::readSessionModel(oldRoot, loaded));
     CHECK(loaded.version == 0);
+    CHECK(loaded.channelCount == 128);
     CHECK(loaded.bits == 24);
     CHECK(loaded.page == 1);
     CHECK(near(static_cast<float>(loaded.wave), 1.0f, 0.0001f));
@@ -2051,54 +2052,57 @@ void testSessionChannelsRateLockAndClose()
     CHECK(youhost::audioCardKind("No device") == youhost::AudioCardKind::none);
     CHECK(youhost::audioCardKind(youhost::kOfflineDeviceName) == youhost::AudioCardKind::none);
 
-    const auto builtin = youhost::sessionChannelView(2, true, false, false);
-    CHECK(builtin.visible == 2);
-    CHECK(builtin.visible != 128);
-    CHECK(builtin.cardInputs == 2);
-    CHECK(youhost::channelUsesCpu(0, builtin));
-    CHECK(! youhost::channelUsesCpu(2, builtin));
-    CHECK(youhost::hiddenChannelNote(builtin).find("126 channels hidden (card has 2)") != std::string::npos);
+    CHECK(youhost::normaliseSessionChannelCount(0) == 128);
+    CHECK(youhost::normaliseSessionChannelCount(-4) == 128);
+    CHECK(youhost::normaliseSessionChannelCount(8) == 8);
+    CHECK(youhost::normaliseSessionChannelCount(12) == 16);
+    CHECK(youhost::normaliseSessionChannelCount(24) == 32);
+    CHECK(youhost::normaliseSessionChannelCount(48) == 48);
+    CHECK(youhost::normaliseSessionChannelCount(100) == 128);
 
-    const auto card64 = youhost::sessionChannelView(64, true, false, false);
-    CHECK(card64.visible == 64);
-    CHECK(youhost::timelineShowsChannel(15, card64.visible));
-    CHECK(youhost::channelUsesCpu(15, card64));
-    CHECK(youhost::timelineShowsChannel(40, card64.visible));
-    CHECK(youhost::channelUsesCpu(40, card64));
-    CHECK(! youhost::channelUnsupportedByCard(40, card64));
-    CHECK(! youhost::timelineShowsChannel(70, card64.visible));
-    CHECK(! youhost::channelUsesCpu(70, card64));
-    CHECK(youhost::channelUnsupportedByCard(70, card64));
+    const auto session32 = youhost::sessionChannelView(32, 2, true, false);
+    CHECK(session32.visible == 32);
+    CHECK(session32.processed == 2);
+    CHECK(session32.silent == 30);
+    CHECK(youhost::channelUsesCpu(0, session32));
+    CHECK(youhost::channelHasNoInput(2, session32));
+    CHECK(youhost::channelHasNoInput(31, session32));
+    CHECK(! youhost::channelUsesCpu(2, session32));
+    CHECK(! youhost::timelineShowsChannel(32, session32.visible));
+    CHECK(youhost::hiddenChannelNote(session32) == "30 channels have no input");
+    CHECK(youhost::noInputChannelLine(8, "Vox") == "9  Vox  no input");
 
-    const auto card16 = youhost::sessionChannelView(16, true, false, false);
-    CHECK(card16.hidden == 112);
-    CHECK(youhost::hiddenChannelNote(card16) == "112 channels hidden (card has 16)");
-    CHECK(youhost::timelineShowsChannel(15, card16.visible));
-    CHECK(youhost::channelUsesCpu(15, card16));
-    CHECK(! youhost::timelineShowsChannel(40, card16.visible));
-    CHECK(! youhost::channelUsesCpu(40, card16));
-    CHECK(youhost::channelUnsupportedByCard(40, card16));
+    const auto session16 = youhost::sessionChannelView(16, 64, true, false);
+    CHECK(session16.visible == 16);
+    CHECK(session16.processed == 16);
+    CHECK(youhost::channelUsesCpu(15, session16));
+    CHECK(! youhost::timelineShowsChannel(16, session16.visible));
+    CHECK(! youhost::channelHasNoInput(15, session16));
 
-    const auto revealed = youhost::sessionChannelView(16, true, false, true);
-    CHECK(revealed.visible == 128);
-    CHECK(revealed.revealed);
-    CHECK(! youhost::channelUsesCpu(40, revealed));
-    CHECK(youhost::channelUnsupportedByCard(40, revealed));
-    CHECK(youhost::unsupportedChannelLine(15, "Kick").find("16  Kick  Unsupported by this card") != std::string::npos);
+    const auto pastCard = youhost::sessionChannelView(64, 16, true, false);
+    CHECK(youhost::channelHasNoInput(40, pastCard));
+    CHECK(! youhost::channelUsesCpu(40, pastCard));
+    CHECK(youhost::timelineShowsChannel(40, pastCard.visible));
 
-    const auto offline = youhost::sessionChannelView(2, true, true, false);
-    CHECK(offline.visible == 128);
+    const auto matched = youhost::sessionChannelView(64, 64, true, false);
+    CHECK(youhost::channelUsesCpu(40, matched));
+    CHECK(! youhost::channelHasNoInput(40, matched));
+    CHECK(youhost::hiddenChannelNote(matched).empty());
+
+    const auto offline = youhost::sessionChannelView(32, 32, true, true);
+    CHECK(offline.visible == 32);
     CHECK(offline.cardInputs == 0);
+    CHECK(offline.processed == 0);
+    CHECK(youhost::channelHasNoInput(0, offline));
+    CHECK(youhost::channelHasNoInput(31, offline));
     CHECK(! youhost::channelUsesCpu(0, offline));
-    CHECK(! youhost::cardHidesChannels(offline));
-    CHECK(youhost::hiddenChannelNote(offline).empty());
+    CHECK(! youhost::hiddenChannelNote(offline).empty());
 
-    const auto closed = youhost::sessionChannelView(32, false, false, false);
-    CHECK(closed.visible == 0);
+    const auto closed = youhost::sessionChannelView(32, 32, false, false);
+    CHECK(closed.visible == 32);
     CHECK(closed.cardInputs == 0);
-
-    const auto again = youhost::sessionChannelView(64, true, false, false);
-    CHECK(youhost::timelineShowsChannel(15, again.visible));
+    CHECK(closed.processed == 0);
+    CHECK(youhost::channelHasNoInput(0, closed));
 
     std::vector<std::string> devices = { "WING", youhost::kOfflineDeviceName, "X32" };
     youhost::appendOfflineDeviceEntry(devices);
@@ -2111,29 +2115,61 @@ void testSessionChannelsRateLockAndClose()
     CHECK(youhost::deviceKeptOnSessionOpen("WING", youhost::kOfflineDeviceName) == "WING");
 
     youhost::SessionDocumentModel model;
+    model.channelCount = 16;
     youhost::SessionChannelRecord channel;
-    channel.index = 15;
-    channel.name = "Kick";
-    channel.color = 2;
-    channel.group = 1;
+    channel.index = 40;
+    channel.name = "OH";
+    channel.color = 3;
+    channel.group = 2;
     youhost::SessionSlotRecord slot;
     slot.occupied = true;
-    slot.pluginName = "EQ";
+    slot.pluginName = "Comp";
     channel.slots.push_back(slot);
     model.channels.push_back(channel);
     youhost::SessionTakeRecord take;
-    take.files.push_back(youhost::SessionFileRecord { 15, "16_1_Kick.wav" });
+    take.files.push_back(youhost::SessionFileRecord { 40, "41_1_OH.wav" });
     model.takes.push_back(take);
-    CHECK(model.channels[0].name == "Kick");
-    CHECK(model.channels[0].color == 2);
-    CHECK(model.channels[0].group == 1);
-    CHECK(model.channels[0].slots[0].pluginName == "EQ");
-    CHECK(model.takes[0].files[0].name == "16_1_Kick.wav");
+    const auto smallCard = youhost::sessionChannelView(16, 2, true, false);
+    const auto bigCard = youhost::sessionChannelView(64, 64, true, false);
+    (void) smallCard;
+    (void) bigCard;
+    CHECK(model.channels[0].name == "OH");
+    CHECK(model.channels[0].color == 3);
+    CHECK(model.channels[0].group == 2);
+    CHECK(model.channels[0].slots[0].pluginName == "Comp");
+    CHECK(model.takes[0].files[0].name == "41_1_OH.wav");
 
     const auto xml = youhost::writeSessionXml(youhost::writeSessionModel(model));
-    CHECK(xml.find("version=\"6\"") != std::string::npos);
-    CHECK(xml.find("channels=") == std::string::npos);
-    CHECK(youhost::kSessionFormatVersion == 6);
+    CHECK(xml.find("version=\"7\"") != std::string::npos);
+    CHECK(xml.find("channels=\"16\"") != std::string::npos);
+    CHECK(xml.find("index=\"40\"") != std::string::npos);
+    CHECK(youhost::kSessionFormatVersion == 7);
+
+    const char* version6 = R"(<YouHostSession version="6">
+  <Channel index="40" name="OH" color="3" group="2">
+    <Slot index="0"><PLUGIN name="Comp"/></Slot>
+  </Channel>
+</YouHostSession>)";
+    youhost::SessionNode version6Root;
+    CHECK(youhost::parseSessionXml(version6, version6Root));
+    youhost::SessionDocumentModel fromVersion6;
+    CHECK(youhost::readSessionModel(version6Root, fromVersion6));
+    CHECK(fromVersion6.channelCount == 128);
+    CHECK(fromVersion6.channels.size() == 1);
+    CHECK(fromVersion6.channels[0].index == 40);
+    CHECK(fromVersion6.channels[0].name == "OH");
+
+    const int recordingModes[] = {
+        static_cast<int>(youhost::ChannelListen::record),
+        static_cast<int>(youhost::ChannelListen::off),
+    };
+    CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, recordingModes, 2));
+    CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::input, recordingModes, 1));
+    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, recordingModes, 2));
+    CHECK(! youhost::globalListenNeedsConfirm(false, youhost::ChannelListen::off, recordingModes, 2));
+    const int quietModes[] = { static_cast<int>(youhost::ChannelListen::input) };
+    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, quietModes, 1));
+    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, nullptr, 0));
 
     CHECK(youhost::formatRateKhz(48000.0) == "48");
     CHECK(youhost::formatRateKhz(44100.0) == "44.1");
@@ -2252,8 +2288,14 @@ void testSessionChannelsRateLockAndClose()
     CHECK(all[3] == 3);
 
     const auto help = youhost::shortcutHelpText();
-    CHECK(help.find("Offline (no audio) - 128 channels") != std::string::npos);
-    CHECK(help.find("Show on mixer") != std::string::npos);
+    CHECK(help.find("no input") != std::string::npos);
+    CHECK(help.find("8, 16, 32, 48, 64, or 128") != std::string::npos);
+    CHECK(help.find("Leaving REC while recording asks first") != std::string::npos);
+    CHECK(help.find("ALL REC") != std::string::npos);
+    CHECK(help.find("Offline (no audio)") != std::string::npos);
+    CHECK(help.find("Offline (no audio) - 128 channels") == std::string::npos);
+    CHECK(help.find("Show on mixer") == std::string::npos);
+    CHECK(help.find("112 channels hidden") == std::string::npos);
     CHECK(help.find("RECORDING LOCKED") != std::string::npos);
     CHECK(help.find("Session moves to 48 kHz") != std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);

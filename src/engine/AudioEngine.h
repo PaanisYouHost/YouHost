@@ -58,6 +58,9 @@ public:
     void pollDeviceStats();
     LatencyNumbers latencyNumbers() const;
     int visibleChannels() const;
+    int sessionChannelCount() const noexcept { return sessionChannelCount_; }
+    void setSessionChannelCount(int count);
+    bool channelHasNoInput(int channel) const;
     bool revealUnsupportedChannels() const noexcept { return revealUnsupported_; }
     void setRevealUnsupportedChannels(bool reveal);
     juce::String hiddenChannelNote() const;
@@ -72,7 +75,8 @@ public:
     bool recordLockArmed() const noexcept { return recordLockArmed_; }
     bool recordingLocked() const;
     void setRecordLockArmed(bool armed);
-    void setSelectionListen(ChannelListen mode);
+    bool selectionListenNeedsConfirm(ChannelListen mode) const;
+    void setSelectionListen(ChannelListen mode, bool confirmed = false);
     juce::String takeSessionRateNotice();
     int inputCount() const;
     int outputCount() const;
@@ -292,6 +296,7 @@ private:
     double preferredRate_ = 48000.0;
     int preferredBuffer_ = 64;
     juce::String sessionRateNotice_;
+    int sessionChannelCount_ = kMaxChannels;
     std::atomic<int> sessionVisible_ { kMaxChannels };
     std::atomic<int> sessionAudioLimit_ { 0 };
     int sessionPage_ = 1;
