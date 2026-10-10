@@ -546,6 +546,39 @@ struct PluginRack::DeferredPluginRelease
     std::vector<Item> items;
 };
 
+class PluginRack::BackgroundInstantiate : public juce::Thread
+{
+public:
+    explicit BackgroundInstantiate(PluginRack& owner)
+        : juce::Thread("youhost-plugin-load"),
+          owner_(owner)
+    {
+    }
+
+    void run() override
+    {
+        std::unique_ptr<juce::AudioPluginInstance> instance;
+        juce::String error;
+        owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+        {
+            std::lock_guard<std::mutex> lock(owner_.offThreadMutex_);
+            owner_.offThreadInstance_ = std::move(instance);
+            owner_.offThreadError_ = error;
+        }
+        auto alive = owner_.alive_;
+        auto* rack = &owner_;
+        juce::MessageManager::callAsync([alive, rack]
+        {
+            if (! alive->load(std::memory_order_acquire))
+                return;
+            rack->deliverOffThreadInstance();
+        });
+    }
+
+private:
+    PluginRack& owner_;
+};
+
 PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensationSamples, AppSettings* settings)
     : catalogue_(catalogue),
       compensationSamples_(compensationSamples),
@@ -597,12 +630,26 @@ void PluginRack::audioProcessorChanged(juce::AudioProcessor*, const juce::AudioP
         stateDirty_.store(true, std::memory_order_relaxed);
 }
 
+void PluginRack::setActiveChannels(int count)
+{
+    if (count < 0)
+        count = 0;
+    if (count > kMaxChannels)
+        count = kMaxChannels;
+    const int previous = activeChannels_.exchange(count, std::memory_order_relaxed);
+    if (previous == count)
+        return;
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    publishUnlocked();
+}
+
 void PluginRack::process(float* const* outputs,
                          int numOutputs,
                          int numSamples,
                          const Routing& routing,
                          std::uint64_t enabledLow,
-                         std::uint64_t enabledHigh)
+                         std::uint64_t enabledHigh,
+                         int activeChannels)
 {
     if (numSamples > 0 && blockSize_ > 0 && numSamples != blockSize_)
     {
@@ -643,7 +690,8 @@ void PluginRack::process(float* const* outputs,
         jobGraph_ = graph;
         jobSamples_ = numSamples;
         int count = 0;
-        for (int channel = 0; channel < kMaxChannels; ++channel)
+        const int limit = std::clamp(activeChannels, 0, kMaxChannels);
+        for (int channel = 0; channel < limit; ++channel)
         {
             const int packed = routing.outputPacked[static_cast<std::size_t>(channel)];
             if (packed < 0 || packed >= numOutputs)
@@ -1072,7 +1120,7 @@ void PluginRack::loadPlugin(int channel,
     enqueueChannel(channel,
                    [this, channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold]
                    {
-                       beginLoad(channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold);
+                       beginLoad(channel, slot, description, state, bypassed, markDirty, openWhenReady, stereoFold, 0);
                    },
                    true);
 }
@@ -1084,11 +1132,14 @@ void PluginRack::beginLoad(int channel,
                            bool bypassed,
                            bool markDirty,
                            bool openWhenReady,
-                           int stereoFold)
+                           int stereoFold,
+                           std::uint64_t restoreGeneration)
 {
+    touchMessageBeat();
     if (! validSlot(channel, slot))
     {
         finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
+        completeRestoreStep(restoreGeneration);
         return;
     }
 
@@ -1121,6 +1172,8 @@ void PluginRack::beginLoad(int channel,
         }
         bury(std::move(previous), nullptr);
         finishChannelWork(channel, ticket);
+        noteSlot(channel);
+        completeRestoreStep(restoreGeneration);
         return;
     }
 
@@ -1132,15 +1185,37 @@ void PluginRack::beginLoad(int channel,
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
 
-    StallClock::get().messagePhase.store(kPhaseLoad, std::memory_order_relaxed);
     tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
 
+    const bool background = restoreGeneration != 0 && catalogue_.prefersBackgroundInstance(description);
+    if (background)
+    {
+        StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
+        jobChannel_ = channel;
+        jobSlot_ = slot;
+        jobTicket_ = ticket;
+        jobGeneration_ = restoreGeneration;
+        jobMarkDirty_ = markDirty;
+        jobBypassed_ = bypassed;
+        jobOpen_ = openWhenReady;
+        jobStereo_ = stereoFold;
+        jobDescription_ = description;
+        jobState_ = state;
+        jobRate_ = rate;
+        jobBlock_ = block;
+        launchBackgroundLoad();
+        return;
+    }
+
+    // The format creates the instance when this message is delivered, on the
+    // message thread. Phase stays "load" until that callback starts.
+    StallClock::get().messagePhase.store(kPhaseLoad, std::memory_order_relaxed);
     auto alive = alive_;
     catalogue_.createInstanceAsync(
         description,
         rate,
         block,
-        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state](
+        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, restoreGeneration](
             std::unique_ptr<juce::AudioPluginInstance> instance,
             const juce::String& error)
         {
@@ -1150,7 +1225,7 @@ void PluginRack::beginLoad(int channel,
                     destroyInstance(nullptr, instance.release());
                 return;
             }
-            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, std::move(instance), error);
+            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, std::move(instance), error, restoreGeneration);
         });
 }
 
@@ -1164,8 +1239,24 @@ void PluginRack::finishLoad(int channel,
                             juce::PluginDescription description,
                             juce::MemoryBlock state,
                             std::unique_ptr<juce::AudioPluginInstance> instance,
-                            const juce::String& error)
+                            const juce::String& error,
+                            std::uint64_t restoreGeneration)
 {
+    // createPluginInstance has returned. Later paints are not part of the load.
+    touchMessageBeat();
+    StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
+    struct RestoreFinish
+    {
+        PluginRack& rack;
+        int channel;
+        std::uint64_t generation;
+        ~RestoreFinish()
+        {
+            rack.noteSlot(channel);
+            rack.completeRestoreStep(generation);
+        }
+    } restoreFinish { *this, channel, restoreGeneration };
+
     if (! validSlot(channel, slot))
         return;
 
@@ -1289,6 +1380,13 @@ void PluginRack::finishLoad(int channel,
 
 void PluginRack::clearAll(bool markDirty)
 {
+    ++restoreGeneration_;
+    restoreQueue_.clear();
+    restorePosted_ = false;
+    sessionLoadsReady_ = false;
+    loadCursor_ = {};
+    restoring_ = false;
+
     for (auto& gate : channelWork_)
     {
         gate.pending.clear();
@@ -1329,6 +1427,9 @@ void PluginRack::clearAll(bool markDirty)
                     retiredPlugins.push_back(std::move(model.plugin));
             }
         }
+        for (auto& excluded : excluded_)
+            excluded = false;
+        bypassAll_.store(0, std::memory_order_relaxed);
         publishUnlocked();
     }
 
@@ -1727,8 +1828,11 @@ void PluginRack::captureSession(SessionData& data)
 
 void PluginRack::restoreSession(const SessionData& data)
 {
-    restoring_ = true;
     clearAll(false);
+    restoring_ = true;
+    ++restoreGeneration_;
+    restoreQueue_.clear();
+    loadCursor_ = {};
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
         const auto& source = data.channels[static_cast<std::size_t>(channel)];
@@ -1741,14 +1845,180 @@ void PluginRack::restoreSession(const SessionData& data)
             const auto& sourceSlot = source.slots[static_cast<std::size_t>(slot)];
             if (! sourceSlot.occupied)
                 continue;
-            loadPlugin(channel, slot, sourceSlot.description, sourceSlot.state, sourceSlot.bypassed, false, false, sourceSlot.stereoFold);
+            RestorePlugin item;
+            item.channel = channel;
+            item.slot = slot;
+            item.description = sourceSlot.description;
+            item.state = sourceSlot.state;
+            item.bypassed = sourceSlot.bypassed;
+            item.stereoFold = sourceSlot.stereoFold;
+            restoreQueue_.push_back(std::move(item));
         }
     }
+    loadCursor_.total = static_cast<int>(restoreQueue_.size());
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         publishUnlocked();
     }
+    // Plugins start after the device is open. Instantiating here would block
+    // the message thread before the audio callback is installed again.
+    sessionLoadsReady_ = loadCursor_.total > 0;
+    if (! sessionLoadsReady_)
+        restoring_ = false;
+}
+
+void PluginRack::pumpSessionLoads()
+{
+    if (! sessionLoadsReady_ || quitting_)
+        return;
+    sessionLoadsReady_ = false;
+    if (loadCursor_.total <= 0 || restoreQueue_.empty())
+    {
+        finishRestore();
+        return;
+    }
+    noteSlot(-2);
+    scheduleNextRestore();
+}
+
+juce::String PluginRack::pluginLoadProgress() const
+{
+    char text[64];
+    if (! formatPluginLoadProgress(loadCursor_.finished, loadCursor_.total, loadCursor_.inFlight, text, sizeof(text)))
+        return {};
+    return juce::String(text);
+}
+
+void PluginRack::setPluginSlotHandler(std::function<void(int)> handler)
+{
+    slotHandler_ = std::move(handler);
+}
+
+void PluginRack::noteSlot(int channel)
+{
+    if (slotHandler_ != nullptr)
+        slotHandler_(channel);
+}
+
+void PluginRack::scheduleNextRestore()
+{
+    if (quitting_ || restorePosted_)
+        return;
+    restorePosted_ = true;
+    auto alive = alive_;
+    const auto generation = restoreGeneration_;
+    juce::Timer::callAfterDelay(1, [alive, generation, this]
+    {
+        if (! alive->load(std::memory_order_acquire))
+            return;
+        if (generation != restoreGeneration_)
+            return;
+        restorePosted_ = false;
+        startNextRestore();
+    });
+}
+
+void PluginRack::startNextRestore()
+{
+    if (quitting_)
+        return;
+    if (! loadCursor_.startOne())
+    {
+        if (restoreQueue_.empty())
+            finishRestore();
+        return;
+    }
+    if (restoreQueue_.empty())
+    {
+        loadCursor_.inFlight = false;
+        finishRestore();
+        return;
+    }
+
+    auto item = std::move(restoreQueue_.front());
+    restoreQueue_.erase(restoreQueue_.begin());
+    const auto generation = restoreGeneration_;
+    const int channel = item.channel;
+    enqueueChannel(channel,
+                   [this, generation, item = std::move(item)]() mutable
+                   {
+                       beginLoad(item.channel,
+                                 item.slot,
+                                 item.description,
+                                 item.state,
+                                 item.bypassed,
+                                 false,
+                                 false,
+                                 item.stereoFold,
+                                 generation);
+                   },
+                   true);
+}
+
+void PluginRack::completeRestoreStep(std::uint64_t generation)
+{
+    if (generation == 0 || generation != restoreGeneration_)
+        return;
+    loadCursor_.completeOne();
+    if (loadCursor_.done() || restoreQueue_.empty())
+        finishRestore();
+    else
+        scheduleNextRestore();
+}
+
+void PluginRack::finishRestore()
+{
+    restoreQueue_.clear();
+    loadCursor_ = {};
+    sessionLoadsReady_ = false;
     restoring_ = false;
+    StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
+    noteSlot(-1);
+}
+
+void PluginRack::launchBackgroundLoad()
+{
+    if (backgroundInstantiate_ == nullptr)
+        backgroundInstantiate_ = std::make_unique<BackgroundInstantiate>(*this);
+    if (backgroundInstantiate_->isThreadRunning())
+        backgroundInstantiate_->stopThread(30000);
+    if (backgroundInstantiate_->startThread(juce::Thread::Priority::background))
+        return;
+    finishLoad(jobChannel_,
+               jobSlot_,
+               jobTicket_,
+               jobMarkDirty_,
+               jobBypassed_,
+               jobOpen_,
+               jobStereo_,
+               jobDescription_,
+               jobState_,
+               nullptr,
+               "Could not load the plugin.",
+               jobGeneration_);
+}
+
+void PluginRack::deliverOffThreadInstance()
+{
+    std::unique_ptr<juce::AudioPluginInstance> instance;
+    juce::String error;
+    {
+        std::lock_guard<std::mutex> lock(offThreadMutex_);
+        instance = std::move(offThreadInstance_);
+        error = std::move(offThreadError_);
+    }
+    finishLoad(jobChannel_,
+               jobSlot_,
+               jobTicket_,
+               jobMarkDirty_,
+               jobBypassed_,
+               jobOpen_,
+               jobStereo_,
+               jobDescription_,
+               jobState_,
+               std::move(instance),
+               error,
+               jobGeneration_);
 }
 
 void PluginRack::setDirtyHandler(std::function<void()> handler)
@@ -1833,8 +2103,16 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         buffer.ensureSize(256);
 
     std::array<ChannelLatencyInput, kMaxChannels> inputs {};
+    const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (channel >= shown)
+        {
+            chainSamples_[static_cast<std::size_t>(channel)] = 0;
+            inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { 0, false, -1 };
+            continue;
+        }
+
         int chain = 0;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
@@ -1928,6 +2206,23 @@ void PluginRack::releaseForQuit()
     quitting_ = true;
     alive_->store(false, std::memory_order_release);
     stopTimer();
+    ++restoreGeneration_;
+    restoreQueue_.clear();
+    sessionLoadsReady_ = false;
+    restorePosted_ = false;
+    if (backgroundInstantiate_ != nullptr)
+    {
+        if (backgroundInstantiate_->stopThread(8000))
+        {
+            backgroundInstantiate_.reset();
+            std::lock_guard<std::mutex> lock(offThreadMutex_);
+            offThreadInstance_.reset();
+        }
+        else
+        {
+            backgroundInstantiate_.release();
+        }
+    }
     blockProcessing_.store(true, std::memory_order_release);
     const bool idle = waitUntilOutsideCallback();
     if (idle)

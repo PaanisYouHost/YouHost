@@ -1,4 +1,5 @@
 #include "PluginPage.h"
+#include "engine/WindowCatalog.h"
 #include "AppSettings.h"
 #include "ChannelMenu.h"
 #include "MeterColours.h"
@@ -11,6 +12,7 @@
 #include "engine/InsertMenu.h"
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
+#include "engine/Shortcuts.h"
 
 namespace youhost
 {
@@ -396,18 +398,18 @@ public:
         picker_ = picker.get();
         setUsingNativeTitleBar(true);
         setContentOwned(picker.release(), true);
-        prepareRememberedWindow(*this, settings_, "windowPluginList", 420, 480, 320, 240);
+        prepareRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight(), 320, 240);
         setVisible(false);
     }
 
     ~PluginListWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
         setVisible(false);
     }
 
@@ -435,6 +437,8 @@ public:
           group_(group)
     {
     }
+
+    int groupId() const noexcept { return group_; }
 
     void refresh()
     {
@@ -484,18 +488,11 @@ public:
         bool clip = false;
         bool plugins = false;
         int count = 0;
-        int recording = 0;
-        int inputOnly = 0;
         for (int channel = 0; channel < channels; ++channel)
         {
             if (engine_.channelGroup(channel) != group_)
                 continue;
             ++count;
-            const auto listen = engine_.channelListen(channel);
-            if (listen == ChannelListen::record)
-                ++recording;
-            else if (listen == ChannelListen::input)
-                ++inputOnly;
             level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
             clip = clip || engine_.clipFor(channel);
             if (! plugins)
@@ -506,30 +503,42 @@ public:
             }
         }
 
-        auto area = getLocalBounds().reduced(14, 4);
+        constexpr int nameX = 16;
+        constexpr int nameW = 180;
+        constexpr int foldX = 204;
+        constexpr int foldW = 72;
+        constexpr int clipX = 284;
+        constexpr int clipW = 48;
+        constexpr int fxX = 340;
+        constexpr int fxW = 36;
+        constexpr int meterX = 384;
+
         graphics.setColour(ink);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
-        auto title = engine_.groupName(group_);
-        if (engine_.groupCollapsed(group_))
-            title << "    folded";
-        graphics.drawText(title, area.removeFromLeft(std::min(220, area.getWidth() / 3)), juce::Justification::centredLeft, true);
+        graphics.drawText(engine_.groupName(group_),
+                          nameX,
+                          0,
+                          nameW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
 
-        juce::String state = "OFF";
-        if (count > 0 && recording == count)
-            state = "REC";
-        else if (count > 0 && inputOnly == count)
-            state = "INPUT";
-        else if (recording + inputOnly > 0)
-            state = "mixed";
-        if (clip)
-            state << "   CLIP";
-        if (plugins)
-            state << "   FX";
-        graphics.setColour(ink);
+        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+        graphics.drawText(juce::String(groupFoldLabel(engine_.groupCollapsed(group_), count)),
+                          foldX,
+                          0,
+                          foldW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
+
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText(state, area.removeFromRight(180), juce::Justification::centredRight, true);
+        if (clip)
+            graphics.drawText("CLIP", clipX, 0, clipW, getHeight(), juce::Justification::centredLeft, true);
+        if (plugins)
+            graphics.drawText("FX", fxX, 0, fxW, getHeight(), juce::Justification::centredLeft, true);
 
-        auto meter = area.reduced(8, 6);
+        auto meter = juce::Rectangle<int>(meterX, 6, std::max(0, getWidth() - meterX - 12), std::max(0, getHeight() - 12));
         graphics.setColour(theme::meterTrack);
         graphics.fillRoundedRectangle(meter.toFloat(), 2.0f);
         if (level > 0.0f && meter.getWidth() > 1)
@@ -692,7 +701,19 @@ public:
         name_.onEditorShow = [this]
         {
             if (auto* editor = name_.getCurrentTextEditor())
+            {
+                editor->setSelectAllWhenFocused(true);
                 editor->addKeyListener(&tabKeys_);
+                juce::Component::SafePointer<juce::TextEditor> safe(editor);
+                juce::MessageManager::callAsync([safe]
+                {
+                    if (safe != nullptr)
+                    {
+                        safe->grabKeyboardFocus();
+                        safe->selectAll();
+                    }
+                });
+            }
         };
         name_.addMouseListener(this, false);
 
@@ -767,6 +788,7 @@ public:
         number_.setText(juce::String(channel_ + 1), juce::dontSendNotification);
 
         const auto listen = engine_.channelListen(channel_);
+        arm_.setEnabled(! engine_.recordingLocked());
         arm_.setButtonText(channelListenLabel(listen));
         if (listen == ChannelListen::record)
         {
@@ -806,16 +828,22 @@ public:
             if (button.getButtonText() != text)
                 button.setButtonText(text);
             juce::Colour fill = theme::button;
-            if (source.occupied && source.bypassed)
+            const bool blinkBypass = engine_.bypassAll() && source.occupied;
+            if (blinkBypass)
+            {
+                const bool lit = (juce::Time::getMillisecondCounter() / 500u) % 2u == 0u;
+                fill = lit ? juce::Colour(0xffd48a20) : juce::Colour(0xff8a6a22);
+            }
+            else if (source.occupied && source.bypassed)
                 fill = juce::Colour(0xff3a3424);
             else if (source.occupied)
                 fill = theme::buttonOn;
-            if (source.loading)
+            if (! blinkBypass && source.loading)
                 fill = juce::Colour(0xff3d3420);
-            if (engine_.isPluginEditorOpen(channel_, slot))
+            if (! blinkBypass && engine_.isPluginEditorOpen(channel_, slot))
                 fill = fill.brighter(0.2f);
             const int color = engine_.channelColor(channel_);
-            if (color != 0)
+            if (! blinkBypass && color != 0)
                 fill = fill.interpolatedWith(x32Hue(color), 0.28f);
             button.setColour(juce::TextButton::buttonColourId, fill);
             button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
@@ -881,8 +909,8 @@ public:
 
         if (engine_.isChannelSelected(channel_))
         {
-            graphics.setColour(theme::text.withAlpha(0.85f));
-            graphics.drawRect(getLocalBounds(), 1);
+            graphics.setColour(theme::green);
+            graphics.drawRect(getLocalBounds().reduced(1), 2);
         }
 
         graphics.setColour(juce::Colour(0xff8b95a8));
@@ -909,18 +937,22 @@ public:
     {
         if (event.mods.isPopupMenu())
         {
-            showChannelMenu(engine_, *this, channel_, [this](int) { editName(); });
+            if (! engine_.isChannelSelected(channel_))
+                engine_.selectChannel(channel_, false);
+            showMakeGroupDialog(engine_);
             return;
         }
-        if (event.mods.isShiftDown())
+        const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
+        const bool extend = event.mods.isShiftDown() && ! toggle;
+        if (toggle || extend)
         {
-            engine_.selectChannel(channel_, true);
+            engine_.selectChannel(channel_, extend, toggle);
             return;
         }
         if (event.eventComponent == this && meterArea_.contains(event.getPosition()) && engine_.clipFor(channel_))
             engine_.requestClipClear(channel_);
         else if (event.eventComponent == this)
-            engine_.selectChannel(channel_, false);
+            engine_.selectChannel(channel_, false, false);
     }
 
 private:
@@ -934,12 +966,18 @@ private:
         bool keyPressed(const juce::KeyPress& key, juce::Component*) override
         {
             const auto mods = key.getModifiers();
-            if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
-                return false;
-            if (key.getKeyCode() != juce::KeyPress::tabKey)
+            const auto code = key.getKeyCode();
+            const auto nameKey = matchNameKey(code == juce::KeyPress::tabKey,
+                                               false,
+                                               false,
+                                               mods.isShiftDown(),
+                                               mods.isCommandDown(),
+                                               mods.isAltDown(),
+                                               mods.isCtrlDown());
+            if (nameKey != NameKey::next && nameKey != NameKey::previous)
                 return false;
 
-            const int direction = mods.isShiftDown() ? -1 : 1;
+            const int direction = nameKey == NameKey::previous ? -1 : 1;
             const int channel = row.channel_;
             juce::Component::SafePointer<Row> safe(&row);
             juce::MessageManager::callAsync([safe, channel, direction]
@@ -1030,14 +1068,14 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
     pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
     addAndMakeVisible(nullButton_);
     nullButton_.setMouseClickGrabsKeyboardFocus(false);
-    nullButton_.setTooltip("Bypass every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. The recorded WAV is always the raw input.");
+    nullButton_.setTooltip("ALL PLUGIN BYPASS. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
     nullButton_.onClick = [this]
     {
         engine_.setBypassAll(! engine_.bypassAll());
         refresh();
     };
     addAndMakeVisible(viewport_);
-    empty_.setText("No input channels are open. Open Audio setup and enable the inputs.", juce::dontSendNotification);
+    empty_.setText("This interface has no input channels.", juce::dontSendNotification);
     empty_.setJustificationType(juce::Justification::centred);
     empty_.setColour(juce::Label::textColourId, theme::dim);
     content_.addAndMakeVisible(empty_);
@@ -1142,6 +1180,24 @@ void PluginPage::showPluginList(int channel, int slot)
     });
 }
 
+void PluginPage::refreshChannel(int channel)
+{
+    const int channels = std::max(0, engine_.visibleChannels());
+    if (channels != channels_ || engine_.displayRevision() != revision_)
+        rebuild();
+
+    for (auto& row : rows_)
+        if (row != nullptr && row->isChannel(channel))
+            row->refresh();
+
+    const int group = engine_.channelGroup(channel);
+    if (group < 0)
+        return;
+    for (auto& header : headers_)
+        if (header != nullptr && header->groupId() == group)
+            header->refresh();
+}
+
 void PluginPage::refresh()
 {
     const int channels = std::max(0, engine_.visibleChannels());
@@ -1150,8 +1206,9 @@ void PluginPage::refresh()
 
     empty_.setVisible(channels_ == 0);
     const bool bypass = engine_.bypassAll();
-    nullButton_.setButtonText(bypass ? "Bypass all" : "Null test");
-    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xff8a6a22) : theme::button);
+    nullButton_.setButtonText("ALL PLUGIN BYPASS");
+    nullButton_.setToggleState(bypass, juce::dontSendNotification);
+    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xffd48a20) : theme::button);
     nullButton_.setColour(juce::TextButton::textColourOffId, bypass ? juce::Colours::white : theme::text);
     for (auto& row : rows_)
         row->refresh();
@@ -1163,7 +1220,7 @@ void PluginPage::resized()
 {
     auto bounds = getLocalBounds();
     auto bar = bounds.removeFromTop(32);
-    nullButton_.setBounds(bar.removeFromLeft(128).reduced(0, 4));
+    nullButton_.setBounds(bar.removeFromLeft(176).reduced(0, 4));
     viewport_.setBounds(bounds);
     int height = 0;
     for (int rowHeight : heights_)

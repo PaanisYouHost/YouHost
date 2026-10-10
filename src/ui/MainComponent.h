@@ -19,6 +19,7 @@ namespace youhost
 {
 
 class BitDepthSlot;
+class RecordLockButton;
 
 class MainComponent : public juce::Component,
                       private juce::Timer,
@@ -28,6 +29,8 @@ public:
     MainComponent(AudioEngine& engine, AppSettings& settings);
     ~MainComponent() override;
 
+    void requestApplicationQuit(std::function<void()> quit);
+
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void parentHierarchyChanged() override;
@@ -36,10 +39,11 @@ private:
     void timerCallback() override;
     bool handleKey(const juce::KeyPress& key, juce::Component* originating);
     void refresh();
+    void publishMeters(bool repaintLevels);
+    void onPluginSlot(int channel);
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
     void hideDeviceTestTone();
-    void mirrorSetupToggles();
     void toggleSetup();
     void showPage(int page);
     void toggleScanner();
@@ -56,11 +60,12 @@ private:
     void openRecent(int index);
     void showFileMenu();
     void showHelp();
-    void showGroupsMenu();
     void layoutMeters();
     void openStartup();
     void dismissStartup();
-    void promptForSession(const juce::String& title, std::function<void(bool placed)> then);
+    void applyGlobalListen(ChannelListen mode);
+    void promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean = false);
+    void runAfterUnsavedCheck(std::function<void()> action);
     void newSession();
     void requestRecord();
     void startRecordingIfReady();
@@ -109,6 +114,7 @@ private:
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
+    juce::TextButton saveAsButton_ { "Save As" };
     juce::TextButton fileButton_ { "File" };
     juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
     juce::TextButton cpuButton_ { "4 CPU" };
@@ -118,6 +124,14 @@ private:
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
+    juce::TextButton globalRecButton_ { "ALL REC" };
+    juce::TextButton globalInputButton_ { "ALL INPUT" };
+    juce::TextButton globalOffButton_ { "ALL OFF" };
+    std::unique_ptr<RecordLockButton> recordLock_;
+    std::function<void(bool)> afterCopy_;
+    bool copyWasRunning_ = false;
+    bool copyFailedSeen_ = false;
+    bool lockLayout_ = false;
     juce::Label latencyLabel_;
     juce::Viewport meterViewport_;
     MeterScaleRail leftScale_;
@@ -126,6 +140,7 @@ private:
     std::unique_ptr<BitDepthSlot> bitDepthSlot_;
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
+    std::unique_ptr<juce::DocumentWindow> helpWindow_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;
@@ -133,7 +148,13 @@ private:
     juce::ApplicationCommandManager commandManager_;
     std::unique_ptr<juce::DocumentWindow> startupWindow_;
     std::unique_ptr<juce::DocumentWindow> placeWindow_;
+    std::unique_ptr<juce::DocumentWindow> copyWindow_;
+    double copyProgressValue_ = 0.0;
+    void chooseSaveAsDestination(std::function<void(bool saved)> then = {});
+    void syncCopyProgress();
 
+    bool heavyPaintSuspended_ = false;
+    bool heavyPaintHeld_ = false;
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     int page_ = 1;
@@ -150,6 +171,9 @@ private:
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> bannerArea_;
     juce::Rectangle<int> deviceLostArea_;
+    juce::Rectangle<int> recordLockArea_;
+    juce::Rectangle<int> recordArmArea_;
+    bool armHintVisible_ = false;
     int timelineHeight_ = 0;
     juce::Rectangle<int> hintArea_;
     juce::Rectangle<int> bridgeArea_;

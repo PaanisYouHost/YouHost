@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/Recorder.h"
+#include "engine/SessionFormat.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
@@ -37,6 +38,11 @@ public:
     void verticalZoomOut();
     void setWaveformGain(float gain);
     void setWaveformGainHandler(std::function<void(float)> handler);
+    void setSelectedChannel(std::function<int()> channel);
+    void scrollToChannel(int channel);
+    void focusChannelJump();
+    void setViewState(const SessionTimelineState& state);
+    SessionTimelineState viewState() const;
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -53,6 +59,8 @@ private:
     void nudgeWaveformGain(int direction);
     std::int64_t zoomAnchorSample() const;
     void verticalZoomBy(int delta);
+    int zoomAnchorLane() const;
+    void rememberLanes(const std::vector<TimelineLaneView>& lanes);
     void syncScroll();
     juce::Rectangle<float> waveformArea() const;
     std::int64_t sampleAt(float x) const;
@@ -70,7 +78,10 @@ private:
     int verticalStep_ = 0;
     int laneScroll_ = 0;
     std::int64_t viewStart_ = 0;
+    bool holdTimeScroll_ = false;
+    bool pendingView_ = false;
     bool updatingScroll_ = false;
+    SessionTimelineState pendingViewState_ {};
     bool draggingHeight_ = false;
     int dragStartY_ = 0;
     int dragStartHeight_ = 0;
@@ -80,14 +91,17 @@ private:
     juce::TextButton zoomInButton_ { "+" };
     juce::TextButton verticalOutButton_ { "v-" };
     juce::TextButton verticalInButton_ { "v+" };
-    juce::TextButton fitButton_ { "Fit" };
+    juce::TextButton fitButton_ { "FIT" };
+    juce::TextEditor gotoBox_;
     juce::TextButton waveOutButton_ { "W-" };
     juce::TextButton waveInButton_ { "W+" };
     float waveformGain_ = 1.0f;
     float laneWheel_ = 0.0f;
-    float timeWheel_ = 0.0f;
+    double timeWheel_ = 0.0;
     float gainWheel_ = 0.0f;
     std::function<void(float)> onWaveformGain_;
+    std::function<int()> selectedChannel_;
+    std::vector<std::vector<int>> laneMembers_;
 };
 
 } // namespace youhost
