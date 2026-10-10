@@ -140,6 +140,21 @@ inline int adjacentVisibleChannel(const StripItem* strips, int count, int curren
     return -1;
 }
 
+// Channel strips currently drawn. Group headers and folded members are omitted.
+inline int shownChannelNumbers(const StripItem* strips, int count, int* out, int capacity) noexcept
+{
+    if (strips == nullptr || count <= 0 || out == nullptr || capacity <= 0)
+        return 0;
+    int written = 0;
+    for (int index = 0; index < count && written < capacity; ++index)
+    {
+        if (strips[index].kind != StripKind::channel || strips[index].channel < 0)
+            continue;
+        out[written++] = strips[index].channel;
+    }
+    return written;
+}
+
 // Fixed fold mark for a group bar. Collapsed is ▸, open is ▾, then the channel count.
 inline std::string groupFoldLabel(bool collapsed, int channelCount)
 {
