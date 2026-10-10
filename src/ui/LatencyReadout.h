@@ -1,9 +1,11 @@
 #pragma once
 
+#include "engine/LatencyCompensation.h"
 #include "engine/LatencyMath.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <array>
 #include <functional>
 
 namespace youhost
@@ -16,34 +18,21 @@ public:
 
     void setNumbers(const LatencyNumbers& numbers);
     void setAlignGroup(int perGroup);
+    void setGroupLines(const GroupLatencyLine* lines, int count);
     void setResetHandler(std::function<void()> handler);
-    void setGraphHandler(std::function<void()> handler);
     void setAlignHandler(std::function<void(int perGroup)> handler);
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
 
 private:
-    struct CardLayout
-    {
-        juce::Rectangle<float> hero;
-        juce::Rectangle<float> bufferRow;
-        juce::Rectangle<float> inputRow;
-        juce::Rectangle<float> outputRow;
-        juce::Rectangle<float> compensationRow;
-        juce::Rectangle<float> dropoutRow;
-        juce::Rectangle<float> modeRow;
-        juce::Rectangle<float> note;
-    };
-
-    static CardLayout layoutCard(juce::Rectangle<float> bounds);
-
     LatencyNumbers numbers_;
     int alignGroup_ = 0;
+    int groupCount_ = 0;
+    std::array<GroupLatencyLine, kMaxDisplayGroups> groupLines_ {};
     std::function<void(int)> onAlign_;
-    juce::TextButton allButton_ { "All aligned" };
+    juce::TextButton allButton_ { "Global" };
     juce::TextButton groupButton_ { "Per group" };
-    juce::TextButton graphButton_ { "Timeline" };
     juce::TextButton resetButton_ { "Reset" };
 };
 

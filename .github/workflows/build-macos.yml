@@ -69,15 +69,38 @@ jobs:
         run: |
           set -euo pipefail
           APP=$(find build -type d -name 'YouHost.app' -print -quit)
-          ditto -c -k --keepParent "${APP}" YouHost-macOS-universal.zip
+          if [ -z "${APP}" ]; then
+            echo "YouHost.app was not produced"
+            exit 1
+          fi
+          rm -rf pack
+          mkdir -p pack
+          ditto "${APP}" "pack/YouHost.app"
+          cp "INSTALL.md" "pack/ASENNUSOHJE - INSTALL.txt"
+          rm -f YouHost-macOS-universal.zip
+          # --keepParent puts YouHost.app at the zip root. zip -g adds the notes beside it.
+          ditto -c -k --keepParent "pack/YouHost.app" YouHost-macOS-universal.zip
+          (cd pack && zip -g ../YouHost-macOS-universal.zip "ASENNUSOHJE - INSTALL.txt")
           unzip -t YouHost-macOS-universal.zip
+          python3 - <<'PY'
+          import zipfile
+          names = zipfile.ZipFile("YouHost-macOS-universal.zip").namelist()
+          notes = [n for n in names if n.rstrip("/") == "ASENNUSOHJE - INSTALL.txt"]
+          if notes != ["ASENNUSOHJE - INSTALL.txt"]:
+              raise SystemExit("install notes are not beside YouHost.app: " + repr(notes))
+          if not any(n.startswith("YouHost.app/") for n in names):
+              raise SystemExit("YouHost.app is missing from the zip")
+          if any(n.startswith("YouHost.app/") and "ASENNUSOHJE" in n for n in names):
+              raise SystemExit("install notes were packed inside the app")
+          print("zip layout ok")
+          PY
           ls -lh YouHost-macOS-universal.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: YouHost-macOS-universal
-          path: YouHost-macOS-universal.zip
+          path: pack
           if-no-files-found: error
 
       - name: Attach zip to GitHub Release

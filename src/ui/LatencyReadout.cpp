@@ -1,4 +1,5 @@
 #include "LatencyReadout.h"
+#include "engine/LatencyCard.h"
 #include "Theme.h"
 
 namespace youhost
@@ -11,21 +12,12 @@ juce::String millisecondsText(int samples, double sampleRate)
     return juce::String(samplesToMilliseconds(samples, sampleRate), 2) + " ms";
 }
 
-juce::String formulaNote(RoundTripFormula formula)
+juce::Rectangle<float> cardBlock(const LatencyBlock& block, int textWidth)
 {
-    switch (formula)
-    {
-        case RoundTripFormula::coreAudioSubtractOneBuffer:
-            return "Round trip = input + output - one buffer + compensation. "
-                   "JUCE 9 CoreAudio includes the buffer in both input and output latency.";
-        case RoundTripFormula::alsaAddOneBuffer:
-            return "Round trip = input + output + one buffer + compensation. "
-                   "JUCE ALSA reports latency with one period already removed.";
-        case RoundTripFormula::driverSum:
-            break;
-    }
-
-    return "Round trip = driver input + driver output + compensation.";
+    return { static_cast<float>(kLatencyPadX),
+             static_cast<float>(block.top),
+             static_cast<float>(textWidth),
+             static_cast<float>(block.height) };
 }
 
 void drawStat(juce::Graphics& graphics,
@@ -49,42 +41,16 @@ void drawStat(juce::Graphics& graphics,
 
 } // namespace
 
-LatencyReadout::CardLayout LatencyReadout::layoutCard(juce::Rectangle<float> bounds)
-{
-    auto inner = bounds.reduced(18.0f, 14.0f);
-    CardLayout layout;
-    layout.note = inner.removeFromBottom(36.0f);
-    inner.removeFromBottom(4.0f);
-    layout.modeRow = inner.removeFromBottom(26.0f);
-    inner.removeFromBottom(6.0f);
-
-    const bool wide = inner.getWidth() > 640.0f;
-    layout.hero = wide ? inner.removeFromLeft(inner.getWidth() * 0.40f) : inner.removeFromTop(inner.getHeight() * 0.46f);
-    if (wide)
-        inner.removeFromLeft(16.0f);
-    else
-        inner.removeFromTop(6.0f);
-
-    layout.bufferRow = inner.removeFromTop(26.0f);
-    layout.inputRow = inner.removeFromTop(26.0f);
-    layout.outputRow = inner.removeFromTop(26.0f);
-    layout.compensationRow = inner.removeFromTop(26.0f);
-    layout.dropoutRow = inner.removeFromTop(26.0f);
-    return layout;
-}
-
 LatencyReadout::LatencyReadout()
 {
     setOpaque(false);
     addAndMakeVisible(allButton_);
     addAndMakeVisible(groupButton_);
-    addAndMakeVisible(graphButton_);
     addAndMakeVisible(resetButton_);
-    allButton_.setTooltip("Line every included channel up on the slowest plugin. A stereo pair stays together.");
-    groupButton_.setTooltip("Each group lines up on its own slowest plugin. Ungrouped channels are not delayed. A pair split across groups can comb.");
-    graphButton_.setTooltip("Open the dropout timeline (3 or D).");
+    allButton_.setTooltip("Global. All channels aligned: every included channel lines up on the slowest plugin.");
+    groupButton_.setTooltip("Per group. Only channels inside a group line up on that group's slowest plugin. Ungrouped channels get no extra delay.");
     resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
-    for (auto* button : { &allButton_, &groupButton_, &graphButton_, &resetButton_ })
+    for (auto* button : { &allButton_, &groupButton_, &resetButton_ })
         button->setMouseClickGrabsKeyboardFocus(false);
     allButton_.onClick = [this]
     {
@@ -102,6 +68,18 @@ LatencyReadout::LatencyReadout()
 void LatencyReadout::setNumbers(const LatencyNumbers& numbers)
 {
     numbers_ = numbers;
+    repaint();
+}
+
+void LatencyReadout::setGroupLines(const GroupLatencyLine* lines, int count)
+{
+    if (count < 0)
+        count = 0;
+    if (count > kMaxDisplayGroups)
+        count = kMaxDisplayGroups;
+    groupCount_ = count;
+    for (int index = 0; index < count; ++index)
+        groupLines_[static_cast<std::size_t>(index)] = lines != nullptr ? lines[index] : GroupLatencyLine {};
     repaint();
 }
 
@@ -125,19 +103,13 @@ void LatencyReadout::setResetHandler(std::function<void()> handler)
     resetButton_.onClick = std::move(handler);
 }
 
-void LatencyReadout::setGraphHandler(std::function<void()> handler)
-{
-    graphButton_.onClick = std::move(handler);
-}
-
 void LatencyReadout::resized()
 {
-    const auto layout = layoutCard(getLocalBounds().toFloat());
-    auto row = layout.dropoutRow.toNearestInt();
+    const bool perGroup = alignGroup_ == 1;
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()), longestLatencyNoteChars(), perGroup ? groupCount_ : 0, perGroup);
+    auto row = cardBlock(layout.dropouts, layout.textWidth).toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
-    row.removeFromRight(6);
-    graphButton_.setBounds(row.removeFromRight(86).withSizeKeepingCentre(86, 22));
-    auto modes = layout.modeRow.toNearestInt();
+    auto modes = cardBlock(layout.modes, layout.textWidth).toNearestInt();
     allButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
     modes.removeFromLeft(6);
     groupButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
@@ -151,9 +123,10 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.setColour(theme::panelEdge);
     graphics.drawRoundedRectangle(bounds.reduced(0.5f), 12.0f, 1.0f);
 
-    const auto layout = layoutCard(bounds);
-    auto hero = layout.hero;
-    const auto noteArea = layout.note;
+    const bool perGroup = alignGroup_ == 1;
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()), longestLatencyNoteChars(), perGroup ? groupCount_ : 0, perGroup);
+    auto hero = cardBlock(layout.hero, layout.textWidth);
+    const auto noteArea = cardBlock(layout.note, layout.textWidth);
 
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -177,13 +150,13 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.drawText("milliseconds", hero, juce::Justification::topLeft, false);
 
     const double rate = numbers_.sampleRate;
-    drawStat(graphics, layout.bufferRow, "Buffer", numbers_.bufferSamples, rate, theme::text);
-    drawStat(graphics, layout.inputRow, "Input", numbers_.inputSamples, rate, theme::text);
-    drawStat(graphics, layout.outputRow, "Output", numbers_.outputSamples, rate, theme::text);
-    drawStat(graphics, layout.compensationRow, "Compensation", numbers_.compensationSamples, rate, theme::dim);
+    drawStat(graphics, cardBlock(layout.buffer, layout.textWidth), "Buffer", numbers_.bufferSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.input, layout.textWidth), "Input", numbers_.inputSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.output, layout.textWidth), "Output", numbers_.outputSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.compensation, layout.textWidth), "Compensation", numbers_.compensationSamples, rate, theme::dim);
 
-    auto dropoutRow = layout.dropoutRow;
-    dropoutRow.removeFromRight(156.0f);
+    auto dropoutRow = cardBlock(layout.dropouts, layout.textWidth);
+    dropoutRow.removeFromRight(80.0f);
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
     graphics.drawText("Dropouts", dropoutRow.removeFromLeft(132.0f), juce::Justification::centredLeft, false);
@@ -192,15 +165,39 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
     graphics.drawText(juce::String(dropouts), dropoutRow, juce::Justification::centredRight, false);
 
+    if (alignGroup_ == 1)
+    {
+        auto list = cardBlock(layout.groups, layout.textWidth);
+        graphics.setColour(theme::dim);
+        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
+        for (int index = 0; index < groupCount_ && index < layout.groupRows; ++index)
+        {
+            auto row = list.removeFromTop(static_cast<float>(kLatencyGroupRowH));
+            const auto& line = groupLines_[static_cast<std::size_t>(index)];
+            const auto title = line.name[0] != '\0' ? juce::String::fromUTF8(line.name)
+                                                    : "Group " + juce::String(line.group + 1);
+            graphics.setColour(theme::text);
+            graphics.drawText(title, row.removeFromLeft(180.0f), juce::Justification::centredLeft, true);
+            graphics.setColour(theme::dim);
+            const auto detail = juce::String(line.members) + " ch   " + juce::String(line.alignSamples) + " smp";
+            graphics.drawText(detail, row, juce::Justification::centredRight, true);
+        }
+        if (layout.groups.height >= kLatencyGroupRowH)
+        {
+            auto ungrouped = list.removeFromTop(static_cast<float>(kLatencyGroupRowH));
+            graphics.setColour(theme::dim);
+            graphics.drawText("Ungrouped", ungrouped.removeFromLeft(180.0f), juce::Justification::centredLeft, true);
+            graphics.drawText("0 smp", ungrouped, juce::Justification::centredRight, true);
+        }
+    }
+
     graphics.setColour(theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-    const juce::String modeNote = alignGroup_ == 1
-                                      ? "Per group: each group uses its own slowest plugin. Ungrouped channels are not delayed, so a split pair can comb."
-                                      : "All aligned: every included channel ends on the same sample, including a dry channel next to a plugin.";
-    graphics.drawFittedText(modeNote + "  " + formulaNote(numbers_.formula),
+    const auto note = latencyNoteText(alignGroup_ == 1, numbers_.formula);
+    graphics.drawFittedText(juce::String(note),
                             noteArea.toNearestInt(),
                             juce::Justification::topLeft,
-                            3);
+                            layout.noteLines);
 }
 
 } // namespace youhost

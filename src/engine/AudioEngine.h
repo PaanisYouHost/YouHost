@@ -11,7 +11,10 @@
 #include "X32Colours.h"
 #include "PluginCatalogue.h"
 #include "PluginRack.h"
+#include "RecordStart.h"
 #include "Recorder.h"
+#include "SessionChannels.h"
+#include "SessionDocument.h"
 #include "TimelineLanes.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -27,6 +30,9 @@ namespace youhost
 {
 
 class AppSettings;
+class SessionDisk;
+
+juce::String suggestedNewSessionName(const juce::File& parent);
 
 // Owns the device, the realtime callback, and the in-process plugin rack.
 // Record rings are still later. Order in the callback: meters on the raw input,
@@ -51,8 +57,31 @@ public:
     bool isRunning() const noexcept { return started_; }
 
     void pollDeviceStats();
+    void sampleLiveCpu();
+    unsigned deviceMenuRevision() const noexcept { return deviceMenuRevision_; }
+    bool deviceSetupLocked() const noexcept { return setupLocked_; }
+    bool deviceIsOpen() const noexcept { return deviceOpen_.load(std::memory_order_relaxed); }
+    juce::String missingCardStatus() const { return missingCardStatus_; }
     LatencyNumbers latencyNumbers() const;
     int visibleChannels() const;
+    int sessionChannelCount() const noexcept { return sessionChannelCount_; }
+    bool revealUnsupportedChannels() const noexcept { return revealUnsupported_; }
+    void setRevealUnsupportedChannels(bool reveal);
+    juce::String hiddenChannelNote() const;
+    SessionChannelView channelView() const;
+    bool offlineTemplate() const noexcept { return offlineTemplate_; }
+    void setOfflineTemplate(bool offline);
+    double preferredSampleRate() const noexcept { return preferredRate_; }
+    int preferredBuffer() const noexcept { return preferredBuffer_; }
+    void setPreferredSampleRate(double rate);
+    void setPreferredBuffer(int samples);
+    bool isRecording() const;
+    bool recordLockArmed() const noexcept { return recordLockArmed_; }
+    bool recordingLocked() const;
+    void setRecordLockArmed(bool armed);
+    bool selectionListenNeedsConfirm(ChannelListen mode) const;
+    void setSelectionListen(ChannelListen mode, bool confirmed = false);
+    juce::String takeSessionRateNotice();
     int inputCount() const;
     int outputCount() const;
     juce::String deviceName() const { return deviceName_; }
@@ -86,16 +115,20 @@ public:
     bool isRecordArmed(int channel) const;
     ChannelListen channelListen(int channel) const;
     void setChannelListen(int channel, ChannelListen mode);
+    void flushListenEdits();
     void cycleChannelListen(int channel);
     float outputDb(int channel) const;
     void setOutputDb(int channel, float db);
     void setBypassAll(bool bypass);
     bool bypassAll() const;
+    bool isSessionDirty() const noexcept { return sessionDirty_; }
+    int selectedChannel() const;
     float waveformGain() const noexcept { return waveformGain_; }
     void setWaveformGain(float gain);
     void nudgeWaveformGain(int direction);
     int alignGroup() const noexcept { return alignGroup_; }
     void setAlignGroup(int perGroup);
+    int copyGroupLatency(GroupLatencyLine* out, int capacity) const;
     CpuMeters cpuMeters() const;
     juce::String channelPdcText(int channel) const;
     void setChannelName(int channel, const juce::String& name);
@@ -120,20 +153,28 @@ public:
     int displayRevision() const noexcept { return displayRevision_; }
     std::vector<StripItem> displayStrips(int channelCount) const;
 
-    void selectChannel(int channel, bool extend);
+    void selectChannel(int channel, bool extend, bool toggle = false);
+    void selectAllVisibleChannels();
+    void setSelectionHandler(std::function<void(int)> handler);
     bool isChannelSelected(int channel) const;
     std::vector<int> selectedChannels() const;
     void toggleRecordReady();
     bool isRecordReady() const noexcept { return recordReady_; }
-    void transportRecord();
-    void transportStop();
-    void transportPlay();
+    juce::String transportRecord();
+    juce::String transportStop();
+    juce::String transportPlay();
+    juce::String pressTransport(TransportPress press);
+    void finishTransport();
+    std::vector<ListedDevice> connectedDevices();
+    void openNamedDevice(const juce::String& name);
+    void noteUserChoseDevice(const juce::String& name);
     void transportLocate(std::int64_t sample);
     void transportJump(int direction);
     void transportNudge(double seconds);
     TransportView transportView() const;
     void startNewSession();
-    bool placeNewSession(const juce::File& folder, bool internalDisk);
+    void resetToCleanSession();
+    bool placeNewSession(const juce::File& folder, bool internalDisk, bool clean = false);
     bool createInternalSession();
     juce::String sessionRecordProblem() const;
     bool sessionIsOnInternalDisk() const noexcept { return sessionOnInternalDisk_; }
@@ -151,13 +192,25 @@ public:
     void setSessionPage(int page);
     int sessionPage() const noexcept { return sessionPage_; }
     void setPageRestoreHandler(std::function<void(int)> handler);
+    void setTimelineStateProvider(std::function<SessionTimelineState()> provider);
+    void setTimelineStateHandler(std::function<void(const SessionTimelineState&)> handler);
     bool hasSession() const noexcept { return sessionFolder_.getFullPathName().isNotEmpty(); }
     juce::String sessionName() const { return sessionFolder_.getFileName(); }
     juce::File suggestedSessionFolder() const;
     bool saveSession();
     bool saveSessionToFolder(const juce::File& folder);
     bool saveSessionAs(const juce::File& folder);
+    bool beginSessionCopy(const juce::File& folder);
+    void setCopyFinishedHandler(std::function<void(bool ok)> handler);
+    bool hasCopyFinishedHandler() const noexcept { return static_cast<bool>(copyFinishedHandler_); }
+    void notifyCopyFinished(bool ok);
+    float sessionCopyProgress() const;
+    juce::String backupStatusText() const;
+    juce::String takeCopyFailure();
     bool loadSessionFrom(const juce::File& fileOrFolder);
+    bool isLoadingPlugins() const;
+    juce::String pluginLoadProgress() const;
+    void setPluginSlotHandler(std::function<void(int channel)> handler);
     bool importRecordingFolder(const juce::File& folder);
     void clearTimeline();
     juce::StringArray recentSessions() const;
@@ -186,8 +239,14 @@ private:
     void audioDeviceStopped() override;
     void audioDeviceError(const juce::String& errorMessage) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    void applyPreferredTiming();
 
     void publishConfig(juce::AudioIODevice& device);
+    void publishSessionChannelLimit();
+    void reconcileStartupDevice();
+    RecordAttempt makeRecordAttempt();
+    void logTransport(const juce::String& line);
+    SessionChannelView currentChannelView() const;
     void saveSetupIfAllowed();
     void syncRecorderFolder();
     void rememberSessionParent(const juce::File& sessionFolder);
@@ -199,6 +258,8 @@ private:
     void removeOverloadListener();
     const AudioThreadConfig& currentConfig() const;
     void captureDisplay(SessionData& data) const;
+    SessionData captureSessionData();
+    void maybeBackupSession();
     void applyDisplay(const SessionData& data);
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
@@ -245,6 +306,16 @@ private:
     bool sessionPeak_ = false;
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
     int wavBitDepth_ = kDefaultWavBitDepth;
+    bool revealUnsupported_ = false;
+    bool offlineTemplate_ = false;
+    bool recordLockArmed_ = false;
+    double preferredRate_ = 48000.0;
+    int preferredBuffer_ = kNewSessionBufferSamples;
+    bool applyingTiming_ = false;
+    juce::String sessionRateNotice_;
+    int sessionChannelCount_ = kMaxChannels;
+    std::atomic<int> sessionVisible_ { kMaxChannels };
+    std::atomic<int> sessionAudioLimit_ { 0 };
     int sessionPage_ = 1;
     bool recordReady_ = false;
     bool sessionOnInternalDisk_ = false;
@@ -255,6 +326,11 @@ private:
     juce::uint32 sessionDirtyAtMs_ = 0;
     std::function<void(bool, int)> meterRestoreHandler_;
     std::function<void(int)> pageRestoreHandler_;
+    std::function<void(int)> pluginSlotHandler_;
+    std::function<SessionTimelineState()> timelineProvider_;
+    std::function<void(const SessionTimelineState&)> timelineHandler_;
+    SessionNode preservedSession_ {};
+    bool hasPreservedSession_ = false;
     std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
     std::array<int, kMaxChannels> channelColor_ {};
@@ -267,6 +343,7 @@ private:
     std::array<SessionGroup, kMaxDisplayGroups> groups_ {};
     std::vector<int> selection_;
     int selectionAnchor_ = 0;
+    std::function<void(int)> selectionHandler_;
     int displayRevision_ = 0;
 
     juce::String deviceName_ { "No device" };
@@ -277,12 +354,23 @@ private:
 
     std::atomic<bool> deviceStarting_ { false };
     std::atomic<bool> deviceDown_ { false };
+    bool setupLocked_ = false;
+    bool inventoryForce_ = false;
+    bool listenFlush_ = false;
+    bool missingCard_ = false;
+    int savedCardChannels_ = 0;
+    juce::String missingCardStatus_;
+    unsigned deviceMenuRevision_ = 0;
+    std::string deviceInventorySignature_;
     std::atomic<bool> closingDevice_ { false };
     bool deviceLostBanner_ = false;
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool awaitingSavedDevice_ = false;
-    bool wideningOutputs_ = false;
+    bool forcingChannels_ = false;
+    juce::String lastFullOpenName_;
+    int lastFullOpenInputs_ = -1;
+    int lastFullOpenOutputs_ = -1;
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;
@@ -291,6 +379,8 @@ private:
     int preparedBuffer_ = 0;
     juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;
     juce::String wantedName_;
+    std::vector<ListedDevice> deviceInventory_;
+    juce::uint32 deviceInventoryMs_ = 0;
     juce::String startupFallbackName_;
     juce::String startupDeviceNote_;
     juce::String rateWarning_;
@@ -298,6 +388,12 @@ private:
     juce::BigInteger lastOutputMask_;
     CrashJournal journal_;
     std::unique_ptr<juce::Thread> stallThread_;
+    std::unique_ptr<SessionDisk> sessionDisk_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
+    juce::uint32 lastBackupMs_ = 0;
+    bool copyFailed_ = false;
+    juce::String copyFailure_;
+    std::function<void(bool)> copyFinishedHandler_;
 };
 
 } // namespace youhost

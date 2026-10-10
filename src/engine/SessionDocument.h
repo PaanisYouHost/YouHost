@@ -3,6 +3,7 @@
 #include "ChannelListen.h"
 #include "DisplayLayout.h"
 #include "HostLimits.h"
+#include "SessionFormat.h"
 #include "TakePlan.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -62,10 +63,19 @@ struct SessionData
     float waveformGain = 1.0f;
     int alignGroup = 0;
     double sampleRate = 0.0;
+    int bufferSamples = 0;
+    int cardChannels = 0;
+    bool explicitOffline = false;
+    juce::String inputDevice;
+    juce::String outputDevice;
+    int channelCount = kMaxChannels;
+    SessionTimelineState timeline {};
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};
     std::array<SessionGroup, kMaxDisplayGroups> groups {};
     std::vector<SessionTake> takes;
+    SessionNode preserved {};
+    bool hasPreserved = false;
 };
 
 // Writes session.youhost. The caller creates the sibling audio/ folder.

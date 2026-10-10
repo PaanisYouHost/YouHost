@@ -41,6 +41,50 @@ juce::String encodePeaks(const std::vector<WavePeak>& peaks)
     return block.toBase64Encoding();
 }
 
+SessionNode sessionNodeFromXml(const juce::XmlElement& xml)
+{
+    SessionNode node;
+    if (xml.isTextElement())
+    {
+        node.text = xml.getText().toStdString();
+        return node;
+    }
+
+    node.name = xml.getTagName().toStdString();
+    const int count = xml.getNumAttributes();
+    node.attributes.reserve(static_cast<std::size_t>(std::max(0, count)));
+    for (int index = 0; index < count; ++index)
+        node.attributes.emplace_back(xml.getAttributeName(index).toStdString(), xml.getAttributeValue(index).toStdString());
+
+    for (auto* child = xml.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        node.children.push_back(sessionNodeFromXml(*child));
+    return node;
+}
+
+std::unique_ptr<juce::XmlElement> xmlFromSessionNode(const SessionNode& node)
+{
+    if (node.name.empty())
+        return nullptr;
+
+    auto element = std::make_unique<juce::XmlElement>(juce::String::fromUTF8(node.name.c_str()));
+    for (const auto& attribute : node.attributes)
+        element->setAttribute(juce::String::fromUTF8(attribute.first.c_str()), juce::String::fromUTF8(attribute.second.c_str()));
+    if (! node.text.empty())
+        element->addTextElement(juce::String::fromUTF8(node.text.c_str()));
+    for (const auto& child : node.children)
+    {
+        if (child.name.empty())
+        {
+            if (! child.text.empty())
+                element->addTextElement(juce::String::fromUTF8(child.text.c_str()));
+            continue;
+        }
+        if (auto childXml = xmlFromSessionNode(child))
+            element->addChildElement(childXml.release());
+    }
+    return element;
+}
+
 std::vector<WavePeak> decodePeaks(const juce::String& encoded)
 {
     std::vector<WavePeak> peaks;
@@ -69,13 +113,23 @@ std::vector<WavePeak> decodePeaks(const juce::String& encoded)
 bool writeSessionFile(const juce::File& file, const SessionData& data)
 {
     juce::XmlElement root("YouHostSession");
-    root.setAttribute("version", 5);
+    root.setAttribute("version", kSessionFormatVersion);
     root.setAttribute("bits", normaliseWavBitDepth(data.wavBitDepth));
     root.setAttribute("page", data.page == 2 ? 2 : 1);
     root.setAttribute("wave", data.waveformGain);
     root.setAttribute("align", data.alignGroup == 1 ? "group" : "all");
     if (data.sampleRate > 0.0)
         root.setAttribute("rate", data.sampleRate);
+    if (data.bufferSamples >= 16)
+        root.setAttribute("buffer", data.bufferSamples);
+    if (data.cardChannels > 0)
+        root.setAttribute("cardChannels", data.cardChannels);
+    if (data.inputDevice.isNotEmpty())
+        root.setAttribute("input", data.inputDevice);
+    if (data.outputDevice.isNotEmpty())
+        root.setAttribute("output", data.outputDevice);
+    if (data.explicitOffline)
+        root.setAttribute("offline", 1);
 
     auto* meters = root.createNewChildElement("Meters");
     meters->setAttribute("peak", data.peakMeter);
@@ -143,6 +197,13 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         element->setAttribute("collapsed", source.collapsed);
     }
 
+    auto* timeline = root.createNewChildElement("Timeline");
+    timeline->setAttribute("zoom", std::max(0, data.timeline.zoom));
+    timeline->setAttribute("vertical", std::max(0, data.timeline.vertical));
+    timeline->setAttribute("scroll", juce::String(std::max<std::int64_t>(0, data.timeline.scroll)));
+    timeline->setAttribute("lanes", std::max(0, data.timeline.laneScroll));
+    timeline->setAttribute("height", std::max(0, data.timeline.height));
+
     for (const auto& take : data.takes)
     {
         auto* element = root.createNewChildElement("Take");
@@ -166,8 +227,15 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         }
     }
 
+    SessionNode written = sessionNodeFromXml(root);
+    if (data.hasPreserved && data.preserved.name == "YouHostSession")
+        mergeSessionNodes(data.preserved, written);
+    const auto document = xmlFromSessionNode(written);
+    if (document == nullptr)
+        return false;
+
     file.getParentDirectory().createDirectory();
-    return root.writeTo(file);
+    return document->writeTo(file);
 }
 
 bool readSessionFile(const juce::File& file, SessionData& data)
@@ -177,8 +245,17 @@ bool readSessionFile(const juce::File& file, SessionData& data)
         return false;
 
     data = {};
+    data.preserved = sessionNodeFromXml(*root);
+    data.hasPreserved = data.preserved.name == "YouHostSession";
+    data.timeline = timelineFromNode(data.preserved);
     data.page = root->getIntAttribute("page", 1) == 2 ? 2 : 1;
     data.sampleRate = root->getDoubleAttribute("rate", 0.0);
+    data.bufferSamples = root->getIntAttribute("buffer", 0);
+    data.cardChannels = root->getIntAttribute("cardChannels", 0);
+    data.inputDevice = root->getStringAttribute("input");
+    data.outputDevice = root->getStringAttribute("output");
+    data.explicitOffline = root->getBoolAttribute("offline", false);
+    data.channelCount = kMaxChannels;
     data.waveformGain = static_cast<float>(root->getDoubleAttribute("wave", 1.0));
     data.alignGroup = root->getStringAttribute("align") == "group" ? 1 : 0;
     data.wavBitDepth = normaliseWavBitDepth(root->getIntAttribute("bits", kDefaultWavBitDepth));

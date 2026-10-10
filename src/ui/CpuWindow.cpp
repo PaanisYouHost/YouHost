@@ -1,6 +1,7 @@
 #include "CpuWindow.h"
 #include "Theme.h"
 #include "WindowMemory.h"
+#include "engine/WindowCatalog.h"
 
 #include <algorithm>
 
@@ -57,16 +58,13 @@ public:
                     meters_.percent[static_cast<std::size_t>(index + 1)]);
         }
 
-        if (area.getHeight() > 24)
-        {
-            graphics.setColour(theme::fainter);
-            graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-            graphics.drawFittedText("Each bar is that thread's time against the buffer. "
-                                    "The audio thread runs the callback. Workers share the plugin chains.",
-                                    area.removeFromBottom(36),
-                                    juce::Justification::bottomLeft,
-                                    3);
-        }
+        graphics.setColour(theme::fainter);
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
+        graphics.drawFittedText("Each bar is that thread's time against the buffer. "
+                                "The audio thread runs the callback. Workers share the plugin chains.",
+                                area.removeFromTop(48),
+                                juce::Justification::topLeft,
+                                3);
     }
 
 private:
@@ -106,23 +104,53 @@ private:
     CpuMeters meters_ {};
 };
 
+class CpuShell : public juce::Component
+{
+public:
+    explicit CpuShell(AudioEngine& engine)
+        : card_(engine)
+    {
+        addAndMakeVisible(viewport_);
+        viewport_.setViewedComponent(&card_, false);
+        viewport_.setScrollBarsShown(true, false);
+    }
+
+    ~CpuShell() override
+    {
+        viewport_.setViewedComponent(nullptr, false);
+    }
+
+    CpuWindow::Content* card() { return &card_; }
+
+    void resized() override
+    {
+        viewport_.setBounds(getLocalBounds());
+        const int width = std::max(1, viewport_.getMaximumVisibleWidth());
+        card_.setSize(width, std::max(cpuCardHeight(7), viewport_.getHeight()));
+    }
+
+private:
+    CpuWindow::Content card_;
+    juce::Viewport viewport_;
+};
+
 CpuWindow::CpuWindow(AudioEngine& engine, AppSettings& settings)
     : juce::DocumentWindow("CPU", theme::panel, juce::DocumentWindow::closeButton),
       engine_(engine),
       settings_(settings)
 {
-    auto content = std::make_unique<Content>(engine_);
-    content_ = content.get();
+    auto content = std::make_unique<CpuShell>(engine_);
+    content_ = content->card();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    prepareRememberedWindow(*this, settings_, "windowCpu", 420, 360, 320, 260);
+    prepareRememberedWindow(*this, settings_, "windowCpu", cpuWindowWidth(), cpuWindowHeight(), 320, 260);
     setVisible(false);
     startTimerHz(4);
 }
 
 CpuWindow::~CpuWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowCpu");
+    saveRememberedWindow(*this, settings_, "windowCpu", cpuWindowWidth(), cpuWindowHeight());
     stopTimer();
 }
 
@@ -139,7 +167,7 @@ void CpuWindow::toggle()
 
 void CpuWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowCpu");
+    saveRememberedWindow(*this, settings_, "windowCpu", cpuWindowWidth(), cpuWindowHeight());
     setVisible(false);
 }
 

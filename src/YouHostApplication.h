@@ -23,6 +23,7 @@ public:
     void initialise(const juce::String& commandLine) override;
     void shutdown() override;
     void systemRequestedQuit() override;
+    void anotherInstanceStarted(const juce::String& commandLine) override;
 
 private:
     class MainWindow;

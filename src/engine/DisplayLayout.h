@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
+#include <string_view>
 
 namespace youhost
 {
@@ -137,6 +139,91 @@ inline int adjacentVisibleChannel(const StripItem* strips, int count, int curren
             return strips[index].channel;
     }
     return -1;
+}
+
+// Channel strips currently drawn. Group headers and folded members are omitted.
+inline int shownChannelNumbers(const StripItem* strips, int count, int* out, int capacity) noexcept
+{
+    if (strips == nullptr || count <= 0 || out == nullptr || capacity <= 0)
+        return 0;
+    int written = 0;
+    for (int index = 0; index < count && written < capacity; ++index)
+    {
+        if (strips[index].kind != StripKind::channel || strips[index].channel < 0)
+            continue;
+        out[written++] = strips[index].channel;
+    }
+    return written;
+}
+
+// Fixed fold mark for a group bar. Collapsed is ▸, open is ▾, then the channel count.
+inline std::string groupFoldLabel(bool collapsed, int channelCount)
+{
+    if (channelCount < 0)
+        channelCount = 0;
+    return std::string(collapsed ? "\u25B8 " : "\u25BE ") + std::to_string(channelCount) + " ch";
+}
+
+// First group index with no member. -1 when every slot is taken.
+inline int firstUnusedGroup(const int* membership, int channels, int groupCount) noexcept
+{
+    if (groupCount <= 0)
+        return -1;
+    if (groupCount > kMaxDisplayGroups)
+        groupCount = kMaxDisplayGroups;
+    bool used[kMaxDisplayGroups] = {};
+    if (membership != nullptr)
+    {
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            const int group = membership[channel];
+            if (group >= 0 && group < groupCount)
+                used[group] = true;
+        }
+    }
+    for (int group = 0; group < groupCount; ++group)
+        if (! used[group])
+            return group;
+    return -1;
+}
+
+struct PlannedGroup
+{
+    bool created = false;
+    int group = -1;
+    std::string name;
+    int color = 0;
+    bool collapsed = false;
+};
+
+inline std::string trimmedGroupName(std::string_view text)
+{
+    std::size_t begin = 0;
+    while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t'))
+        ++begin;
+    std::size_t end = text.size();
+    while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t'))
+        --end;
+    std::string name(text.substr(begin, end - begin));
+    if (name.size() > 40)
+        name.resize(40);
+    return name;
+}
+
+// Enter or OK. A new group always starts folded. Esc does not call this.
+inline PlannedGroup planNewGroup(bool hasSelection, int freeSlot, std::string_view typedName, int color)
+{
+    PlannedGroup plan;
+    if (! hasSelection || freeSlot < 0 || freeSlot >= kMaxDisplayGroups)
+        return plan;
+    plan.created = true;
+    plan.group = freeSlot;
+    plan.color = color < 0 ? 0 : color;
+    plan.name = trimmedGroupName(typedName);
+    if (plan.name.empty())
+        plan.name = "Group " + std::to_string(freeSlot + 1);
+    plan.collapsed = true;
+    return plan;
 }
 
 } // namespace youhost

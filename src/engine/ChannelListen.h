@@ -3,6 +3,7 @@
 #include "ScanJobs.h"
 
 #include <string_view>
+#include <vector>
 
 namespace youhost
 {
@@ -66,6 +67,49 @@ inline ChannelListen cycleChannelListen(ChannelListen mode) noexcept
         case ChannelListen::off: return ChannelListen::record;
     }
     return ChannelListen::record;
+}
+
+// True when a global INPUT or OFF would move a channel off REC during a take.
+// REC itself, and any change while the transport is stopped, applies at once.
+inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const int* targetModes, int targetCount) noexcept
+{
+    if (! recording || next == ChannelListen::record || targetModes == nullptr || targetCount <= 0)
+        return false;
+    for (int index = 0; index < targetCount; ++index)
+        if (targetModes[index] == static_cast<int>(ChannelListen::record))
+            return true;
+    return false;
+}
+
+// ALL REC, ALL INPUT, and ALL OFF set every visible channel. A selection does
+// not narrow them. REC page and HOST page both use this list.
+inline std::vector<int> channelsForGlobalListen(const int* selected, int selectedCount, int visible)
+{
+    (void) selected;
+    (void) selectedCount;
+    std::vector<int> channels;
+    if (visible < 0)
+        visible = 0;
+    channels.reserve(static_cast<std::size_t>(visible));
+    for (int channel = 0; channel < visible; ++channel)
+        channels.push_back(channel);
+    return channels;
+}
+
+// A channel-button click only writes the mode. It does not rebuild a graph.
+inline void applyLocalListen(int* modes, int count, int channel, int mode) noexcept
+{
+    if (modes == nullptr || channel < 0 || channel >= count)
+        return;
+    modes[channel] = mode;
+}
+
+// Page 1 is REC and page 2 is HOST. Both return the same visible channels.
+inline std::vector<int> channelsForPageListen(int page, const int* selected, int selectedCount, int visible)
+{
+    if (page != 1 && page != 2)
+        return {};
+    return channelsForGlobalListen(selected, selectedCount, visible);
 }
 
 } // namespace youhost
