@@ -47,8 +47,8 @@ LatencyReadout::LatencyReadout()
     addAndMakeVisible(allButton_);
     addAndMakeVisible(groupButton_);
     addAndMakeVisible(resetButton_);
-    allButton_.setTooltip("Line every included channel up on the slowest plugin. A stereo pair stays together.");
-    groupButton_.setTooltip("Each group lines up on its own slowest plugin. Ungrouped channels are not delayed. A pair split across groups can comb.");
+    allButton_.setTooltip("Global. All channels aligned: every included channel lines up on the slowest plugin.");
+    groupButton_.setTooltip("Per group. Only channels inside a group line up on that group's slowest plugin. Ungrouped channels get no extra delay.");
     resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
     for (auto* button : { &allButton_, &groupButton_, &resetButton_ })
         button->setMouseClickGrabsKeyboardFocus(false);
@@ -68,6 +68,18 @@ LatencyReadout::LatencyReadout()
 void LatencyReadout::setNumbers(const LatencyNumbers& numbers)
 {
     numbers_ = numbers;
+    repaint();
+}
+
+void LatencyReadout::setGroupLines(const GroupLatencyLine* lines, int count)
+{
+    if (count < 0)
+        count = 0;
+    if (count > kMaxDisplayGroups)
+        count = kMaxDisplayGroups;
+    groupCount_ = count;
+    for (int index = 0; index < count; ++index)
+        groupLines_[static_cast<std::size_t>(index)] = lines != nullptr ? lines[index] : GroupLatencyLine {};
     repaint();
 }
 
@@ -93,7 +105,8 @@ void LatencyReadout::setResetHandler(std::function<void()> handler)
 
 void LatencyReadout::resized()
 {
-    const auto layout = layoutLatencyCard(std::max(1, getWidth()));
+    const bool perGroup = alignGroup_ == 1;
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()), longestLatencyNoteChars(), perGroup ? groupCount_ : 0, perGroup);
     auto row = cardBlock(layout.dropouts, layout.textWidth).toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
     auto modes = cardBlock(layout.modes, layout.textWidth).toNearestInt();
@@ -110,7 +123,8 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.setColour(theme::panelEdge);
     graphics.drawRoundedRectangle(bounds.reduced(0.5f), 12.0f, 1.0f);
 
-    const auto layout = layoutLatencyCard(std::max(1, getWidth()));
+    const bool perGroup = alignGroup_ == 1;
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()), longestLatencyNoteChars(), perGroup ? groupCount_ : 0, perGroup);
     auto hero = cardBlock(layout.hero, layout.textWidth);
     const auto noteArea = cardBlock(layout.note, layout.textWidth);
 
@@ -150,6 +164,32 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.setColour(dropouts > 0 ? theme::red : theme::text);
     graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
     graphics.drawText(juce::String(dropouts), dropoutRow, juce::Justification::centredRight, false);
+
+    if (alignGroup_ == 1)
+    {
+        auto list = cardBlock(layout.groups, layout.textWidth);
+        graphics.setColour(theme::dim);
+        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
+        for (int index = 0; index < groupCount_ && index < layout.groupRows; ++index)
+        {
+            auto row = list.removeFromTop(static_cast<float>(kLatencyGroupRowH));
+            const auto& line = groupLines_[static_cast<std::size_t>(index)];
+            const auto title = line.name[0] != '\0' ? juce::String::fromUTF8(line.name)
+                                                    : "Group " + juce::String(line.group + 1);
+            graphics.setColour(theme::text);
+            graphics.drawText(title, row.removeFromLeft(180.0f), juce::Justification::centredLeft, true);
+            graphics.setColour(theme::dim);
+            const auto detail = juce::String(line.members) + " ch   " + juce::String(line.alignSamples) + " smp";
+            graphics.drawText(detail, row, juce::Justification::centredRight, true);
+        }
+        if (layout.groups.height >= kLatencyGroupRowH)
+        {
+            auto ungrouped = list.removeFromTop(static_cast<float>(kLatencyGroupRowH));
+            graphics.setColour(theme::dim);
+            graphics.drawText("Ungrouped", ungrouped.removeFromLeft(180.0f), juce::Justification::centredLeft, true);
+            graphics.drawText("0 smp", ungrouped, juce::Justification::centredRight, true);
+        }
+    }
 
     graphics.setColour(theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(11.0f)));

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelEnable.h"
+#include "LatencyCompensation.h"
 #include "Passthrough.h"
 #include "PluginLoadPace.h"
 #include "SessionDocument.h"
@@ -102,6 +103,7 @@ public:
     CpuMeters cpuMeters() const;
     void setAlignMode(int perGroup);
     void setChannelGroups(const int* groups, int count);
+    void copyLatencyInputs(ChannelLatencyInput* out, int count) const;
     void deviceStopped();
     void updateRouting(const Routing& routing);
 
@@ -256,6 +258,7 @@ private:
     mutable std::array<std::atomic<std::uint32_t>, 8> coreBlocks_ {};
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
+    std::array<ChannelLatencyInput, kMaxChannels> latencyInputs_ {};
     int alignmentSamples_ = 0;
     Routing routing_ {};
     double sampleRate_ = 48000.0;

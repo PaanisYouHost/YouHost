@@ -1008,6 +1008,16 @@ void PluginRack::setAlignMode(int perGroup)
     publishUnlocked();
 }
 
+void PluginRack::copyLatencyInputs(ChannelLatencyInput* out, int count) const
+{
+    if (out == nullptr || count <= 0)
+        return;
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    const int n = std::min(count, kMaxChannels);
+    for (int channel = 0; channel < n; ++channel)
+        out[channel] = latencyInputs_[static_cast<std::size_t>(channel)];
+}
+
 void PluginRack::setChannelGroups(const int* groups, int count)
 {
     std::lock_guard<std::mutex> lock(lifeLock_);
@@ -2139,6 +2149,7 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         const bool outputOpen = routing_.outputPacked[static_cast<std::size_t>(channel)] >= 0;
         const bool counts = outputOpen && ! excluded_[static_cast<std::size_t>(channel)] && audible_[static_cast<std::size_t>(channel)];
         inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { chain, counts, groups_[static_cast<std::size_t>(channel)] };
+        latencyInputs_[static_cast<std::size_t>(channel)] = inputs[static_cast<std::size_t>(channel)];
     }
 
     const auto plan = planCompensation(inputs.data(), kMaxChannels, alignGroup_ == 1 ? AlignMode::group : AlignMode::all);

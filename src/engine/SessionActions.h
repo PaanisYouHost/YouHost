@@ -86,7 +86,7 @@ inline bool sessionCloseSaveAsFirst(bool dirty, bool recording, SessionCloseReas
 }
 
 // A brand new session has no plugins, names, colours, groups, or takes.
-// Every channel is REC, output gain is 0 dB, and alignment is All aligned.
+// Every channel is REC, output gain is 0 dB, and alignment is Global.
 inline SessionDocumentModel cleanSessionModel()
 {
     SessionDocumentModel model;

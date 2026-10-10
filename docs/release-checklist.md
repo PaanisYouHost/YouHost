@@ -22,8 +22,8 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | No hangs | Fifty open-size and compensation calculations stay under 16 ms. The same binary also runs the plugin-edit and audio-engine stress tests. |
 | New, Open, Save, Save As | New, Open, and Open Recent ask before discarding edits. Save and Save As are the choices that write first. A clean session does not ask. |
 | Session compatibility | An older or newer session file still reads. `align` is kept. Unknown elements stay on the source node. A brand new session model is clean. |
-| Per-group alignment | All aligned and Per group are the existing LATENCY switch, not a second one. Per group delays a channel only to its own group's slowest plugin. An ungrouped channel is not delayed and does not move the group. All aligned lines every included channel up on the slowest one. |
-| LATENCY has no Timeline button | DROPOUTS already shows the dropout graph. LATENCY keeps All aligned, Per group, and Reset. |
+| Per-group alignment | Global and Per group are the LATENCY switch. Global lines every included channel up on the slowest one. Per group delays a channel only to its own group's slowest plugin. An ungrouped channel gets no extra delay and does not move the group. |
+| LATENCY has no Timeline button | DROPOUTS already shows the dropout graph. LATENCY keeps Global, Per group, and Reset. |
 | ALL labels stay ALL | The buttons stay labelled ALL REC, ALL INPUT, and ALL OFF. A selection does not rename them or narrow the tooltip. |
 | Group dialog | Cmd+G opens the name and colour dialog for the selected channels and the new group starts folded. An empty selection creates nothing. Plain G is still Go to channel. |
 | Startup window | The startup window has the menus and New / Open / Recent. The instructional paragraph is gone. |
