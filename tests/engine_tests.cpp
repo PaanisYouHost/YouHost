@@ -11,7 +11,9 @@
 #include "engine/DropoutLog.h"
 #include "engine/LatencyCompensation.h"
 #include "engine/X32Colours.h"
+#include "engine/LatencyCard.h"
 #include "engine/LatencyMath.h"
+#include "engine/WindowFit.h"
 #include "engine/MeterLayout.h"
 #include "engine/MeterScale.h"
 #include "engine/Passthrough.h"
@@ -371,6 +373,78 @@ void testLatencyFormulas()
     CHECK(youhost::roundTripSamples(10, 10, 128, 0, RoundTripFormula::coreAudioSubtractOneBuffer) == 0);
     CHECK(near(static_cast<float>(youhost::samplesToMilliseconds(48, 48000.0)), 1.0f, 0.0001f));
     CHECK(youhost::samplesToMilliseconds(48, 0.0) == 0.0);
+}
+
+void testLatencyWindowFits()
+{
+    const auto card = youhost::layoutLatencyCard(youhost::kLatencyPreferredWidth);
+    CHECK(card.contentWidth == youhost::kLatencyPreferredWidth);
+    CHECK(card.compensation.height >= 26);
+    CHECK(card.note.height >= youhost::kLatencyLineH * 2);
+    CHECK(card.noteLines >= 2);
+    CHECK(card.hero.top + card.hero.height <= card.buffer.top);
+    CHECK(card.buffer.top + card.buffer.height <= card.input.top);
+    CHECK(card.output.top + card.output.height <= card.compensation.top);
+    CHECK(card.compensation.top + card.compensation.height <= card.dropouts.top);
+    CHECK(card.dropouts.top + card.dropouts.height <= card.modes.top);
+    CHECK(card.modes.top + card.modes.height <= card.note.top);
+    CHECK(card.note.top + card.note.height <= card.contentHeight);
+
+    const auto core = youhost::latencyNoteText(true, youhost::RoundTripFormula::coreAudioSubtractOneBuffer);
+    const auto alsa = youhost::latencyNoteText(false, youhost::RoundTripFormula::alsaAddOneBuffer);
+    CHECK(static_cast<int>(core.size()) <= youhost::longestLatencyNoteChars());
+    CHECK(static_cast<int>(alsa.size()) <= youhost::longestLatencyNoteChars());
+    const auto wrapped = youhost::layoutLatencyCard(youhost::kLatencyPreferredWidth,
+                                                     static_cast<int>(core.size()));
+    CHECK(wrapped.note.height <= card.note.height);
+    CHECK(wrapped.note.top + wrapped.note.height <= card.contentHeight);
+
+    youhost::SavedWindowSize none;
+    const auto opened = youhost::windowOpenSize(card.contentWidth, card.contentHeight, 1920, 1080, none);
+    CHECK(opened.width >= card.contentWidth);
+    CHECK(opened.height >= card.contentHeight);
+
+    youhost::SavedWindowSize legacy;
+    legacy.valid = true;
+    legacy.width = 520;
+    legacy.height = 320;
+    const auto reset = youhost::windowOpenSize(card.contentWidth, card.contentHeight, 1920, 1080, legacy);
+    CHECK(reset.width == card.contentWidth);
+    CHECK(reset.height == card.contentHeight);
+
+    youhost::SavedWindowSize shrunk = legacy;
+    shrunk.hasFit = true;
+    shrunk.fitWidth = card.contentWidth;
+    shrunk.fitHeight = card.contentHeight;
+    shrunk.width = 480;
+    shrunk.height = 280;
+    const auto kept = youhost::windowOpenSize(card.contentWidth, card.contentHeight, 1920, 1080, shrunk);
+    CHECK(kept.width == 480);
+    CHECK(kept.height == 280);
+    CHECK(youhost::blockReachable(card.compensation.top, card.compensation.height, card.contentHeight, kept.height));
+    CHECK(youhost::blockReachable(card.note.top, card.note.height, card.contentHeight, kept.height));
+
+    const auto grown = youhost::windowOpenSize(card.contentWidth, card.contentHeight + 80, 1920, 1080, shrunk);
+    CHECK(grown.height == card.contentHeight + 80);
+
+    const auto smallScreen = youhost::windowOpenSize(card.contentWidth, card.contentHeight, 640, 360, none);
+    CHECK(smallScreen.height < card.contentHeight);
+    CHECK(smallScreen.height > 0);
+    CHECK(youhost::blockReachable(card.note.top, card.note.height, card.contentHeight, smallScreen.height));
+    CHECK(youhost::blockReachable(card.compensation.top, card.compensation.height, card.contentHeight, 160));
+
+    const auto parsed = youhost::parseWindowState("12 40 520 420 fit 680 510");
+    CHECK(parsed.valid);
+    CHECK(parsed.x == 12);
+    CHECK(parsed.width == 520);
+    CHECK(parsed.hasFit);
+    CHECK(parsed.fitHeight == 510);
+    CHECK(youhost::juceWindowState(parsed) == "12 40 520 420");
+    CHECK(youhost::shortcutHelpText().find("A smaller window scrolls that card") != std::string::npos);
+    const auto legacyState = youhost::parseWindowState("8 8 900 700 fullscreen");
+    CHECK(legacyState.valid);
+    CHECK(! legacyState.hasFit);
+    CHECK(youhost::keepRememberedWindow(legacyState, card.contentWidth, card.contentHeight));
 }
 
 void testTakePlan()
@@ -1811,6 +1885,7 @@ int main()
     testMergePeaks();
     testUnwrittenOutputsAreCleared();
     testLatencyFormulas();
+    testLatencyWindowFits();
     testTakePlan();
     testMeterLayoutScales();
     testOffChannelStaysSilent();

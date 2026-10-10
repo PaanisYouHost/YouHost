@@ -122,7 +122,7 @@ CpuWindow::CpuWindow(AudioEngine& engine, AppSettings& settings)
 
 CpuWindow::~CpuWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowCpu");
+    saveRememberedWindow(*this, settings_, "windowCpu", 420, 360);
     stopTimer();
 }
 
@@ -139,7 +139,7 @@ void CpuWindow::toggle()
 
 void CpuWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowCpu");
+    saveRememberedWindow(*this, settings_, "windowCpu", 420, 360);
     setVisible(false);
 }
 

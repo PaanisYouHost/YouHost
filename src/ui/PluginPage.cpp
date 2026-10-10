@@ -403,12 +403,12 @@ public:
 
     ~PluginListWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", 420, 480);
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", 420, 480);
         setVisible(false);
     }
 

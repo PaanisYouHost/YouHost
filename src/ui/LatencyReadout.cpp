@@ -1,4 +1,5 @@
 #include "LatencyReadout.h"
+#include "engine/LatencyCard.h"
 #include "engine/Shortcuts.h"
 #include "Theme.h"
 
@@ -12,21 +13,12 @@ juce::String millisecondsText(int samples, double sampleRate)
     return juce::String(samplesToMilliseconds(samples, sampleRate), 2) + " ms";
 }
 
-juce::String formulaNote(RoundTripFormula formula)
+juce::Rectangle<float> cardBlock(const LatencyBlock& block, int textWidth)
 {
-    switch (formula)
-    {
-        case RoundTripFormula::coreAudioSubtractOneBuffer:
-            return "Round trip = input + output - one buffer + compensation. "
-                   "JUCE 9 CoreAudio includes the buffer in both input and output latency.";
-        case RoundTripFormula::alsaAddOneBuffer:
-            return "Round trip = input + output + one buffer + compensation. "
-                   "JUCE ALSA reports latency with one period already removed.";
-        case RoundTripFormula::driverSum:
-            break;
-    }
-
-    return "Round trip = driver input + driver output + compensation.";
+    return { static_cast<float>(kLatencyPadX),
+             static_cast<float>(block.top),
+             static_cast<float>(textWidth),
+             static_cast<float>(block.height) };
 }
 
 void drawStat(juce::Graphics& graphics,
@@ -49,30 +41,6 @@ void drawStat(juce::Graphics& graphics,
 }
 
 } // namespace
-
-LatencyReadout::CardLayout LatencyReadout::layoutCard(juce::Rectangle<float> bounds)
-{
-    auto inner = bounds.reduced(18.0f, 14.0f);
-    CardLayout layout;
-    layout.note = inner.removeFromBottom(36.0f);
-    inner.removeFromBottom(4.0f);
-    layout.modeRow = inner.removeFromBottom(26.0f);
-    inner.removeFromBottom(6.0f);
-
-    const bool wide = inner.getWidth() > 640.0f;
-    layout.hero = wide ? inner.removeFromLeft(inner.getWidth() * 0.40f) : inner.removeFromTop(inner.getHeight() * 0.46f);
-    if (wide)
-        inner.removeFromLeft(16.0f);
-    else
-        inner.removeFromTop(6.0f);
-
-    layout.bufferRow = inner.removeFromTop(26.0f);
-    layout.inputRow = inner.removeFromTop(26.0f);
-    layout.outputRow = inner.removeFromTop(26.0f);
-    layout.compensationRow = inner.removeFromTop(26.0f);
-    layout.dropoutRow = inner.removeFromTop(26.0f);
-    return layout;
-}
 
 LatencyReadout::LatencyReadout()
 {
@@ -133,12 +101,12 @@ void LatencyReadout::setGraphHandler(std::function<void()> handler)
 
 void LatencyReadout::resized()
 {
-    const auto layout = layoutCard(getLocalBounds().toFloat());
-    auto row = layout.dropoutRow.toNearestInt();
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()));
+    auto row = cardBlock(layout.dropouts, layout.textWidth).toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
     row.removeFromRight(6);
     graphButton_.setBounds(row.removeFromRight(86).withSizeKeepingCentre(86, 22));
-    auto modes = layout.modeRow.toNearestInt();
+    auto modes = cardBlock(layout.modes, layout.textWidth).toNearestInt();
     allButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
     modes.removeFromLeft(6);
     groupButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
@@ -152,9 +120,9 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.setColour(theme::panelEdge);
     graphics.drawRoundedRectangle(bounds.reduced(0.5f), 12.0f, 1.0f);
 
-    const auto layout = layoutCard(bounds);
-    auto hero = layout.hero;
-    const auto noteArea = layout.note;
+    const auto layout = layoutLatencyCard(std::max(1, getWidth()));
+    auto hero = cardBlock(layout.hero, layout.textWidth);
+    const auto noteArea = cardBlock(layout.note, layout.textWidth);
 
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -178,12 +146,12 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     graphics.drawText("milliseconds", hero, juce::Justification::topLeft, false);
 
     const double rate = numbers_.sampleRate;
-    drawStat(graphics, layout.bufferRow, "Buffer", numbers_.bufferSamples, rate, theme::text);
-    drawStat(graphics, layout.inputRow, "Input", numbers_.inputSamples, rate, theme::text);
-    drawStat(graphics, layout.outputRow, "Output", numbers_.outputSamples, rate, theme::text);
-    drawStat(graphics, layout.compensationRow, "Compensation", numbers_.compensationSamples, rate, theme::dim);
+    drawStat(graphics, cardBlock(layout.buffer, layout.textWidth), "Buffer", numbers_.bufferSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.input, layout.textWidth), "Input", numbers_.inputSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.output, layout.textWidth), "Output", numbers_.outputSamples, rate, theme::text);
+    drawStat(graphics, cardBlock(layout.compensation, layout.textWidth), "Compensation", numbers_.compensationSamples, rate, theme::dim);
 
-    auto dropoutRow = layout.dropoutRow;
+    auto dropoutRow = cardBlock(layout.dropouts, layout.textWidth);
     dropoutRow.removeFromRight(156.0f);
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
@@ -195,13 +163,11 @@ void LatencyReadout::paint(juce::Graphics& graphics)
 
     graphics.setColour(theme::fainter);
     graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-    const juce::String modeNote = alignGroup_ == 1
-                                      ? "Per group: each group uses its own slowest plugin. Ungrouped channels are not delayed, so a split pair can comb."
-                                      : "All aligned: every included channel ends on the same sample, including a dry channel next to a plugin.";
-    graphics.drawFittedText(modeNote + "  " + formulaNote(numbers_.formula),
+    const auto note = latencyNoteText(alignGroup_ == 1, numbers_.formula);
+    graphics.drawFittedText(juce::String(note),
                             noteArea.toNearestInt(),
                             juce::Justification::topLeft,
-                            3);
+                            layout.noteLines);
 }
 
 } // namespace youhost

@@ -252,7 +252,7 @@ DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)
 
 DropoutWindow::~DropoutWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts");
+    saveRememberedWindow(*this, settings_, "windowDropouts", 720, 420);
     stopTimer();
 }
 
@@ -269,7 +269,7 @@ void DropoutWindow::toggle()
 
 void DropoutWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts");
+    saveRememberedWindow(*this, settings_, "windowDropouts", 720, 420);
     setVisible(false);
 }
 

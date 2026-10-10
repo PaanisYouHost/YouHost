@@ -337,7 +337,7 @@ ScannerWindow::ScannerWindow(AudioEngine& engine, AppSettings& settings)
 
 ScannerWindow::~ScannerWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowScanner");
+    saveRememberedWindow(*this, settings_, "windowScanner", 860, 560);
     stopTimer();
 }
 
@@ -354,7 +354,7 @@ void ScannerWindow::toggle()
 
 void ScannerWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowScanner");
+    saveRememberedWindow(*this, settings_, "windowScanner", 860, 560);
     setVisible(false);
 }
 

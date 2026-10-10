@@ -3,6 +3,7 @@
 #include "Theme.h"
 #include "WindowMemory.h"
 #include "engine/HostLimits.h"
+#include "engine/LatencyCard.h"
 #include "engine/LatencyMath.h"
 #include "engine/MeterScale.h"
 #include "engine/SessionFiles.h"
@@ -128,28 +129,63 @@ public:
                 int minHeight)
         : juce::DocumentWindow(title, theme::panel, juce::DocumentWindow::closeButton),
           settings_(settings),
-          key_(key)
+          key_(key),
+          content_(content)
     {
         setUsingNativeTitleBar(true);
-        setContentNonOwned(&content, false);
-        prepareRememberedWindow(*this, settings_, key_, width, height, minWidth, minHeight);
+        viewport_.setViewedComponent(&content_, false);
+        viewport_.setScrollBarsShown(true, true);
+        viewport_.setScrollBarThickness(14);
+        setContentNonOwned(&viewport_, false);
+        const auto border = getContentComponentBorder();
+        int chromeHeight = border.getTopAndBottom();
+        if (isUsingNativeTitleBar() && border.getTop() < 22)
+            chromeHeight += 28;
+        fitWidth_ = width + border.getLeftAndRight();
+        fitHeight_ = height + chromeHeight + 8;
+        prepareRememberedWindow(*this, settings_, key_, fitWidth_, fitHeight_, minWidth, minHeight);
         setVisible(false);
+        layoutContent();
     }
 
     ~FloatWindow() override
     {
-        saveRememberedWindow(*this, settings_, key_);
+        viewport_.setViewedComponent(nullptr, false);
+        setContentNonOwned(nullptr, false);
+        saveRememberedWindow(*this, settings_, key_, fitWidth_, fitHeight_);
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, key_);
+        saveRememberedWindow(*this, settings_, key_, fitWidth_, fitHeight_);
         setVisible(false);
     }
 
+    void resized() override
+    {
+        juce::DocumentWindow::resized();
+        layoutContent();
+    }
+
 private:
+    void layoutContent()
+    {
+        const int viewWidth = std::max(1, viewport_.getWidth());
+        const int viewHeight = std::max(1, viewport_.getHeight());
+        const int bar = std::max(8, viewport_.getScrollBarThickness());
+        int contentWidth = std::max(kLatencyMinContentWidth, viewWidth);
+        if (layoutLatencyCard(contentWidth).contentHeight > viewHeight)
+            contentWidth = std::max(kLatencyMinContentWidth, viewWidth - bar);
+        const int contentHeight = layoutLatencyCard(contentWidth).contentHeight;
+        content_.setSize(contentWidth, contentHeight);
+    }
+
     AppSettings& settings_;
     juce::String key_;
+    juce::Component& content_;
+    juce::Viewport viewport_;
+    int fitWidth_ = 0;
+    int fitHeight_ = 0;
 };
 
 void attachBitDepthSlot(juce::AudioDeviceSelectorComponent& selector, BitDepthSlot& slot)
@@ -197,12 +233,12 @@ public:
 
     ~SetupWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowSetup");
+        saveRememberedWindow(*this, settings_, "windowSetup", 720, 420);
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowSetup");
+        saveRememberedWindow(*this, settings_, "windowSetup", 720, 420);
         setVisible(false);
     }
 
@@ -960,7 +996,15 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterViewport_.setViewedComponent(&meterGrid_, false);
     meterViewport_.setScrollBarsShown(false, true);
 
-    latencyWindow_ = std::make_unique<FloatWindow>("LATENCY", latencyReadout_, settings_, "windowLatency", 520, 420, 420, 320);
+    const auto latencyCard = layoutLatencyCard(kLatencyPreferredWidth);
+    latencyWindow_ = std::make_unique<FloatWindow>("LATENCY",
+                                                   latencyReadout_,
+                                                   settings_,
+                                                   "windowLatency",
+                                                   latencyCard.contentWidth,
+                                                   latencyCard.contentHeight,
+                                                   420,
+                                                   220);
     if (keys_ != nullptr)
     {
         scanner_.addKeyListener(keys_.get());
