@@ -481,6 +481,25 @@ void testTimelineNavigation()
     const std::vector<std::vector<int>> lanes = { { 0, 1 }, { 5 } };
     CHECK(youhost::laneIndexContaining(lanes, 5) == 1);
     CHECK(youhost::laneIndexContaining(lanes, 3) == -1);
+
+    const float rulerX = 8.0f;
+    const float rulerY = 6.0f;
+    const float rulerW = 880.0f;
+    const float rulerH = static_cast<float>(youhost::kTimelineRulerHeightPx);
+    const float laneY = rulerY + rulerH;
+    const float laneH = 36.0f;
+    const float markX = rulerX;
+    const float nextX = rulerX + 640.0f;
+    const auto take = youhost::takeRulerLabelRect(rulerX, rulerY, rulerW, rulerH, markX, nextX);
+    const auto corner = youhost::laneCornerLabelRect(rulerX, laneY, rulerW, laneH);
+    CHECK(youhost::takeRulerLabelText(1, nextX - markX) == "TAKE 1");
+    CHECK(youhost::takeRulerLabelText(2, 40.0f) == "2");
+    CHECK(youhost::timelineLabelInside(take, rulerX, rulerY, rulerW, rulerH));
+    CHECK(youhost::timelineLabelInside(corner, rulerX, laneY, rulerW, laneH));
+    CHECK(corner.x <= rulerX + 4.0f);
+    CHECK(corner.y <= laneY + 2.0f);
+    CHECK(! youhost::timelineLabelsOverlap(take, corner));
+    CHECK(take.y + take.height <= laneY + 0.01f);
 }
 
 void testSessionFileActions()

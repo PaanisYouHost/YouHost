@@ -15,6 +15,8 @@ namespace youhost
 inline constexpr int kMaxTimelineZoomStep = 40;
 inline constexpr std::int64_t kMinTimelineZoomSamples = 2048;
 inline constexpr float kLaneLabelMinPx = 12.0f;
+inline constexpr int kTimelineRulerHeightPx = 18;
+inline constexpr float kTimelineTimecodeColumn = 70.0f;
 
 inline int maxZoomStepForSpan(std::int64_t span) noexcept
 {
@@ -362,7 +364,7 @@ inline int laneIndexContaining(const std::vector<std::vector<int>>& lanes, int c
 }
 
 // Top-left lane tag: "12 Kick", or the group name. It is drawn in the visible
-// lane, so horizontal scrolling does not move it.
+// lane, so horizontal scrolling does not move it. Take names stay in the ruler.
 inline std::string laneCornerLabel(int number, const std::string& name, bool group)
 {
     if (group)
@@ -372,6 +374,88 @@ inline std::string laneCornerLabel(int number, const std::string& name, bool gro
     if (name.empty() || name == std::to_string(number))
         return std::to_string(number);
     return std::to_string(number) + "  " + name;
+}
+
+struct TimelineLabelRect
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+
+inline bool timelineLabelsOverlap(TimelineLabelRect left, TimelineLabelRect right) noexcept
+{
+    if (left.width <= 0.0f || left.height <= 0.0f || right.width <= 0.0f || right.height <= 0.0f)
+        return false;
+    return left.x < right.x + right.width && right.x < left.x + left.width
+           && left.y < right.y + right.height && right.y < left.y + left.height;
+}
+
+inline bool timelineLabelInside(TimelineLabelRect box, float x, float y, float width, float height) noexcept
+{
+    return box.width > 0.0f && box.height > 0.0f
+           && box.x >= x - 0.01f && box.y >= y - 0.01f
+           && box.x + box.width <= x + width + 0.01f
+           && box.y + box.height <= y + height + 0.01f;
+}
+
+// "TAKE 1", or just the number when the next take is close. The box stays in
+// the ruler, clear of the clocks at each end, and never enters a lane.
+inline std::string takeRulerLabelText(int number, float room)
+{
+    if (number < 1)
+        number = 1;
+    if (room < 58.0f)
+        return std::to_string(number);
+    return "TAKE " + std::to_string(number);
+}
+
+inline TimelineLabelRect takeRulerLabelRect(float rulerX,
+                                            float rulerY,
+                                            float rulerWidth,
+                                            float rulerHeight,
+                                            float markX,
+                                            float nextX) noexcept
+{
+    TimelineLabelRect box;
+    if (! (rulerWidth > 0.0f) || ! (rulerHeight > 0.0f))
+        return box;
+    const float room = nextX - markX;
+    float width = std::min(78.0f, std::max(18.0f, room - 6.0f));
+    const float height = std::min(14.0f, std::max(8.0f, rulerHeight - 4.0f));
+    const float minX = rulerX + kTimelineTimecodeColumn;
+    const float maxRight = rulerX + rulerWidth - kTimelineTimecodeColumn;
+    if (maxRight - minX < 18.0f)
+        return box;
+    if (width > maxRight - minX)
+        width = maxRight - minX;
+    float x = markX + 3.0f;
+    if (x < minX)
+        x = minX;
+    if (x + width > maxRight)
+        x = maxRight - width;
+    box.x = x;
+    box.y = rulerY + (rulerHeight - height) * 0.5f;
+    box.width = width;
+    box.height = height;
+    return box;
+}
+
+// Pinned to the top-left of one lane. Horizontal scrolling does not move it.
+inline TimelineLabelRect laneCornerLabelRect(float laneX, float laneY, float laneWidth, float laneHeight) noexcept
+{
+    TimelineLabelRect box;
+    if (! (laneWidth > 4.0f) || ! (laneHeight > 4.0f))
+        return box;
+    box.height = std::min(16.0f, laneHeight);
+    box.height = std::min(box.height, std::max(10.0f, laneHeight - 2.0f));
+    box.width = std::min(200.0f, std::max(0.0f, laneWidth - 4.0f));
+    box.x = laneX + 2.0f;
+    box.y = laneY + 1.0f;
+    if (box.y + box.height > laneY + laneHeight)
+        box.y = laneY;
+    return box;
 }
 
 // The Go field. A positive result is the 1-based channel number.
