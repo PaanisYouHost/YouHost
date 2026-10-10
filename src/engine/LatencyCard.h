@@ -15,6 +15,8 @@ inline constexpr int kLatencyPadY = 14;
 inline constexpr int kLatencyHeroH = 122;
 inline constexpr int kLatencyRowH = 28;
 inline constexpr int kLatencyModeH = 32;
+inline constexpr int kLatencyGroupRowH = 22;
+inline constexpr int kLatencyListedGroupRows = 10;
 inline constexpr int kLatencyGap = 8;
 inline constexpr int kLatencyCharPx = 7;
 inline constexpr int kLatencyLineH = 16;
@@ -22,9 +24,9 @@ inline constexpr int kLatencyMinContentWidth = 560;
 inline constexpr int kLatencyPreferredWidth = 680;
 
 inline constexpr const char* kLatencyModeAll =
-    "All aligned: every included channel ends on the same sample, including a dry channel next to a plugin.";
+    "Global: every included channel lines up on the slowest plugin, including a dry channel next to one.";
 inline constexpr const char* kLatencyModeGroup =
-    "Per group: each group uses its own slowest plugin. Ungrouped channels are not delayed, so a split pair can comb.";
+    "Per group: only channels inside a group line up on that group's slowest plugin. Ungrouped channels get no extra delay.";
 inline constexpr const char* kLatencyFormulaCore =
     "Round trip = input + output - one buffer + compensation. "
     "JUCE 9 CoreAudio includes the buffer in both input and output latency.";
@@ -53,6 +55,8 @@ struct LatencyCardLayout
     LatencyBlock compensation;
     LatencyBlock dropouts;
     LatencyBlock modes;
+    LatencyBlock groups;
+    int groupRows = 0;
     LatencyBlock note;
 };
 
@@ -97,7 +101,16 @@ inline int latencyWrappedLines(int chars, int textWidth) noexcept
     return (chars + perLine - 1) / perLine;
 }
 
-inline LatencyCardLayout layoutLatencyCard(int width, int noteChars) noexcept
+inline int latencyGroupSectionRows(int groupRows) noexcept
+{
+    if (groupRows < 0)
+        groupRows = 0;
+    if (groupRows > kLatencyListedGroupRows)
+        groupRows = kLatencyListedGroupRows;
+    return groupRows;
+}
+
+inline LatencyCardLayout layoutLatencyCard(int width, int noteChars, int groupRows, bool ungroupedLine) noexcept
 {
     LatencyCardLayout card;
     card.contentWidth = std::max(kLatencyMinContentWidth, width);
@@ -125,15 +138,24 @@ inline LatencyCardLayout layoutLatencyCard(int width, int noteChars) noexcept
     y += kLatencyGap;
     card.modes = place(kLatencyModeH);
     y += kLatencyGap;
+    card.groupRows = latencyGroupSectionRows(groupRows);
+    const int ungrouped = ungroupedLine ? 1 : 0;
+    card.groups = place((card.groupRows + ungrouped) * kLatencyGroupRowH);
+    y += kLatencyGap;
     card.note = place(noteHeight);
     y += kLatencyPadY;
     card.contentHeight = y;
     return card;
 }
 
+inline LatencyCardLayout layoutLatencyCard(int width, int noteChars) noexcept
+{
+    return layoutLatencyCard(width, noteChars, kLatencyListedGroupRows, true);
+}
+
 inline LatencyCardLayout layoutLatencyCard(int width) noexcept
 {
-    return layoutLatencyCard(width, longestLatencyNoteChars());
+    return layoutLatencyCard(width, longestLatencyNoteChars(), kLatencyListedGroupRows, true);
 }
 
 } // namespace youhost

@@ -2862,6 +2862,9 @@ void MainComponent::refresh()
     }
 
     latencyReadout_.setNumbers(engine_.latencyNumbers());
+    GroupLatencyLine groupLines[kMaxDisplayGroups];
+    const int groupLinesCount = engine_.copyGroupLatency(groupLines, kMaxDisplayGroups);
+    latencyReadout_.setGroupLines(groupLines, groupLinesCount);
     const auto numbers = engine_.latencyNumbers();
     if (numbers.deviceOpen)
     {

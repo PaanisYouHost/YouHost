@@ -122,6 +122,7 @@ public:
     void nudgeWaveformGain(int direction);
     int alignGroup() const noexcept { return alignGroup_; }
     void setAlignGroup(int perGroup);
+    int copyGroupLatency(GroupLatencyLine* out, int capacity) const;
     CpuMeters cpuMeters() const;
     juce::String channelPdcText(int channel) const;
     void setChannelName(int channel, const juce::String& name);
