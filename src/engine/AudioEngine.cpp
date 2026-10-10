@@ -1718,6 +1718,16 @@ void AudioEngine::setPageRestoreHandler(std::function<void(int)> handler)
     pageRestoreHandler_ = std::move(handler);
 }
 
+void AudioEngine::setTimelineStateProvider(std::function<SessionTimelineState()> provider)
+{
+    timelineProvider_ = std::move(provider);
+}
+
+void AudioEngine::setTimelineStateHandler(std::function<void(const SessionTimelineState&)> handler)
+{
+    timelineHandler_ = std::move(handler);
+}
+
 void AudioEngine::syncRecorderFolder()
 {
     if (recorder_ == nullptr || sessionFolder_ == juce::File())
@@ -1797,6 +1807,10 @@ SessionData AudioEngine::captureSessionData()
     data.page = sessionPage_;
     data.waveformGain = waveformGain_;
     data.alignGroup = alignGroup_;
+    data.hasPreserved = hasPreservedSession_;
+    data.preserved = preservedSession_;
+    if (timelineProvider_)
+        data.timeline = timelineProvider_();
     return data;
 }
 
@@ -1888,6 +1902,10 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
     waveformGain_ = clampWaveformGain(data.waveformGain);
     alignGroup_ = data.alignGroup == 1 ? 1 : 0;
+    hasPreservedSession_ = data.hasPreserved;
+    preservedSession_ = data.preserved;
+    if (timelineHandler_)
+        timelineHandler_(data.timeline);
     applyDisplay(data);
     syncCompensation();
 

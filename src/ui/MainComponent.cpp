@@ -916,6 +916,21 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         setPeakMode(peak, false);
     });
     engine_.setPageRestoreHandler([this](int page) { showPage(page); });
+    engine_.setTimelineStateProvider([this]
+    {
+        auto state = timeline_.viewState();
+        state.height = timelineHeight_;
+        return state;
+    });
+    engine_.setTimelineStateHandler([this](const SessionTimelineState& state)
+    {
+        timeline_.setViewState(state);
+        if (state.height <= 0)
+            return;
+        timelineHeight_ = state.height;
+        settings_.saveTimelineHeight(state.height);
+        resized();
+    });
     engine_.setPluginSlotHandler([this](int channel) { onPluginSlot(channel); });
 
     addAndMakeVisible(meterViewport_);
@@ -1191,6 +1206,8 @@ MainComponent::~MainComponent()
     }
     engine_.setMeterRestoreHandler(nullptr);
     engine_.setPageRestoreHandler(nullptr);
+    engine_.setTimelineStateProvider(nullptr);
+    engine_.setTimelineStateHandler(nullptr);
     latencyWindow_.reset();
 }
 

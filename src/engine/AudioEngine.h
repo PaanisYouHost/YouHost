@@ -155,6 +155,8 @@ public:
     void setSessionPage(int page);
     int sessionPage() const noexcept { return sessionPage_; }
     void setPageRestoreHandler(std::function<void(int)> handler);
+    void setTimelineStateProvider(std::function<SessionTimelineState()> provider);
+    void setTimelineStateHandler(std::function<void(const SessionTimelineState&)> handler);
     bool hasSession() const noexcept { return sessionFolder_.getFullPathName().isNotEmpty(); }
     juce::String sessionName() const { return sessionFolder_.getFileName(); }
     juce::File suggestedSessionFolder() const;
@@ -269,6 +271,10 @@ private:
     std::function<void(bool, int)> meterRestoreHandler_;
     std::function<void(int)> pageRestoreHandler_;
     std::function<void(int)> pluginSlotHandler_;
+    std::function<SessionTimelineState()> timelineProvider_;
+    std::function<void(const SessionTimelineState&)> timelineHandler_;
+    SessionNode preservedSession_ {};
+    bool hasPreservedSession_ = false;
     std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
     std::array<int, kMaxChannels> channelColor_ {};

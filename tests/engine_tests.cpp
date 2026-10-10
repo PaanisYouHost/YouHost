@@ -26,15 +26,163 @@
 #include "engine/PluginLoadPace.h"
 #include "engine/PluginMoves.h"
 #include "engine/StallWatch.h"
+#include "engine/SessionFormat.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <new>
 #include <string>
+#include <thread>
 #include <vector>
+
+namespace
+{
+std::atomic<int> audioAllocations { 0 };
+thread_local bool inAudioCallback = false;
+
+struct AudioAllocationGuard
+{
+    static void note()
+    {
+        if (inAudioCallback)
+            audioAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+} // namespace
+
+void* operator new(std::size_t size)
+{
+    AudioAllocationGuard::note();
+    if (size == 0)
+        size = 1;
+    if (void* pointer = std::malloc(size))
+        return pointer;
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size)
+{
+    return operator new(size);
+}
+
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept
+{
+    AudioAllocationGuard::note();
+    if (size == 0)
+        size = 1;
+    return std::malloc(size);
+}
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
+{
+    return operator new(size, std::nothrow);
+}
+
+void operator delete(void* pointer) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete(void* pointer, std::size_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer, std::size_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete(void* pointer, const std::nothrow_t&) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer, const std::nothrow_t&) noexcept
+{
+    std::free(pointer);
+}
+
+void* operator new(std::size_t size, std::align_val_t alignment)
+{
+    AudioAllocationGuard::note();
+    std::size_t align = static_cast<std::size_t>(alignment);
+    if (align < sizeof(void*))
+        align = sizeof(void*);
+    if (size < align)
+        size = align;
+    if (size % align != 0)
+        size += align - (size % align);
+    void* pointer = nullptr;
+    if (posix_memalign(&pointer, align, size) != 0)
+        throw std::bad_alloc();
+    return pointer;
+}
+
+void* operator new[](std::size_t size, std::align_val_t alignment)
+{
+    return operator new(size, alignment);
+}
+
+void* operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    try
+    {
+        return operator new(size, alignment);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+void* operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+{
+    return operator new(size, alignment, std::nothrow);
+}
+
+void operator delete(void* pointer, std::align_val_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer, std::align_val_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete(void* pointer, std::size_t, std::align_val_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer, std::size_t, std::align_val_t) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete(void* pointer, std::align_val_t, const std::nothrow_t&) noexcept
+{
+    std::free(pointer);
+}
+
+void operator delete[](void* pointer, std::align_val_t, const std::nothrow_t&) noexcept
+{
+    std::free(pointer);
+}
 
 namespace
 {
@@ -1189,6 +1337,404 @@ void testPluginMovesDoNotReload()
     CHECK(instanceDropped);
 }
 
+const youhost::SessionNode* findChild(const youhost::SessionNode& node, const char* name)
+{
+    for (const auto& child : node.children)
+        if (child.name == name)
+            return &child;
+    return nullptr;
+}
+
+const youhost::SessionNode* findChannel(const youhost::SessionNode& node, const char* index)
+{
+    for (const auto& child : node.children)
+    {
+        if (child.name != "Channel")
+            continue;
+        const auto* value = youhost::sessionAttribute(child, "index");
+        if (value != nullptr && *value == index)
+            return &child;
+    }
+    return nullptr;
+}
+
+void testTimelineScroll()
+{
+    CHECK(youhost::lanesVisible(40, 0, 70.0f) == 5);
+    CHECK(youhost::lanesVisible(4, 0, 200.0f) == 4);
+    CHECK(youhost::lanesVisible(40, 100, 400.0f) == 1);
+    CHECK(youhost::lanesShownForVerticalStep(128, 0) == 128);
+
+    float laneWheel = 0.0f;
+    CHECK(youhost::applyLaneWheel(laneWheel, 1.0f, 3, 20, 5) == 2);
+    CHECK(youhost::applyLaneWheel(laneWheel, -1.0f, 0, 20, 5) == 1);
+    laneWheel = 0.0f;
+    CHECK(youhost::applyLaneWheel(laneWheel, -0.4f, 0, 20, 5) == 0);
+    CHECK(youhost::applyLaneWheel(laneWheel, -0.4f, 0, 20, 5) == 0);
+    CHECK(youhost::applyLaneWheel(laneWheel, -0.4f, 0, 20, 5) == 1);
+    CHECK(youhost::applyLaneWheel(laneWheel, -1.0f, 18, 20, 5) == 15);
+
+    double timeWheel = 0.0;
+    const auto moved = youhost::applyTimeWheel(timeWheel, -1.0f, 0, 100000, 10000);
+    CHECK(moved == 1200);
+    CHECK(youhost::applyTimeWheel(timeWheel, 1.0f, 0, 100000, 10000) == 0);
+
+    CHECK(youhost::timelineScrollAxis(0.0f, -1.0f, false, false) == youhost::TimelineScrollAxis::lanes);
+    CHECK(youhost::timelineScrollAxis(0.0f, -1.0f, true, false) == youhost::TimelineScrollAxis::time);
+    CHECK(youhost::timelineScrollAxis(0.8f, 0.1f, false, false) == youhost::TimelineScrollAxis::time);
+    CHECK(youhost::timelineScrollAxis(0.8f, 0.1f, false, true) == youhost::TimelineScrollAxis::gain);
+    CHECK(youhost::timelineTimeDelta(0.0f, -1.0f, true) == -1.0f);
+    CHECK(youhost::timelineTimeDelta(0.5f, -0.1f, false) == 0.5f);
+
+    const auto fitted = youhost::timeBarRange(0, 48000, 48000);
+    CHECK(fitted.size == fitted.limit);
+    const auto zoomed = youhost::timeBarRange(1000, 250, 1000);
+    CHECK(zoomed.limit == 1000.0);
+    CHECK(zoomed.start == 750.0);
+    CHECK(zoomed.size == 250.0);
+    const auto lanes = youhost::laneBarRange(2, 5, 20);
+    CHECK(lanes.limit == 20.0);
+    CHECK(lanes.start == 2.0);
+    CHECK(lanes.size == 5.0);
+
+    youhost::SessionTimelineState missing = youhost::timelineFromNode(youhost::SessionNode {});
+    CHECK(missing.zoom == 0);
+    CHECK(missing.vertical == 0);
+    CHECK(missing.scroll == 0);
+    CHECK(missing.laneScroll == 0);
+    CHECK(missing.height == 0);
+}
+
+void testSessionCompatibility()
+{
+    const char* older = R"(<YouHostSession>
+  <Channel index="1" name="Hat" record="0" custom="keep">
+    <Slot index="0" bypass="0">
+      <PLUGIN name="EQ"/>
+      <State data="abc"/>
+    </Slot>
+  </Channel>
+  <Group index="2" name="Drums" color="1" collapsed="1"/>
+  <Take start="10" length="50">
+    <File channel="1" name="Hat.wav"/>
+  </Take>
+</YouHostSession>)";
+
+    youhost::SessionNode oldRoot;
+    CHECK(youhost::parseSessionXml(older, oldRoot));
+    youhost::SessionDocumentModel loaded;
+    CHECK(youhost::readSessionModel(oldRoot, loaded));
+    CHECK(loaded.version == 0);
+    CHECK(loaded.bits == 24);
+    CHECK(loaded.page == 1);
+    CHECK(near(static_cast<float>(loaded.wave), 1.0f, 0.0001f));
+    CHECK(loaded.align == "all");
+    CHECK(! loaded.hasTimeline);
+    CHECK(loaded.timeline.zoom == 0);
+    CHECK(loaded.timeline.height == 0);
+    CHECK(loaded.channels.size() == 1);
+    CHECK(loaded.channels[0].index == 1);
+    CHECK(loaded.channels[0].name == "Hat");
+    CHECK(loaded.channels[0].listen == "off");
+    CHECK(loaded.channels[0].group == -1);
+    CHECK(loaded.channels[0].slots.size() == 1);
+    CHECK(loaded.channels[0].slots[0].pluginName == "EQ");
+    CHECK(loaded.channels[0].slots[0].state == "abc");
+    CHECK(loaded.groups.size() == 1);
+    CHECK(loaded.groups[0].name == "Drums");
+    CHECK(loaded.groups[0].collapsed);
+    CHECK(loaded.takes.size() == 1);
+    CHECK(loaded.takes[0].files.size() == 1);
+    CHECK(loaded.takes[0].files[0].name == "Hat.wav");
+
+    const auto migrated = youhost::writeSessionModel(loaded);
+    CHECK(youhost::sessionAttributeInt(migrated, "version", 0) == youhost::kSessionFormatVersion);
+    const auto* timeline = findChild(migrated, "Timeline");
+    CHECK(timeline != nullptr);
+    CHECK(youhost::sessionAttributeInt(*timeline, "zoom", -1) == 0);
+    CHECK(youhost::sessionAttributeInt(*timeline, "height", -1) == 0);
+    const auto* kept = findChannel(migrated, "1");
+    CHECK(kept != nullptr);
+    CHECK(youhost::sessionAttribute(*kept, "custom") != nullptr);
+    CHECK(*youhost::sessionAttribute(*kept, "custom") == "keep");
+
+    youhost::SessionNode migratedRoot;
+    CHECK(youhost::parseSessionXml(youhost::writeSessionXml(migrated), migratedRoot));
+    youhost::SessionDocumentModel legacyOfMigrated;
+    CHECK(youhost::readSessionModelLegacy(migratedRoot, legacyOfMigrated));
+    CHECK(legacyOfMigrated.channels.size() == 1);
+    CHECK(legacyOfMigrated.channels[0].name == "Hat");
+    CHECK(! legacyOfMigrated.hasTimeline);
+
+    const char* newer = R"(<YouHostSession version="99" future="keep" wave="1.5">
+  <Channel index="0" name="Kick" group="2" outputDb="3" custom="yes">
+    <Slot index="1" bypass="1" fold="R">
+      <PLUGIN name="Comp" extra="1"/>
+      <State data="xyz"/>
+      <Widget kind="a"/>
+    </Slot>
+  </Channel>
+  <Timeline zoom="3" vertical="1" scroll="100" lanes="2" height="150"/>
+  <Cloud id="7"/>
+  <Take start="0" length="1000">
+    <File channel="0" name="Kick.wav"/>
+  </Take>
+</YouHostSession>)";
+
+    youhost::SessionNode newRoot;
+    CHECK(youhost::parseSessionXml(newer, newRoot));
+    youhost::SessionDocumentModel current;
+    CHECK(youhost::readSessionModel(newRoot, current));
+    CHECK(current.version == 99);
+    CHECK(current.hasTimeline);
+    CHECK(current.timeline.zoom == 3);
+    CHECK(current.timeline.vertical == 1);
+    CHECK(current.timeline.scroll == 100);
+    CHECK(current.timeline.laneScroll == 2);
+    CHECK(current.timeline.height == 150);
+    CHECK(current.channels[0].name == "Kick");
+    CHECK(current.channels[0].group == 2);
+    CHECK(current.channels[0].slots[0].pluginName == "Comp");
+    CHECK(current.channels[0].slots[0].fold == "R");
+    CHECK(current.channels[0].slots[0].bypassed);
+    CHECK(current.takes[0].files[0].name == "Kick.wav");
+
+    youhost::SessionDocumentModel olderReader;
+    CHECK(youhost::readSessionModelLegacy(newRoot, olderReader));
+    CHECK(olderReader.channels[0].name == "Kick");
+    CHECK(olderReader.channels[0].slots[0].state == "xyz");
+    CHECK(olderReader.takes[0].files[0].name == "Kick.wav");
+    CHECK(! olderReader.hasTimeline);
+    CHECK(olderReader.timeline.zoom == 0);
+
+    current.channels[0].name = "Snare";
+    current.channels[0].group = -1;
+    current.channels[0].outputDb = 0.0;
+    const auto resaved = youhost::writeSessionModel(current);
+    CHECK(youhost::sessionAttributeInt(resaved, "version", 0) == youhost::kSessionFormatVersion);
+    CHECK(youhost::sessionAttribute(resaved, "future") != nullptr);
+    CHECK(*youhost::sessionAttribute(resaved, "future") == "keep");
+    CHECK(findChild(resaved, "Cloud") != nullptr);
+    const auto* channel = findChannel(resaved, "0");
+    CHECK(channel != nullptr);
+    CHECK(youhost::sessionAttribute(*channel, "name") != nullptr);
+    CHECK(*youhost::sessionAttribute(*channel, "name") == "Snare");
+    CHECK(youhost::sessionAttribute(*channel, "group") == nullptr);
+    CHECK(youhost::sessionAttribute(*channel, "outputDb") == nullptr);
+    CHECK(youhost::sessionAttribute(*channel, "custom") != nullptr);
+    const auto* slot = findChild(*channel, "Slot");
+    CHECK(slot != nullptr);
+    const auto* plugin = findChild(*slot, "PLUGIN");
+    CHECK(plugin != nullptr);
+    CHECK(youhost::sessionAttribute(*plugin, "extra") != nullptr);
+    CHECK(findChild(*slot, "Widget") != nullptr);
+    CHECK(youhost::sessionAttributeInt(*findChild(resaved, "Timeline"), "zoom", 0) == 3);
+
+    youhost::SessionNode originalDevice;
+    CHECK(youhost::parseSessionXml(
+        R"(<YouHostSession><Device><AUDIODEVICE rate="44100"/><Note text="hi"/></Device></YouHostSession>)",
+        originalDevice));
+    youhost::SessionNode writtenDevice;
+    CHECK(youhost::parseSessionXml(
+        R"(<YouHostSession version="6"><Device><AUDIODEVICE rate="48000"/></Device></YouHostSession>)",
+        writtenDevice));
+    youhost::mergeSessionNodes(originalDevice, writtenDevice);
+    const auto* device = findChild(writtenDevice, "Device");
+    CHECK(device != nullptr);
+    int audioDevices = 0;
+    bool noteKept = false;
+    if (device != nullptr)
+    {
+        for (const auto& child : device->children)
+        {
+            if (child.name == "AUDIODEVICE")
+            {
+                ++audioDevices;
+                const auto* rate = youhost::sessionAttribute(child, "rate");
+                CHECK(rate != nullptr && *rate == "48000");
+            }
+            if (child.name == "Note")
+                noteKept = true;
+        }
+    }
+    CHECK(audioDevices == 1);
+    CHECK(noteKept);
+
+    youhost::SessionNode refused;
+    CHECK(! youhost::parseSessionXml("<NotASession/>", refused) || ! youhost::readSessionModel(refused, current));
+    youhost::SessionNode wrong;
+    CHECK(youhost::parseSessionXml("<NotASession/>", wrong));
+    CHECK(! youhost::readSessionModel(wrong, current));
+
+    youhost::SessionNode named;
+    CHECK(youhost::parseSessionXml("<YouHostSession><Channel index=\"0\" name=\"Kick &amp; Bass\"/></YouHostSession>", named));
+    youhost::SessionDocumentModel ampersand;
+    CHECK(youhost::readSessionModel(named, ampersand));
+    CHECK(ampersand.channels[0].name == "Kick & Bass");
+    const auto escaped = youhost::writeSessionXml(youhost::writeSessionModel(ampersand));
+    CHECK(escaped.find("Kick &amp; Bass") != std::string::npos);
+}
+
+void testNullTestIsTransparent()
+{
+    CHECK(! youhost::pluginSlotRuns(true, false, true));
+    CHECK(youhost::pluginSlotRuns(true, false, false));
+
+    constexpr int frames = 8;
+    const float pattern[frames] = { 1.0f, -1.0f, 0.0f, 0.25f, -0.5f, 0.0001f, 0.5f, -0.125f };
+    std::array<bool, youhost::kMaxChannels> inputsOn {};
+    std::array<bool, youhost::kMaxChannels> outputsOn {};
+    inputsOn[0] = true;
+    inputsOn[7] = true;
+    outputsOn[0] = true;
+    outputsOn[4] = true;
+    outputsOn[7] = true;
+    float in0[frames];
+    float in7[frames];
+    float out0[frames];
+    float out4[frames];
+    float out7[frames];
+    std::memcpy(in0, pattern, sizeof(pattern));
+    std::memcpy(in7, pattern, sizeof(pattern));
+    std::memset(out0, 0x11, sizeof(out0));
+    std::memset(out4, 0x11, sizeof(out4));
+    std::memset(out7, 0x11, sizeof(out7));
+    const float* inputs[] = { in0, in7 };
+    float* outputs[] = { out0, out4, out7 };
+    std::array<youhost::ChannelStrip, youhost::kMaxChannels> strips {};
+    const auto routing = youhost::makeRouting(inputsOn, outputsOn);
+    CHECK(routing.inputPacked[7] == 1);
+    CHECK(routing.outputPacked[7] == 2);
+    youhost::processPassthrough(inputs, 2, outputs, 3, frames, configAt(48000.0, routing), strips.data(), youhost::kMaxChannels);
+    CHECK(std::memcmp(out0, pattern, sizeof(pattern)) == 0);
+    CHECK(std::memcmp(out7, pattern, sizeof(pattern)) == 0);
+    for (int index = 0; index < frames; ++index)
+        CHECK(out4[index] == 0.0f);
+}
+
+void testPluginEditStressStaysResponsive()
+{
+    const auto started = std::chrono::steady_clock::now();
+    youhost::SlotMoveState slots[8] {};
+    for (int index = 0; index < 8; ++index)
+        slots[index].instance = index + 1;
+    int next = 8;
+    youhost::ChannelOpQueue queue;
+    youhost::SessionLoadCursor cursor;
+    cursor.total = 64;
+
+    for (int step = 0; step < 4000; ++step)
+    {
+        const int from = step % 8;
+        const int to = (step + 3) % 8;
+        if ((step % 5) == 0)
+        {
+            const auto copied = youhost::copySlotInstance(slots[from], slots[to], next);
+            if (copied.ok)
+                slots[to].loading = false;
+        }
+        else
+        {
+            youhost::moveSlotInstance(slots[from], slots[to]);
+        }
+
+        if (youhost::beginQueuedLoad(queue))
+            youhost::finishQueuedLoad(queue);
+
+        if (cursor.startOne())
+        {
+            CHECK(cursor.inFlight);
+            CHECK(! cursor.startOne());
+            cursor.completeOne();
+        }
+
+        int hops = youhost::pluginGraveHops();
+        while (youhost::graveStep(hops) != youhost::GraveStep::dropInstance)
+            hops = youhost::graveNextHops(hops);
+    }
+
+    CHECK(cursor.done());
+    CHECK(queue.started == queue.finished);
+    bool seenEmpty = false;
+    for (const auto& slot : slots)
+    {
+        CHECK(! slot.loading);
+        if (slot.instance == 0)
+            seenEmpty = true;
+        CHECK(slot.instance >= 0);
+    }
+    CHECK(! seenEmpty);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    CHECK(elapsed.count() < 200);
+}
+
+void testAudioEngineStressDoesNotAllocate()
+{
+    constexpr int threadCount = 4;
+    constexpr int channelsPerThread = 32;
+    constexpr int frames = 64;
+    constexpr int blocks = 30;
+
+    struct Worker
+    {
+        std::array<youhost::ChannelStrip, channelsPerThread> strips {};
+        std::vector<float> inputs;
+        std::vector<float> outputs;
+        std::array<const float*, channelsPerThread> inputPtrs {};
+        std::array<float*, channelsPerThread> outputPtrs {};
+        youhost::AudioThreadConfig config {};
+    };
+
+    auto workers = std::make_unique<Worker[]>(threadCount);
+    for (int thread = 0; thread < threadCount; ++thread)
+    {
+        auto& worker = workers[static_cast<std::size_t>(thread)];
+        worker.inputs.assign(static_cast<std::size_t>(channelsPerThread * frames), 0.25f);
+        worker.outputs.assign(static_cast<std::size_t>(channelsPerThread * frames), 0.0f);
+        std::array<bool, youhost::kMaxChannels> active {};
+        for (int channel = 0; channel < channelsPerThread; ++channel)
+        {
+            worker.inputPtrs[static_cast<std::size_t>(channel)] = worker.inputs.data() + channel * frames;
+            worker.outputPtrs[static_cast<std::size_t>(channel)] = worker.outputs.data() + channel * frames;
+            active[static_cast<std::size_t>(channel)] = true;
+        }
+        worker.config = configAt(48000.0, youhost::makeRouting(active, active));
+    }
+
+    std::atomic<int> finished { 0 };
+    std::vector<std::thread> threads;
+    threads.reserve(threadCount);
+    audioAllocations.store(0, std::memory_order_relaxed);
+    for (int thread = 0; thread < threadCount; ++thread)
+    {
+        threads.emplace_back([&, thread]
+        {
+            auto& worker = workers[static_cast<std::size_t>(thread)];
+            inAudioCallback = true;
+            for (int block = 0; block < blocks; ++block)
+            {
+                youhost::processPassthrough(worker.inputPtrs.data(),
+                                            channelsPerThread,
+                                            worker.outputPtrs.data(),
+                                            channelsPerThread,
+                                            frames,
+                                            worker.config,
+                                            worker.strips.data(),
+                                            channelsPerThread);
+            }
+            inAudioCallback = false;
+            finished.fetch_add(1, std::memory_order_release);
+        });
+    }
+
+    for (auto& thread : threads)
+        thread.join();
+
+    CHECK(audioAllocations.load() == 0);
+    CHECK(workers[0].outputs[0] == 0.25f);
+    CHECK(workers[3].outputs[static_cast<std::size_t>((channelsPerThread - 1) * frames)] == 0.25f);
+}
+
 void testRaiseUnit()
 {
     CHECK(near(youhost::raiseUnit(0.5f, 4), 0.0625f, 0.00001f));
@@ -1200,6 +1746,11 @@ void testRaiseUnit()
 
 int main()
 {
+    testTimelineScroll();
+    testSessionCompatibility();
+    testNullTestIsTransparent();
+    testPluginEditStressStaysResponsive();
+    testAudioEngineStressDoesNotAllocate();
     testDryPathIsBitIdentical();
     testOutputGainAndListen();
     testWaveformAndAnchor();

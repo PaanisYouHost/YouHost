@@ -175,6 +175,125 @@ inline std::int64_t anchorPlayhead(std::int64_t span, std::int64_t visible, std:
 }
 
 // During playback, scroll only when the playhead leaves the comfortable middle of the view.
+// Step 0 wants every lane, but a lane never draws shorter than this, so a long
+// session scrolls instead of collapsing into hairlines.
+inline constexpr float kMinLaneHeightPx = 14.0f;
+
+inline int lanesVisible(int totalLanes, int verticalStep, float areaHeightPx) noexcept
+{
+    if (totalLanes < 1)
+        totalLanes = 1;
+    const int wanted = lanesShownForVerticalStep(totalLanes, verticalStep);
+    if (! (areaHeightPx >= kMinLaneHeightPx))
+        return wanted;
+    const int fitted = std::max(1, static_cast<int>(areaHeightPx / kMinLaneHeightPx));
+    return std::max(1, std::min(wanted, fitted));
+}
+
+inline int clampLaneIndex(int scroll, int totalLanes, int shown) noexcept
+{
+    const int maxStart = std::max(0, totalLanes - std::max(1, shown));
+    if (scroll < 0)
+        return 0;
+    if (scroll > maxStart)
+        return maxStart;
+    return scroll;
+}
+
+// One wheel notch is about 1.0. Positive deltaY (scroll up) moves toward lane 0.
+inline int applyLaneWheel(float& accumulator, float deltaY, int scroll, int total, int shown) noexcept
+{
+    accumulator += deltaY;
+    const int steps = static_cast<int>(std::trunc(accumulator));
+    accumulator -= static_cast<float>(steps);
+    return clampLaneIndex(scroll - steps, total, shown);
+}
+
+// Positive delta scrolls toward earlier time. One notch moves about 12% of the view.
+inline std::int64_t applyTimeWheel(double& accumulator,
+                                   float delta,
+                                   std::int64_t start,
+                                   std::int64_t span,
+                                   std::int64_t visible) noexcept
+{
+    if (span < 1)
+        span = 1;
+    if (visible < 1)
+        visible = 1;
+    if (visible > span)
+        visible = span;
+    const auto maxStart = span - visible;
+    accumulator += static_cast<double>(-delta) * static_cast<double>(visible) * 0.12;
+    const auto nudge = static_cast<std::int64_t>(accumulator);
+    accumulator -= static_cast<double>(nudge);
+    auto next = start + nudge;
+    if (next < 0)
+        next = 0;
+    if (next > maxStart)
+        next = maxStart;
+    return next;
+}
+
+enum class TimelineScrollAxis
+{
+    lanes,
+    time,
+    gain
+};
+
+inline TimelineScrollAxis timelineScrollAxis(float deltaX, float deltaY, bool shift, bool altOrCommand) noexcept
+{
+    if (altOrCommand)
+        return TimelineScrollAxis::gain;
+    if (shift)
+        return TimelineScrollAxis::time;
+    if (std::fabs(deltaX) > std::fabs(deltaY) && deltaX != 0.0f)
+        return TimelineScrollAxis::time;
+    return TimelineScrollAxis::lanes;
+}
+
+inline float timelineTimeDelta(float deltaX, float deltaY, bool shift) noexcept
+{
+    if (shift)
+        return std::fabs(deltaX) > std::fabs(deltaY) ? deltaX : deltaY;
+    return deltaX;
+}
+
+struct TimelineBarRange
+{
+    double limit = 1.0;
+    double start = 0.0;
+    double size = 1.0;
+};
+
+inline TimelineBarRange timeBarRange(std::int64_t start, std::int64_t visible, std::int64_t span) noexcept
+{
+    if (span < 1)
+        span = 1;
+    if (visible < 1)
+        visible = 1;
+    if (visible > span)
+        visible = span;
+    if (start < 0)
+        start = 0;
+    const auto maxStart = span - visible;
+    if (start > maxStart)
+        start = maxStart;
+    return { static_cast<double>(span), static_cast<double>(start), static_cast<double>(visible) };
+}
+
+inline TimelineBarRange laneBarRange(int scroll, int shown, int total) noexcept
+{
+    if (total < 1)
+        total = 1;
+    if (shown < 1)
+        shown = 1;
+    if (shown > total)
+        shown = total;
+    scroll = clampLaneIndex(scroll, total, shown);
+    return { static_cast<double>(total), static_cast<double>(scroll), static_cast<double>(shown) };
+}
+
 inline std::int64_t followPlayhead(std::int64_t span,
                                   std::int64_t start,
                                   std::int64_t visible,

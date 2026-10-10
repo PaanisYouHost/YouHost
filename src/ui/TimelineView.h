@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/Recorder.h"
+#include "engine/SessionFormat.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
@@ -37,6 +38,8 @@ public:
     void verticalZoomOut();
     void setWaveformGain(float gain);
     void setWaveformGainHandler(std::function<void(float)> handler);
+    void setViewState(const SessionTimelineState& state);
+    SessionTimelineState viewState() const;
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -70,7 +73,10 @@ private:
     int verticalStep_ = 0;
     int laneScroll_ = 0;
     std::int64_t viewStart_ = 0;
+    bool holdTimeScroll_ = false;
+    bool pendingView_ = false;
     bool updatingScroll_ = false;
+    SessionTimelineState pendingViewState_ {};
     bool draggingHeight_ = false;
     int dragStartY_ = 0;
     int dragStartHeight_ = 0;
@@ -85,7 +91,7 @@ private:
     juce::TextButton waveInButton_ { "W+" };
     float waveformGain_ = 1.0f;
     float laneWheel_ = 0.0f;
-    float timeWheel_ = 0.0f;
+    double timeWheel_ = 0.0;
     float gainWheel_ = 0.0f;
     std::function<void(float)> onWaveformGain_;
 };
