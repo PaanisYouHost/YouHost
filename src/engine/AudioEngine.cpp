@@ -1579,6 +1579,25 @@ void AudioEngine::setAlignGroup(int perGroup)
     noteSessionEdit();
 }
 
+int AudioEngine::copyGroupLatency(GroupLatencyLine* out, int capacity) const
+{
+    if (out == nullptr || capacity <= 0 || alignGroup_ != 1 || rack_ == nullptr)
+        return 0;
+    std::array<ChannelLatencyInput, kMaxChannels> inputs {};
+    rack_->copyLatencyInputs(inputs.data(), kMaxChannels);
+    GroupCompensationRow rows[kMaxDisplayGroups];
+    const int count = groupCompensationRows(inputs.data(), kMaxChannels, rows, std::min(capacity, kMaxDisplayGroups));
+    for (int index = 0; index < count; ++index)
+    {
+        out[index] = {};
+        out[index].group = rows[index].group;
+        out[index].alignSamples = rows[index].alignSamples;
+        out[index].members = rows[index].members;
+        writeGroupLatencyName(out[index], groupName(rows[index].group).toRawUTF8());
+    }
+    return count;
+}
+
 CpuMeters AudioEngine::cpuMeters() const
 {
     if (rack_ == nullptr)

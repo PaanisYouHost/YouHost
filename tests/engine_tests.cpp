@@ -396,7 +396,10 @@ void testLatencyWindowFits()
     CHECK(card.output.top + card.output.height <= card.compensation.top);
     CHECK(card.compensation.top + card.compensation.height <= card.dropouts.top);
     CHECK(card.dropouts.top + card.dropouts.height <= card.modes.top);
-    CHECK(card.modes.top + card.modes.height <= card.note.top);
+    CHECK(card.modes.top + card.modes.height <= card.groups.top);
+    CHECK(card.groups.top + card.groups.height <= card.note.top);
+    CHECK(card.groups.height >= (youhost::kLatencyListedGroupRows + 1) * youhost::kLatencyGroupRowH);
+    CHECK(youhost::kLatencyListedGroupRows == youhost::kMaxDisplayGroups);
     CHECK(card.note.top + card.note.height <= card.contentHeight);
 
     const auto core = youhost::latencyNoteText(true, youhost::RoundTripFormula::coreAudioSubtractOneBuffer);
@@ -455,7 +458,7 @@ void testLatencyWindowFits()
     const auto legacyState = youhost::parseWindowState("8 8 900 700 fullscreen");
     CHECK(legacyState.valid);
     CHECK(! legacyState.hasFit);
-    CHECK(youhost::keepRememberedWindow(legacyState, card.contentWidth, card.contentHeight));
+    CHECK(youhost::keepRememberedWindow(legacyState, card.contentWidth, card.contentHeight) == (700 >= card.contentHeight));
 }
 
 void testTimelineNavigation()
@@ -834,6 +837,34 @@ void testLatencyCompensation()
     CHECK(perGroup.delaySamples[2] == 0);
     CHECK(perGroup.delaySamples[3] == 0);
     CHECK(perGroup.alignmentSamples == 300);
+
+    // A latent plugin inside one group must not delay the other channels.
+    youhost::ChannelLatencyInput desk[5] {};
+    desk[0] = { 0, true, 0 };
+    desk[1] = { 480, true, 0 };
+    desk[2] = { 0, true, 1 };
+    desk[3] = { 0, true, -1 };
+    desk[4] = { 1000, true, -1 };
+    const auto global = youhost::planCompensation(desk, 5, youhost::AlignMode::all);
+    CHECK(global.alignmentSamples == 1000);
+    CHECK(global.delaySamples[0] == 1000);
+    CHECK(global.delaySamples[3] == 1000);
+    const auto onlyGroup = youhost::planCompensation(desk, 5, youhost::AlignMode::group);
+    CHECK(onlyGroup.delaySamples[0] == 480);
+    CHECK(onlyGroup.delaySamples[1] == 0);
+    CHECK(onlyGroup.delaySamples[2] == 0);
+    CHECK(onlyGroup.delaySamples[3] == 0);
+    CHECK(onlyGroup.delaySamples[4] == 0);
+    CHECK(onlyGroup.alignmentSamples == 480);
+    youhost::GroupCompensationRow rows[4];
+    const int rowCount = youhost::groupCompensationRows(desk, 5, rows, 4);
+    CHECK(rowCount == 2);
+    CHECK(rows[0].group == 0);
+    CHECK(rows[0].alignSamples == 480);
+    CHECK(rows[0].members == 2);
+    CHECK(rows[1].group == 1);
+    CHECK(rows[1].alignSamples == 0);
+    CHECK(rows[1].members == 1);
 
     youhost::ChannelLatencyInput pair[2] {};
     pair[0] = { 64, true, -1 };
@@ -2998,7 +3029,7 @@ void testReleaseChecklist()
     grouped[3] = { 50, true, 1 };
     const auto perGroup = youhost::planCompensation(grouped, 4, youhost::AlignMode::group);
     const auto allAligned = youhost::planCompensation(grouped, 4, youhost::AlignMode::all);
-    item("Per group delays only that group's channels; All aligned is the other switch",
+    item("Per group delays only that group's channels; Global is the other switch",
          perGroup.delaySamples[0] == 200 && perGroup.delaySamples[1] == 0
              && perGroup.delaySamples[2] == 0 && perGroup.delaySamples[3] == 0
              && perGroup.alignmentSamples == 300
@@ -3006,11 +3037,12 @@ void testReleaseChecklist()
 
     const auto latencyUi = readWorkspaceFile("src/ui/LatencyReadout.cpp");
     const auto latencyHeader = readWorkspaceFile("src/ui/LatencyReadout.h");
-    item("LATENCY has All aligned and Per group, and no Timeline button",
+    item("LATENCY has Global and Per group, and no Timeline button",
          latencyUi.find("\"Timeline\"") == std::string::npos
              && latencyHeader.find("Timeline") == std::string::npos
-             && latencyHeader.find("All aligned") != std::string::npos
-             && latencyHeader.find("Per group") != std::string::npos
+             && latencyHeader.find("\"Global\"") != std::string::npos
+             && latencyHeader.find("\"Per group\"") != std::string::npos
+             && latencyUi.find("Ungrouped") != std::string::npos
              && ! readWorkspaceFile("docs/release-checklist.md").empty());
 
     const auto mainUi = readWorkspaceFile("src/ui/MainComponent.cpp");
