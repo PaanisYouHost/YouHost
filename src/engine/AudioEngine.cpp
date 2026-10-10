@@ -2927,6 +2927,18 @@ void AudioEngine::selectChannel(int channel, bool extend, bool toggle)
         selectionHandler_(channel);
 }
 
+void AudioEngine::selectAllVisibleChannels()
+{
+    const auto strips = displayStrips(visibleChannels());
+    int shown[kMaxChannels];
+    const int count = shownChannelNumbers(strips.data(), static_cast<int>(strips.size()), shown, kMaxChannels);
+    const auto selection = selectAllChannels(shown, count);
+    selection_ = selection.channels;
+    selectionAnchor_ = selection.anchor;
+    if (selectionHandler_ != nullptr && ! selection_.empty())
+        selectionHandler_(selectionAnchor_);
+}
+
 void AudioEngine::setSelectionHandler(std::function<void(int)> handler)
 {
     selectionHandler_ = std::move(handler);

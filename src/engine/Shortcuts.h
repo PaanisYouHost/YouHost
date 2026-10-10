@@ -32,6 +32,7 @@ enum class ShortcutId
     save,
     saveAs,
     goToChannel,
+    selectAll,
     count
 };
 
@@ -72,6 +73,10 @@ struct Binding
 inline constexpr Binding kBindings[] = {
     { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
       "Go to channel. Type the number and press Return.", false, 0 },
+    { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
+      "Select every visible channel on the REC page", false, 0 },
+    { ShortcutId::selectAll, KeyKind::character, 'a', 0, 0, 0, "A",
+      "Select every visible channel on the REC page", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
       "Save a copy of the whole session, including audio, then continue in the new folder", true, 's' },
     { ShortcutId::save, KeyKind::character, 's', 0, 1, 0, "Cmd+S",
@@ -228,7 +233,9 @@ inline constexpr const char* kShortcutNotes =
     "\n"
     "5. In the startup window, choose the audio card.\n"
     "Click a channel to select it. Shift+click selects the channels from the anchor through the one you click. "
-    "Cmd+click, or Ctrl+click, adds or removes that one channel.\n"
+    "Cmd+click, or Ctrl+click, adds or removes that one channel. "
+    "Cmd+A, or A, selects every visible channel on the REC page, so you can colour or group them together. "
+    "It does not select on the HOST page.\n"
     "Make group from selection assigns those channels to one of the 10 groups and folds the group. "
     "The group bar stays visible. Click it to open the channels again. Use the channel menu or the Group button.\n"
     "On the REC page a group bar shows the group name in the centre. On the HOST page the name stays on the left. "

@@ -55,4 +55,31 @@ inline ChannelSelection pickChannels(ChannelSelection current, int channel, int 
     return current;
 }
 
+// Cmd+A and A select the channels that are on screen. Folded group members are
+// not in that list. The anchor is the first visible channel.
+inline ChannelSelection selectAllChannels(const int* channels, int count)
+{
+    ChannelSelection selection;
+    if (channels == nullptr || count <= 0)
+        return selection;
+    for (int index = 0; index < count; ++index)
+    {
+        const int channel = channels[index];
+        if (channel < 0)
+            continue;
+        if (std::find(selection.channels.begin(), selection.channels.end(), channel) != selection.channels.end())
+            continue;
+        selection.channels.push_back(channel);
+    }
+    if (! selection.channels.empty())
+        selection.anchor = selection.channels.front();
+    return selection;
+}
+
+// Select-all is the REC page only. A text field keeps the key for typing.
+inline bool selectAllShortcutApplies(int page, bool textFieldFocused) noexcept
+{
+    return page == 1 && ! textFieldFocused;
+}
+
 } // namespace youhost
