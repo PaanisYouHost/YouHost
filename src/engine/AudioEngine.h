@@ -239,6 +239,7 @@ private:
     void audioDeviceStopped() override;
     void audioDeviceError(const juce::String& errorMessage) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    void applyPreferredTiming();
 
     void publishConfig(juce::AudioIODevice& device);
     void publishSessionChannelLimit();
@@ -310,6 +311,7 @@ private:
     bool recordLockArmed_ = false;
     double preferredRate_ = 48000.0;
     int preferredBuffer_ = kNewSessionBufferSamples;
+    bool applyingTiming_ = false;
     juce::String sessionRateNotice_;
     int sessionChannelCount_ = kMaxChannels;
     std::atomic<int> sessionVisible_ { kMaxChannels };

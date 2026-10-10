@@ -3,6 +3,7 @@
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
 #include "engine/ChannelListen.h"
+#include "engine/AudioSetupMenus.h"
 #include "engine/SessionChannels.h"
 #include "engine/StatusLine.h"
 #include "engine/RecordLock.h"
@@ -678,8 +679,11 @@ void testWindowContentFits()
     CHECK(youhost::scannerWindowHeight() >= youhost::scannerControlHeight());
     CHECK(youhost::groupRenameWindowHeight() >= youhost::groupRenameContentHeight());
     CHECK(youhost::pluginListWindowHeight() >= youhost::pluginPickerContentHeight());
-    CHECK(youhost::setupWindowHeight() >= 480);
-    CHECK(youhost::startupWindowHeight() >= 640);
+    CHECK(youhost::setupWindowHeight() == 12 + youhost::audioSetupFormHeight() + 12);
+    CHECK(youhost::startupWindowHeight() == 12 + youhost::audioSetupFormHeight() + 10 + youhost::startupSessionBlockHeight() + 12);
+    CHECK(youhost::startupSessionBlockHeight() == 28 + 6 + 28 + 22 + 6 + 32 + 8 + 20 + youhost::startupRecentListHeight());
+    CHECK(youhost::setupWindowHeight() < 280);
+    CHECK(youhost::startupWindowHeight() < 560);
     const auto startup = readWorkspaceFile("src/ui/MainComponent.cpp");
     CHECK(! startup.empty());
     CHECK(startup.find("Choose the interface, sample rate, and buffer size") == std::string::npos);
@@ -3107,17 +3111,63 @@ void testReleaseChecklist()
         { "MacBook Pro Microphone", 1, 0 },
         { "Pro Tools Audio Bridge 32", 32, 32 },
     };
-    const auto startupMenu = youhost::buildDeviceList(cards, "");
-    const auto setupMenu = youhost::buildDeviceList(cards, "");
-    bool oneMenu = startupMenu.size() == setupMenu.size() && ! startupMenu.empty()
-                   && startupMenu.back().label == youhost::kOfflineDeviceName
-                   && setupMenu.back().label == youhost::kOfflineDeviceName;
-    for (std::size_t index = 0; index < startupMenu.size() && oneMenu; ++index)
+    const auto startupMenus = youhost::audioSetupMenus(cards, "", true, 48000.0, 24, 32);
+    const auto setupMenus = youhost::audioSetupMenus(cards, "WING 2", false, 48000.0, 24, 32);
+    const char* menuLabels[] = { "Audio card:", "Sample rate:", "Bit depth:", "Buffer:" };
+    bool oneMenu = startupMenus.size() == 4 && setupMenus.size() == 4;
+    bool offlineListed = false;
+    for (int index = 0; index < 4 && oneMenu; ++index)
     {
-        oneMenu = startupMenu[index].label == setupMenu[index].label;
-        if (startupMenu[index].label == "Input:" || startupMenu[index].label == "Output:")
-            oneMenu = false;
+        oneMenu = std::string(startupMenus[static_cast<std::size_t>(index)].label) == menuLabels[index]
+                  && std::string(setupMenus[static_cast<std::size_t>(index)].label) == menuLabels[index];
     }
+    if (oneMenu)
+    {
+        for (const auto& choice : startupMenus[0].choices)
+            if (choice.text == youhost::kOfflineDeviceName && choice.id == youhost::kOfflineDeviceItemId)
+                offlineListed = true;
+        bool setupOffline = false;
+        bool setupCard = false;
+        for (const auto& choice : setupMenus[0].choices)
+        {
+            if (choice.text == youhost::kOfflineDeviceName && choice.id == youhost::kOfflineDeviceItemId)
+                setupOffline = true;
+            if (choice.text.find("WING 2") != std::string::npos && choice.id == setupMenus[0].selectedId)
+                setupCard = true;
+        }
+        oneMenu = offlineListed
+                  && setupOffline
+                  && setupCard
+                  && startupMenus[0].selectedId == youhost::kOfflineDeviceItemId
+                  && startupMenus[1].selectedId == 48000
+                  && startupMenus[2].selectedId == 24
+                  && startupMenus[3].selectedId == 32
+                  && setupMenus[1].selectedId == 48000
+                  && setupMenus[2].selectedId == 24
+                  && setupMenus[3].selectedId == 32
+                  && startupMenus[1].choices.size() >= 2
+                  && startupMenus[2].choices.size() == 3
+                  && setupMenus[1].choices.size() == startupMenus[1].choices.size()
+                  && setupMenus[2].choices.size() == startupMenus[2].choices.size()
+                  && setupMenus[3].choices.size() == startupMenus[3].choices.size();
+        for (const auto& menu : startupMenus)
+            if (std::string(menu.label) == "Input:" || std::string(menu.label) == "Output:")
+                oneMenu = false;
+    }
+    const auto setupUi = readWorkspaceFile("src/ui/MainComponent.cpp");
+    const auto setupHeader = readWorkspaceFile("src/ui/MainComponent.h");
+    const auto firstForm = setupUi.find("AudioSetupForm audioSetup_");
+    const auto secondForm = firstForm == std::string::npos ? std::string::npos : setupUi.find("AudioSetupForm audioSetup_", firstForm + 1);
+    oneMenu = oneMenu
+              && setupUi.find("audioSetupMenus(") != std::string::npos
+              && firstForm != std::string::npos
+              && secondForm != std::string::npos
+              && setupUi.find("\"Input:\"") == std::string::npos
+              && setupUi.find("\"Output:\"") == std::string::npos
+              && setupUi.find("Internal disk") == std::string::npos
+              && setupUi.find("AudioDeviceSelectorComponent") == std::string::npos
+              && setupHeader.find("AudioDeviceSelectorComponent") == std::string::npos
+              && setupUi.find("\"Test\"") == std::string::npos;
     item("startup and Audio setup share one audio card menu", oneMenu);
 
     youhost::RecordAttempt attempt;
@@ -3223,7 +3273,10 @@ void testReleaseChecklist()
             macbookOne = macbookOne && device.inputs == 1 && device.outputs == 2
                          && device.inputName == "MacBook Pro Microphone"
                          && device.outputName == "MacBook Pro Speakers";
-    item("MacBook built-in is one audio card", macbookOne && mainUi.find("\"Audio card:\"") != std::string::npos);
+    const auto menuModel = readWorkspaceFile("src/engine/AudioSetupMenus.h");
+    item("MacBook built-in is one audio card",
+         macbookOne && menuModel.find("\"Audio card:\"") != std::string::npos
+             && mainUi.find(".label, juce::dontSendNotification") != std::string::npos);
 
     int listenModes[4] = {};
     const auto clickStarted = std::chrono::steady_clock::now();
@@ -3306,7 +3359,8 @@ void testReleaseChecklist()
              && mainUi.find("setRecordLockArmed(! engine_.recordLockArmed())") != std::string::npos);
 
     item("device menu is not rebuilt on every timer tick",
-         mainUi.find("if (revision != seenMenuRevision_)") != std::string::npos);
+         mainUi.find("if (signature != cardSignature_)") != std::string::npos
+             && mainUi.find("fillBox(boxes_[0], menus[0])") != std::string::npos);
 
     item("Show Backups is not a control",
          mainUi.find("Show Backup") == std::string::npos && mainHeader.find("Show Backup") == std::string::npos);

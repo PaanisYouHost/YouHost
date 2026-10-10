@@ -17,7 +17,7 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | Cmd+Q prompt | A dirty session asks Save, Save As, Don't Save, or Cancel. Cancel does not quit. Save and Save As run first. Don't Save quits. A take that is still recording must be stopped before that prompt. |
 | Buffer 32 | A new session requests a 32-sample buffer. |
 | Device lock, no polling | While a chosen card is up and its inventory is already filled, a poll does not query devices. A real device loss, an empty inventory, or an explicit card change may query. |
-| One audio card menu | Startup and Audio setup build the same device list: hardware, then virtual devices, then built-in, then Offline. There is no separate Input or Output menu in that list. |
+| One audio card menu | Start session and Audio setup each show Audio card, Sample rate, Bit depth, and Buffer, in that order. Offline is in the card menu and is selected when no card is open. Buffer defaults to 32. There is no Input menu, Output menu, test meter, or Internal disk button. |
 | Record starts | Cmd+Space with a session, a live device, and a REC channel that has an input starts the take. |
 | No hangs | Fifty open-size and compensation calculations stay under 16 ms. The same binary also runs the plugin-edit and audio-engine stress tests. |
 | New, Open, Save, Save As | New, Open, and Open Recent ask before discarding edits. Save and Save As are the choices that write first. A clean session does not ask. |

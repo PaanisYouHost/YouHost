@@ -13,11 +13,14 @@
 #include "engine/RecordStart.h"
 #include "engine/HostLog.h"
 #include "engine/ChannelSelect.h"
+#include "engine/AudioSetupMenus.h"
 #include "engine/SessionChannels.h"
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
 #include "engine/StatusLine.h"
 
+#include <array>
+#include <map>
 #include <vector>
 
 namespace youhost
@@ -46,77 +49,8 @@ void showUnsavedChoice(std::function<void(int result)> callback)
     window->enterModalState(true, juce::ModalCallbackFunction::create(std::move(callback)), true);
 }
 
-class BitDepthSlot : public juce::Component
-{
-public:
-    BitDepthSlot()
-    {
-        setComponentID("youhost-bit-depth");
-        addAndMakeVisible(box_);
-        // Same attachment as JUCE's "Sample rate:" row: the label sits to the
-        // left of the combo, and the combo itself uses the standard row bounds.
-        label_.setText("Bit depth:", juce::dontSendNotification);
-        label_.attachToComponent(this, true);
-        box_.addItem("16-bit", 16);
-        box_.addItem("24-bit", 24);
-        box_.addItem("32-bit float", 32);
-        box_.setTooltip("Bit depth for the next take. 24-bit is the default. 32-bit is float. A take that is already recording keeps its depth.");
-    }
-
-    void resized() override
-    {
-        box_.setBounds(getLocalBounds());
-    }
-
-    int selectedId() const { return box_.getSelectedId(); }
-
-    void setSelectedId(int id)
-    {
-        if (box_.getSelectedId() != id)
-            box_.setSelectedId(id, juce::dontSendNotification);
-    }
-
-    std::function<void(int)> onChange;
-
-private:
-    void changeCallback()
-    {
-        if (onChange != nullptr && box_.getSelectedId() > 0)
-            onChange(box_.getSelectedId());
-    }
-
-    juce::Label label_;
-    juce::ComboBox box_;
-
-public:
-    void bind()
-    {
-        box_.onChange = [this] { changeCallback(); };
-    }
-};
-
 namespace
 {
-
-
-void hideTestButtons(juce::Component& component)
-{
-    for (auto* child : component.getChildren())
-    {
-        if (child == nullptr)
-            continue;
-        if (auto* button = dynamic_cast<juce::TextButton*>(child))
-        {
-            if (button->getButtonText() == "Test")
-            {
-                button->setVisible(false);
-                button->setEnabled(false);
-                button->onClick = nullptr;
-            }
-        }
-        hideTestButtons(*child);
-    }
-}
 
 int referenceIdFor(int db)
 {
@@ -172,330 +106,6 @@ void quiet(juce::Button& button)
 {
     button.setMouseClickGrabsKeyboardFocus(false);
     button.setWantsKeyboardFocus(false);
-}
-
-juce::String deviceRawName(const juce::ComboBox& box, int itemId)
-{
-    const auto map = box.getProperties()["youhostDeviceMap"].toString();
-    const auto key = juce::String(itemId) + "=";
-    for (auto line : juce::StringArray::fromLines(map))
-        if (line.startsWith(key))
-            return line.fromFirstOccurrenceOf("=", false, false);
-    return {};
-}
-
-void rememberDeviceRaw(juce::ComboBox& box, int itemId, const juce::String& name)
-{
-    auto map = box.getProperties()["youhostDeviceMap"].toString();
-    if (map.isNotEmpty())
-        map << "\n";
-    map << itemId << "=" << name;
-    box.getProperties().set("youhostDeviceMap", map);
-}
-
-bool comboTextIsDeviceType(const juce::String& text)
-{
-    const auto lower = text.toLowerCase();
-    return lower == "coreaudio"
-           || lower == "alsa"
-           || lower == "jack"
-           || lower == "asio"
-           || lower == "directsound"
-           || lower == "ios audio"
-           || lower == "android"
-           || lower == "oboe"
-           || lower == "opensles"
-           || lower.contains("windows audio");
-}
-
-juce::String rawDeviceFromMenuText(const juce::String& text)
-{
-    if (text == juce::String(kOfflineDeviceName) || text == juce::String(kVirtualDeviceHeading))
-        return {};
-    const auto marker = " - ";
-    const auto inMarker = " in / ";
-    const auto cut = text.lastIndexOf(marker);
-    if (cut > 0 && text.substring(cut).contains(inMarker) && text.endsWith(" out"))
-        return text.substring(0, cut);
-    return text;
-}
-
-void showDeviceSwitchBlocked(const std::string& reason)
-{
-    if (reason.empty())
-        return;
-    const auto title = reason.find("locked") != std::string::npos ? juce::String("Recording is locked")
-                                                                  : juce::String("Stop recording first");
-    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, juce::String(reason));
-}
-
-void presentSingleAudioCard(juce::Component& root);
-
-// Keeps JUCE's device row beside sample rate and buffer. The menu is hardware,
-// then a separator, then virtual devices, then Offline. Channel counts are in the names.
-void syncOfflineDeviceEntry(juce::Component& root, AudioEngine& engine)
-{
-    const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine.isRecording(), engine.recordLockArmed());
-    const auto connected = engine.connectedDevices();
-    std::function<void(juce::Component&)> walk;
-    walk = [&](juce::Component& node)
-    {
-        for (auto* child : node.getChildren())
-        {
-            if (child == nullptr)
-                continue;
-            if (auto* box = dynamic_cast<juce::ComboBox*>(child))
-            {
-                const bool marked = box->getProperties().contains("youhostDeviceList");
-                bool sampleRate = false;
-                bool bufferSize = false;
-                bool bitDepth = false;
-                bool typeOnly = box->getNumItems() > 0;
-                bool namedDevice = marked;
-                for (int index = 0; index < box->getNumItems(); ++index)
-                {
-                    const auto text = box->getItemText(index);
-                    if (text.containsIgnoreCase("hz"))
-                        sampleRate = true;
-                    if (text.containsIgnoreCase("sample"))
-                        bufferSize = true;
-                    if (text.containsIgnoreCase("bit"))
-                        bitDepth = true;
-                    if (! comboTextIsDeviceType(text))
-                        typeOnly = false;
-                    if (text.containsIgnoreCase("none")
-                        || text == juce::String(kOfflineDeviceName)
-                        || text == juce::String(kVirtualDeviceHeading))
-                        namedDevice = true;
-                    const auto raw = rawDeviceFromMenuText(text);
-                    for (const auto& device : connected)
-                        if (raw == juce::String(device.name) || text == juce::String(device.name))
-                            namedDevice = true;
-                }
-
-                if ((sampleRate || bufferSize || bitDepth) && ! namedDevice)
-                {
-                    if (sampleRate)
-                        box->setEnabled(rateOk);
-                    walk(*child);
-                    continue;
-                }
-                if (typeOnly && ! namedDevice)
-                {
-                    walk(*child);
-                    continue;
-                }
-                if (box->getNumItems() == 0 && ! marked)
-                {
-                    walk(*child);
-                    continue;
-                }
-
-                box->getProperties().set("youhostDeviceList", true);
-                box->setEnabled(true);
-                box->onChange = [box, &engine]
-                {
-                    if (static_cast<bool>(box->getProperties()["youhostApplying"]))
-                        return;
-                    const int selected = box->getSelectedId();
-                    const auto blocked = deviceSwitchBlockedReason(engine.isRecording(), engine.recordLockArmed());
-                    if (! blocked.empty())
-                    {
-                        const int last = static_cast<int>(box->getProperties()["youhostLastDevice"]);
-                        box->setSelectedId(last == 0 ? -1 : last, juce::dontSendNotification);
-                        showDeviceSwitchBlocked(blocked);
-                        return;
-                    }
-                    if (selected == kOfflineDeviceItemId)
-                    {
-                        box->getProperties().set("youhostLastDevice", selected);
-                        engine.setOfflineTemplate(true);
-                        return;
-                    }
-                    const auto raw = deviceRawName(*box, selected);
-                    if (raw.isEmpty())
-                        return;
-                    box->getProperties().set("youhostLastDevice", selected);
-                    engine.noteUserChoseDevice(raw);
-                    if (engine.offlineTemplate())
-                        engine.setOfflineTemplate(false);
-                    engine.openNamedDevice(raw);
-                };
-
-                std::vector<ListedDevice> catalog = connected;
-                const auto rememberSeen = [&catalog](const juce::String& name, int inputs, int outputs)
-                {
-                    if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
-                        return;
-                    for (auto& device : catalog)
-                    {
-                        if (device.name == name.toStdString())
-                        {
-                            if (device.inputs < 0 && inputs >= 0)
-                            {
-                                device.inputs = inputs;
-                                device.outputs = outputs;
-                            }
-                            return;
-                        }
-                    }
-                    ListedDevice item;
-                    item.name = name.toStdString();
-                    item.inputs = inputs;
-                    item.outputs = outputs;
-                    catalog.push_back(std::move(item));
-                };
-                for (int index = 0; index < box->getNumItems(); ++index)
-                {
-                    const auto text = box->getItemText(index);
-                    if (text == juce::String(kVirtualDeviceHeading))
-                        continue;
-                    const auto mapped = deviceRawName(*box, box->getItemId(index));
-                    const auto raw = mapped.isNotEmpty() ? mapped : rawDeviceFromMenuText(text);
-                    rememberSeen(raw, -1, -1);
-                }
-
-                const auto rows = buildDeviceList(catalog, "");
-                juce::String desired;
-                for (const auto& row : rows)
-                    desired << (row.selectable ? "d:" : "h:") << juce::String(row.label) << "\n";
-                const auto stored = box->getProperties()["youhostDeviceSignature"].toString();
-                const bool offlineMissing = box->indexOfItemId(kOfflineDeviceItemId) < 0;
-                if (stored != desired || offlineMissing)
-                {
-                    const auto selectedRaw = deviceRawName(*box, box->getSelectedId());
-                    const auto fallback = rawDeviceFromMenuText(box->getText());
-                    box->getProperties().set("youhostApplying", true);
-                    box->clear(juce::dontSendNotification);
-                    box->getProperties().set("youhostDeviceMap", juce::String());
-                    int nextId = 1;
-                    int keepId = 0;
-                    for (const auto& row : rows)
-                    {
-                        if (! row.selectable)
-                        {
-                            box->addSectionHeading(juce::String(row.label));
-                            continue;
-                        }
-                        const int itemId = row.kind == DeviceRowKind::offline ? kOfflineDeviceItemId : nextId++;
-                        box->addItem(juce::String(row.label), itemId);
-                        rememberDeviceRaw(*box, itemId, juce::String(row.name));
-                        if (selectedRaw == juce::String(row.name) || fallback == juce::String(row.name))
-                            keepId = itemId;
-                    }
-                    if (box->indexOfItemId(kOfflineDeviceItemId) < 0)
-                    {
-                        box->addItem(kOfflineDeviceName, kOfflineDeviceItemId);
-                        rememberDeviceRaw(*box, kOfflineDeviceItemId, kOfflineDeviceName);
-                    }
-                    const auto liveName = engine.deviceName();
-                    if (engine.offlineTemplate())
-                        box->setSelectedId(kOfflineDeviceItemId, juce::dontSendNotification);
-                    else if (keepId != 0)
-                        box->setSelectedId(keepId, juce::dontSendNotification);
-                    else if (liveName.isNotEmpty())
-                    {
-                        for (int index = 0; index < box->getNumItems(); ++index)
-                        {
-                            const int itemId = box->getItemId(index);
-                            if (deviceRawName(*box, itemId) == liveName)
-                            {
-                                box->setSelectedId(itemId, juce::dontSendNotification);
-                                break;
-                            }
-                        }
-                    }
-                    if (box->getSelectedId() > 0)
-                        box->getProperties().set("youhostLastDevice", box->getSelectedId());
-                    box->getProperties().set("youhostDeviceSignature", desired);
-                    box->getProperties().set("youhostApplying", false);
-                }
-                else if (engine.offlineTemplate() && box->getSelectedId() != kOfflineDeviceItemId)
-                {
-                    box->setSelectedId(kOfflineDeviceItemId, juce::dontSendNotification);
-                }
-            }
-            walk(*child);
-        }
-    };
-    walk(root);
-    presentSingleAudioCard(root);
-}
-
-void presentSingleAudioCard(juce::Component& root)
-{
-    struct InputRow
-    {
-        juce::Label* label = nullptr;
-        juce::Component* box = nullptr;
-    };
-    std::vector<InputRow> inputs;
-    std::function<void(juce::Component&)> find;
-    find = [&](juce::Component& node)
-    {
-        for (auto* child : node.getChildren())
-        {
-            if (child == nullptr)
-                continue;
-            if (auto* label = dynamic_cast<juce::Label*>(child))
-            {
-                const auto text = label->getText();
-                if (text == "Input:" || text.startsWith("Input:"))
-                    inputs.push_back({ label, label->getAttachedComponent() });
-                else if (text == "Output:" || text == "Device:" || text.startsWith("Output:"))
-                    label->setText("Audio card:", juce::dontSendNotification);
-            }
-            find(*child);
-        }
-    };
-    find(root);
-    InputRow open;
-    for (const auto& row : inputs)
-    {
-        if (row.label == nullptr)
-            continue;
-        if (row.label->isVisible() || row.label->getHeight() > 0)
-            open = row;
-    }
-    if (open.label == nullptr)
-        return;
-
-    const int shift = std::max(open.label->getHeight(), open.box != nullptr ? open.box->getHeight() : 0) + 6;
-    const int cut = open.label->getY();
-    for (const auto& row : inputs)
-    {
-        if (row.label == nullptr)
-            continue;
-        row.label->setVisible(false);
-        row.label->setSize(row.label->getWidth(), 0);
-        if (row.box != nullptr)
-        {
-            row.box->setVisible(false);
-            row.box->setSize(row.box->getWidth(), 0);
-        }
-    }
-    if (shift <= 6)
-        return;
-
-    std::function<void(juce::Component&)> lift;
-    lift = [&](juce::Component& node)
-    {
-        for (auto* child : node.getChildren())
-        {
-            if (child == nullptr)
-                continue;
-            bool isInput = false;
-            for (const auto& row : inputs)
-                if (child == row.label || child == row.box)
-                    isInput = true;
-            if (isInput)
-                continue;
-            if (child->isVisible() && child->getY() > cut)
-                child->setTopLeftPosition(child->getX(), child->getY() - shift);
-            lift(*child);
-        }
-    };
-    lift(root);
 }
 
 class FloatWindow : public juce::DocumentWindow
@@ -570,46 +180,184 @@ private:
     int fitHeight_ = 0;
 };
 
-void attachBitDepthSlot(juce::AudioDeviceSelectorComponent& selector, BitDepthSlot& slot)
+class AudioSetupForm : public juce::Component,
+                       private juce::Timer
 {
-    juce::Component* panel = nullptr;
-    std::function<void(juce::Component&)> walk;
-    walk = [&](juce::Component& node)
+public:
+    explicit AudioSetupForm(AudioEngine& engine)
+        : engine_(engine)
     {
-        for (auto* child : node.getChildren())
+        const char* ids[] = { "youhost-audio-card", "youhost-sample-rate", "youhost-bit-depth", "youhost-buffer" };
+        const auto initial = audioSetupMenus({}, "", true, 48000.0, 24, kNewSessionBufferSamples);
+        for (std::size_t index = 0; index < labels_.size(); ++index)
         {
-            if (child == nullptr || child == &slot)
-                continue;
-            if (auto* label = dynamic_cast<juce::Label*>(child))
-                if (label->getText() == "Sample rate:")
-                    panel = label->getParentComponent();
-            if (panel == nullptr)
-                walk(*child);
+            labels_[index].setText(initial[index].label, juce::dontSendNotification);
+            labels_[index].setJustificationType(juce::Justification::centredRight);
+            boxes_[index].setComponentID(ids[index]);
+            addAndMakeVisible(labels_[index]);
+            addAndMakeVisible(boxes_[index]);
+            if (index > 0)
+                fillBox(boxes_[index], initial[index]);
         }
-    };
-    walk(selector);
-    if (panel == nullptr)
-        return;
-    if (slot.getParentComponent() != panel)
-    {
-        if (auto* old = slot.getParentComponent())
-            old->removeChildComponent(&slot);
-        panel->addAndMakeVisible(&slot);
-        panel->resized();
+        boxes_[0].onChange = [this] { cardChanged(); };
+        boxes_[1].onChange = [this] { rateChanged(); };
+        boxes_[2].onChange = [this] { bitsChanged(); };
+        boxes_[3].onChange = [this] { bufferChanged(); };
+        reload();
+        startTimerHz(4);
     }
-}
+
+    ~AudioSetupForm() override
+    {
+        stopTimer();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        const int labelWidth = 130;
+        for (std::size_t index = 0; index < labels_.size(); ++index)
+        {
+            auto row = area.removeFromTop(audioSetupRowHeight());
+            labels_[index].setBounds(row.removeFromLeft(labelWidth));
+            row.removeFromLeft(8);
+            boxes_[index].setBounds(row);
+            if (index + 1 < labels_.size())
+                area.removeFromTop(audioSetupRowGap());
+        }
+    }
+
+private:
+    void fillBox(juce::ComboBox& box, const AudioSetupMenu& menu)
+    {
+        box.clear(juce::dontSendNotification);
+        for (const auto& choice : menu.choices)
+        {
+            if (choice.heading)
+                box.addSectionHeading(juce::String(choice.text));
+            else
+                box.addItem(juce::String(choice.text), choice.id);
+        }
+        if (menu.selectedId > 0)
+            box.setSelectedId(menu.selectedId, juce::dontSendNotification);
+    }
+
+    void reload()
+    {
+        const auto devices = engine_.connectedDevices();
+        const bool offline = engine_.offlineTemplate();
+        const auto menus = audioSetupMenus(devices,
+                                            engine_.deviceName().toStdString(),
+                                            offline,
+                                            engine_.preferredSampleRate(),
+                                            engine_.wavBitDepth(),
+                                            engine_.preferredBuffer());
+        std::string signature;
+        cardRaws_.clear();
+        for (const auto& choice : menus[0].choices)
+        {
+            signature += choice.text;
+            signature += "\n";
+            if (! choice.heading)
+                cardRaws_[choice.id] = choice.raw;
+        }
+        applying_ = true;
+        if (signature != cardSignature_)
+        {
+            cardSignature_ = signature;
+            fillBox(boxes_[0], menus[0]);
+        }
+        else if (menus[0].selectedId > 0 && boxes_[0].getSelectedId() != menus[0].selectedId)
+            boxes_[0].setSelectedId(menus[0].selectedId, juce::dontSendNotification);
+        for (std::size_t index = 1; index < boxes_.size(); ++index)
+        {
+            const int selected = menus[index].selectedId;
+            if (selected > 0 && boxes_[index].getSelectedId() != selected)
+                boxes_[index].setSelectedId(selected, juce::dontSendNotification);
+        }
+        applying_ = false;
+
+        const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
+        const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
+        boxes_[1].setEnabled(rateOk);
+        boxes_[3].setEnabled(bufferOk);
+    }
+
+    void timerCallback() override
+    {
+        reload();
+    }
+
+    void cardChanged()
+    {
+        if (applying_)
+            return;
+        const int selected = boxes_[0].getSelectedId();
+        const auto blocked = deviceSwitchBlockedReason(engine_.isRecording(), engine_.recordLockArmed());
+        if (! blocked.empty())
+        {
+            applying_ = true;
+            reload();
+            applying_ = false;
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "Recording is locked",
+                                                   juce::String(blocked));
+            return;
+        }
+        if (selected == kOfflineDeviceItemId)
+        {
+            engine_.setOfflineTemplate(true);
+            return;
+        }
+        const auto raw = cardRaws_[selected];
+        if (raw.empty())
+            return;
+        engine_.noteUserChoseDevice(juce::String(raw));
+        if (engine_.offlineTemplate())
+            engine_.setOfflineTemplate(false);
+        engine_.openNamedDevice(juce::String(raw));
+    }
+
+    void rateChanged()
+    {
+        if (applying_ || boxes_[1].getSelectedId() <= 0)
+            return;
+        engine_.setPreferredSampleRate(static_cast<double>(boxes_[1].getSelectedId()));
+    }
+
+    void bitsChanged()
+    {
+        if (applying_ || boxes_[2].getSelectedId() <= 0)
+            return;
+        engine_.setWavBitDepth(boxes_[2].getSelectedId(), true);
+    }
+
+    void bufferChanged()
+    {
+        if (applying_ || boxes_[3].getSelectedId() <= 0)
+            return;
+        engine_.setPreferredBuffer(boxes_[3].getSelectedId());
+    }
+
+    AudioEngine& engine_;
+    std::array<juce::Label, 4> labels_;
+    std::array<juce::ComboBox, 4> boxes_;
+    std::map<int, std::string> cardRaws_;
+    std::string cardSignature_;
+    bool applying_ = false;
+};
 
 class SetupWindow : public juce::DocumentWindow
 {
 public:
-    SetupWindow(juce::AudioDeviceSelectorComponent& selector, AudioEngine& engine, AppSettings& settings)
+    SetupWindow(AudioEngine& engine, AppSettings& settings)
         : juce::DocumentWindow("Audio setup", theme::background, juce::DocumentWindow::closeButton),
           settings_(settings),
-          content_(selector, engine)
+          content_(engine)
     {
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
-        prepareRememberedWindow(*this, settings_, "windowSetup", setupWindowWidth(), setupWindowHeight(), 560, 320);
+        prepareRememberedWindow(*this, settings_, "windowSetup", setupWindowWidth(), setupWindowHeight(), 560, setupWindowHeight());
         setVisible(false);
     }
 
@@ -625,88 +373,21 @@ public:
     }
 
 private:
-    class Content : public juce::Component,
-                    private juce::Timer
+    class Content : public juce::Component
     {
     public:
-        Content(juce::AudioDeviceSelectorComponent& selector, AudioEngine& engine)
-            : selector_(selector),
-              engine_(engine)
+        explicit Content(AudioEngine& engine)
+            : audioSetup_(engine)
         {
-            addAndMakeVisible(viewport_);
-            viewport_.setViewedComponent(&selector_, false);
-            viewport_.setScrollBarsShown(true, true);
-            addAndMakeVisible(offlineRate_);
-            addAndMakeVisible(offlineBuffer_);
-            for (const double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
-                offlineRate_.addItem(juce::String(formatRateKhz(rate)) + " kHz", static_cast<int>(rate));
-            offlineRate_.setSelectedId(static_cast<int>(engine_.preferredSampleRate()), juce::dontSendNotification);
-            offlineRate_.onChange = [this]
-            {
-                if (offlineRate_.getSelectedId() > 0)
-                    engine_.setPreferredSampleRate(offlineRate_.getSelectedId());
-            };
-            for (const int buffer : { 32, 64, 128, 256, 512, 1024 })
-                offlineBuffer_.addItem(juce::String(buffer) + " samples", buffer);
-            offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
-            offlineBuffer_.onChange = [this]
-            {
-                if (offlineBuffer_.getSelectedId() > 0)
-                    engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
-            };
-            seenMenuRevision_ = engine_.deviceMenuRevision();
-            syncOfflineDeviceEntry(selector_, engine_);
-            startTimerHz(4);
-        }
-
-        ~Content() override
-        {
-            stopTimer();
-            viewport_.setViewedComponent(nullptr, false);
+            addAndMakeVisible(audioSetup_);
         }
 
         void resized() override
         {
-            auto area = getLocalBounds().reduced(12, 8);
-            const bool offline = engine_.offlineTemplate();
-            offlineRate_.setVisible(offline);
-            offlineBuffer_.setVisible(offline);
-            if (offline)
-            {
-                auto row = area.removeFromTop(28);
-                offlineRate_.setBounds(row.removeFromLeft(150));
-                row.removeFromLeft(8);
-                offlineBuffer_.setBounds(row.removeFromLeft(160));
-                area.removeFromTop(6);
-            }
-            viewport_.setBounds(area);
-            const int width = std::max(520, viewport_.getMaximumVisibleWidth());
-            selector_.setSize(width, std::max(selector_.getHeight(), 160));
-            presentSingleAudioCard(selector_);
+            audioSetup_.setBounds(getLocalBounds().reduced(16, 12));
         }
 
-    private:
-        void timerCallback() override
-        {
-            const auto revision = engine_.deviceMenuRevision();
-            if (revision != seenMenuRevision_)
-            {
-                seenMenuRevision_ = revision;
-                syncOfflineDeviceEntry(selector_, engine_);
-            }
-            const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
-            const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
-            offlineRate_.setEnabled(rateOk);
-            offlineBuffer_.setEnabled(bufferOk);
-            presentSingleAudioCard(selector_);
-        }
-
-        juce::AudioDeviceSelectorComponent& selector_;
-        AudioEngine& engine_;
-        juce::ComboBox offlineRate_;
-        juce::ComboBox offlineBuffer_;
-        juce::Viewport viewport_;
-        unsigned seenMenuRevision_ = 0;
+        AudioSetupForm audioSetup_;
     };
 
     AppSettings& settings_;
@@ -773,7 +454,6 @@ private:
             addAndMakeVisible(note_);
             addAndMakeVisible(browse_);
             addAndMakeVisible(create_);
-            addAndMakeVisible(internal_);
             addAndMakeVisible(cancel_);
             nameLabel_.setText("Session name", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
@@ -786,9 +466,8 @@ private:
             refreshLocation();
             browse_.onClick = [this] { browse(); };
             create_.onClick = [this] { create(); };
-            internal_.onClick = [this] { confirmInternal(); };
             cancel_.onClick = [this] { cancel(); };
-            for (auto* button : { &browse_, &create_, &internal_, &cancel_ })
+            for (auto* button : { &browse_, &create_, &cancel_ })
             {
                 button->setMouseClickGrabsKeyboardFocus(false);
                 button->setWantsKeyboardFocus(false);
@@ -819,8 +498,6 @@ private:
             area.removeFromTop(8);
             row = area.removeFromTop(32);
             create_.setBounds(row.removeFromLeft(150).reduced(0, 2));
-            row.removeFromLeft(8);
-            internal_.setBounds(row.removeFromLeft(140).reduced(0, 2));
             cancel_.setBounds(row.removeFromRight(100).reduced(0, 2));
         }
 
@@ -871,24 +548,6 @@ private:
             done(folder, false);
         }
 
-        void confirmInternal()
-        {
-            juce::AlertWindow::showOkCancelBox(
-                juce::MessageBoxIconType::WarningIcon,
-                "Session on the internal disk?",
-                "This stores the session in the Music folder on the internal disk. Recordings usually belong on an external drive.",
-                "Use internal disk",
-                "Cancel",
-                nullptr,
-                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this)](int result)
-                {
-                    if (result != 1 || safe == nullptr || safe->done_ == nullptr)
-                        return;
-                    auto done = std::move(safe->done_);
-                    done(juce::File(), true);
-                }));
-        }
-
         juce::File parent_;
         std::function<void(juce::File, bool)> done_;
         std::unique_ptr<juce::FileChooser> chooser_;
@@ -899,7 +558,6 @@ private:
         juce::Label note_;
         juce::TextButton browse_ { "Browse..." };
         juce::TextButton create_ { "Create session" };
-        juce::TextButton internal_ { "Internal disk..." };
         juce::TextButton cancel_ { "Cancel" };
     };
 
@@ -917,7 +575,7 @@ public:
         setUsingNativeTitleBar(true);
         setContentNonOwned(&content_, false);
         setResizable(true, false);
-        setResizeLimits(640, 520, 1400, 1100);
+        setResizeLimits(640, startupWindowHeight(), 1400, 900);
         centreWithSize(startupWindowWidth(), startupWindowHeight());
         setVisible(true);
     }
@@ -958,18 +616,10 @@ private:
         Content(AudioEngine& engine, std::function<void()> onDone)
             : engine_(engine),
               onDone_(std::move(onDone)),
-              selector_(engine.deviceManager(),
-                        kDeviceSelectorChannels,
-                        kDeviceSelectorChannels,
-                        kDeviceSelectorChannels,
-                        kDeviceSelectorChannels,
-                        false,
-                        false,
-                        false,
-                        false),
+              audioSetup_(engine),
               parent_(engine.defaultSessionParent())
         {
-            addAndMakeVisible(deviceViewport_);
+            addAndMakeVisible(audioSetup_);
             addAndMakeVisible(nameLabel_);
             addAndMakeVisible(name_);
             addAndMakeVisible(locationLabel_);
@@ -978,7 +628,6 @@ private:
             addAndMakeVisible(browse_);
             addAndMakeVisible(create_);
             addAndMakeVisible(open_);
-            addAndMakeVisible(internal_);
             addAndMakeVisible(recentLabel_);
             addAndMakeVisible(recentViewport_);
             nameLabel_.setText("Session name", juce::dontSendNotification);
@@ -989,43 +638,12 @@ private:
             note_.setColour(juce::Label::textColourId, theme::amber);
             note_.setText(engine_.missingSessionParentNote(), juce::dontSendNotification);
             refreshLocation();
-            deviceViewport_.setViewedComponent(&selector_, false);
-            deviceViewport_.setScrollBarsShown(true, false);
-            selector_.setItemHeight(22);
             recentViewport_.setViewedComponent(&recent_, false);
             recentViewport_.setScrollBarsShown(true, false);
             browse_.onClick = [this] { browse(); };
             create_.onClick = [this] { create(); };
             open_.onClick = [this] { openExisting(); };
-            internal_.onClick = [this] { confirmInternal(); };
             rebuildRecent();
-            hideTestButtons(selector_);
-            bitSlot_.bind();
-            bitSlot_.setSelectedId(engine_.wavBitDepth());
-            bitSlot_.onChange = [this](int bits) { engine_.setWavBitDepth(bits, true); };
-            attachBitDepthSlot(selector_, bitSlot_);
-            addAndMakeVisible(offlineRate_);
-            addAndMakeVisible(offlineBuffer_);
-            for (const double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
-                offlineRate_.addItem(juce::String(formatRateKhz(rate)) + " kHz", static_cast<int>(rate));
-            offlineRate_.setSelectedId(static_cast<int>(engine_.preferredSampleRate()), juce::dontSendNotification);
-            offlineRate_.onChange = [this]
-            {
-                if (offlineRate_.getSelectedId() > 0)
-                    engine_.setPreferredSampleRate(static_cast<double>(offlineRate_.getSelectedId()));
-            };
-            for (const int buffer : { 32, 64, 128, 256, 512, 1024 })
-                offlineBuffer_.addItem(juce::String(buffer) + " samples", buffer);
-            offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
-            offlineBuffer_.onChange = [this]
-            {
-                if (offlineBuffer_.getSelectedId() > 0)
-                    engine_.setPreferredBuffer(offlineBuffer_.getSelectedId());
-            };
-            offlineRate_.setVisible(false);
-            offlineBuffer_.setVisible(false);
-            seenMenuRevision_ = engine_.deviceMenuRevision();
-            syncOfflineDeviceEntry(selector_, engine_);
             startTimerHz(4);
         }
 
@@ -1033,44 +651,13 @@ private:
         {
             engine_.setCopyFinishedHandler(nullptr);
             stopTimer();
-            deviceViewport_.setViewedComponent(nullptr, false);
             recentViewport_.setViewedComponent(nullptr, false);
-        }
-
-        void paint(juce::Graphics&) override
-        {
-            // JUCE applies a pending device-selector resize at the start of
-            // paint and puts the Input row back. Collapse it before the rows draw.
-            presentSingleAudioCard(*this);
         }
 
         void resized() override
         {
             auto area = getLocalBounds().reduced(16, 12);
-            deviceViewport_.setBounds(area.removeFromTop(168));
-            const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
-            selector_.setSize(width, std::max(selector_.getHeight(), 140));
-            presentSingleAudioCard(*this);
-            const bool offline = engine_.offlineTemplate();
-            offlineRate_.setVisible(offline);
-            offlineBuffer_.setVisible(offline);
-            if (offline)
-            {
-                if (bitSlot_.getParentComponent() != this)
-                {
-                    if (auto* old = bitSlot_.getParentComponent())
-                        old->removeChildComponent(&bitSlot_);
-                    addAndMakeVisible(bitSlot_);
-                }
-                area.removeFromTop(8);
-                auto rateRow = area.removeFromTop(28);
-                offlineRate_.setBounds(rateRow.removeFromLeft(150));
-                rateRow.removeFromLeft(8);
-                offlineBuffer_.setBounds(rateRow.removeFromLeft(160));
-                rateRow.removeFromLeft(8);
-                auto bitArea = rateRow.removeFromLeft(260);
-                bitSlot_.setBounds(bitArea.withTrimmedLeft(84));
-            }
+            audioSetup_.setBounds(area.removeFromTop(audioSetupFormHeight()));
             area.removeFromTop(10);
             auto row = area.removeFromTop(28);
             nameLabel_.setBounds(row.removeFromLeft(110));
@@ -1085,9 +672,7 @@ private:
             row = area.removeFromTop(32);
             create_.setBounds(row.removeFromLeft(150).reduced(0, 2));
             row.removeFromLeft(8);
-            open_.setBounds(row.removeFromLeft(140).reduced(0, 2));
-            row.removeFromLeft(8);
-            internal_.setBounds(row.removeFromLeft(140).reduced(0, 2));
+            open_.setBounds(row.removeFromLeft(160).reduced(0, 2));
             area.removeFromTop(8);
             recentLabel_.setBounds(area.removeFromTop(20));
             recentViewport_.setBounds(area);
@@ -1097,36 +682,6 @@ private:
     private:
         void timerCallback() override
         {
-            hideTestButtons(selector_);
-            const auto revision = engine_.deviceMenuRevision();
-            if (revision != seenMenuRevision_)
-            {
-                seenMenuRevision_ = revision;
-                syncOfflineDeviceEntry(selector_, engine_);
-            }
-            if (! engine_.offlineTemplate())
-                attachBitDepthSlot(selector_, bitSlot_);
-            bitSlot_.setSelectedId(engine_.wavBitDepth());
-            const bool rateOk = recordActionAllowed(RecordDisrupt::changeRate, engine_.isRecording(), engine_.recordLockArmed());
-            const bool bufferOk = recordActionAllowed(RecordDisrupt::changeBuffer, engine_.isRecording(), engine_.recordLockArmed());
-            offlineRate_.setEnabled(rateOk);
-            offlineBuffer_.setEnabled(bufferOk);
-            const bool offline = engine_.offlineTemplate();
-            if (offline)
-            {
-                const int rateId = static_cast<int>(engine_.preferredSampleRate());
-                if (offlineRate_.getSelectedId() != rateId)
-                    offlineRate_.setSelectedId(rateId, juce::dontSendNotification);
-                if (offlineBuffer_.getSelectedId() != engine_.preferredBuffer())
-                    offlineBuffer_.setSelectedId(engine_.preferredBuffer(), juce::dontSendNotification);
-            }
-            if (offline != offlineLaidOut_)
-            {
-                offlineLaidOut_ = offline;
-                if (getWidth() > 0)
-                    resized();
-            }
-            presentSingleAudioCard(*this);
             auto note = engine_.missingSessionParentNote();
             const auto deviceNote = engine_.startupDeviceNote();
             if (deviceNote.isNotEmpty())
@@ -1377,34 +932,6 @@ private:
                                   });
         }
 
-        void confirmInternal()
-        {
-            juce::AlertWindow::showOkCancelBox(
-                juce::MessageBoxIconType::WarningIcon,
-                "Session on the internal disk?",
-                "This stores the session in the Music folder on the internal disk. Recordings usually belong on an external drive.",
-                "Use internal disk",
-                "Cancel",
-                nullptr,
-                juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<Content>(this)](int result)
-                {
-                    if (result != 1 || safe == nullptr)
-                        return;
-                    safe->replaceSession([safe]
-                    {
-                        if (safe == nullptr)
-                            return;
-                        safe->engine_.resetToCleanSession();
-                        if (safe->engine_.createInternalSession())
-                            safe->finish();
-                        else
-                            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                                   "Cannot create the session",
-                                                                   safe->engine_.sessionMessage());
-                    });
-                }));
-        }
-
         void finish()
         {
             if (onDone_)
@@ -1413,14 +940,9 @@ private:
 
         AudioEngine& engine_;
         std::function<void()> onDone_;
-        juce::AudioDeviceSelectorComponent selector_;
-        BitDepthSlot bitSlot_;
-        juce::ComboBox offlineRate_;
-        juce::ComboBox offlineBuffer_;
-        bool offlineLaidOut_ = false;
+        AudioSetupForm audioSetup_;
         juce::File parent_;
         std::unique_ptr<juce::FileChooser> chooser_;
-        juce::Viewport deviceViewport_;
         juce::Label nameLabel_;
         juce::TextEditor name_;
         juce::Label locationLabel_;
@@ -1429,13 +951,11 @@ private:
         juce::TextButton browse_ { "Browse..." };
         juce::TextButton create_ { "Create session" };
         juce::TextButton open_ { "Open existing..." };
-        juce::TextButton internal_ { "Internal disk..." };
         juce::Label recentLabel_;
         juce::Viewport recentViewport_;
         juce::Component recent_;
         juce::Label emptyRecent_;
         std::vector<std::unique_ptr<juce::TextButton>> recentButtons_;
-        unsigned seenMenuRevision_ = 0;
     };
 
     std::function<void()> onDone_;
@@ -1644,16 +1164,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
       pluginPage_(engine, settings),
       scanner_(engine, settings),
       dropouts_(engine, settings),
-      cpu_(engine, settings),
-      deviceSelector_(engine.deviceManager(),
-                      kDeviceSelectorChannels,
-                      kDeviceSelectorChannels,
-                      kDeviceSelectorChannels,
-                      kDeviceSelectorChannels,
-                      false,
-                      false,
-                      false,
-                      false)
+      cpu_(engine, settings)
 {
     setOpaque(true);
     setWantsKeyboardFocus(true);
@@ -1745,7 +1256,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         cpu_.addKeyListener(keys_.get());
         latencyWindow_->addKeyListener(keys_.get());
     }
-    setupWindow_ = std::make_unique<SetupWindow>(deviceSelector_, engine_, settings_);
+    setupWindow_ = std::make_unique<SetupWindow>(engine_, settings_);
     commandManager_.registerAllCommandsForTarget(this);
     commandManager_.setFirstCommandTarget(this);
     engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
@@ -1854,8 +1365,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     latencyLabel_.setJustificationType(juce::Justification::centredRight);
     latencyLabel_.setColour(juce::Label::textColourId, theme::dim);
 
-    deviceSelector_.setItemHeight(22);
-
     rmsButton_.setRadioGroupId(1);
     peakButton_.setRadioGroupId(1);
     rmsButton_.setClickingTogglesState(true);
@@ -1868,15 +1377,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     referenceBox_.addItem("-20 dBFS", 3);
     referenceBox_.setSelectedId(referenceIdFor(rmsReferenceDb_), juce::dontSendNotification);
     referenceBox_.setTooltip("Line level for the RMS scale. 0 VU sits at this many dBFS. Meters are green below this point and yellow above it.");
-    bitDepthSlot_ = std::make_unique<BitDepthSlot>();
-    bitDepthSlot_->bind();
-    bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
-    bitDepthSlot_->onChange = [this](int chosen)
-    {
-        if (chosen > 0)
-            engine_.setWavBitDepth(chosen, true);
-    };
-    attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
     timelineHeight_ = settings_.loadTimelineHeight();
 
     rmsButton_.onClick = [this] { setPeakMode(false, true); };
@@ -1952,7 +1452,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
     addMouseListener(this, true);
     startTimerHz(30);
-    hideDeviceTestTone();
     engine_.pluginCatalogue().startIfEmpty();
     showPage(1);
     refresh();
@@ -2837,12 +2336,6 @@ void MainComponent::timerCallback()
         engine_.maintainSession();
     }
     syncCopyProgress();
-
-    if (bitDepthSlot_ != nullptr)
-        attachBitDepthSlot(deviceSelector_, *bitDepthSlot_);
-
-    if (setupWindow_ != nullptr && setupWindow_->isVisible())
-        hideDeviceTestTone();
     refresh();
 }
 
@@ -3017,8 +2510,6 @@ void MainComponent::refresh()
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
     latencyReadout_.setAlignGroup(engine_.alignGroup());
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
-    if (bitDepthSlot_ != nullptr)
-        bitDepthSlot_->setSelectedId(engine_.wavBitDepth());
     allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
     hideButton_.setToggleState(engine_.groupsAreHidden(), juce::dontSendNotification);
     leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
@@ -3064,11 +2555,6 @@ void MainComponent::refresh()
         heavyPaintHeld_ = true;
 }
 
-void MainComponent::hideDeviceTestTone()
-{
-    hideTestButtons(deviceSelector_);
-}
-
 void MainComponent::toggleSetup()
 {
     if (setupWindow_ == nullptr)
@@ -3076,10 +2562,7 @@ void MainComponent::toggleSetup()
     const bool show = ! setupWindow_->isVisible();
     setupWindow_->setVisible(show);
     if (show)
-    {
         setupWindow_->toFront(true);
-        hideDeviceTestTone();
-    }
 }
 
 void MainComponent::paint(juce::Graphics& graphics)

@@ -120,6 +120,22 @@ inline int helpWindowHeightFor(int characters) noexcept
     return window > 860 ? 860 : window;
 }
 
+inline int audioSetupRowHeight() noexcept
+{
+    return 28;
+}
+
+inline int audioSetupRowGap() noexcept
+{
+    return 6;
+}
+
+// Audio card, sample rate, bit depth, buffer. Nothing under that block.
+inline int audioSetupFormHeight() noexcept
+{
+    return 4 * audioSetupRowHeight() + 3 * audioSetupRowGap();
+}
+
 inline int setupWindowWidth() noexcept
 {
     return 720;
@@ -127,17 +143,27 @@ inline int setupWindowWidth() noexcept
 
 inline int setupWindowHeight() noexcept
 {
-    return 640;
+    return 12 + audioSetupFormHeight() + 12;
 }
 
 inline int startupWindowWidth() noexcept
 {
-    return 780;
+    return 720;
+}
+
+inline int startupRecentListHeight() noexcept
+{
+    return 48;
+}
+
+inline int startupSessionBlockHeight() noexcept
+{
+    return 28 + 6 + 28 + 22 + 6 + 32 + 8 + 20 + startupRecentListHeight();
 }
 
 inline int startupWindowHeight() noexcept
 {
-    return 680;
+    return 12 + audioSetupFormHeight() + 10 + startupSessionBlockHeight() + 12;
 }
 
 inline int placeSessionWindowWidth() noexcept

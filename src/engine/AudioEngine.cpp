@@ -487,6 +487,8 @@ void AudioEngine::setPreferredSampleRate(double rate)
     settings_.savePreferredSampleRate(rate);
     if (offlineTemplate_ && recorder_ != nullptr)
         recorder_->setTimelineSampleRate(rate);
+    else
+        applyPreferredTiming();
 }
 
 void AudioEngine::setPreferredBuffer(int samples)
@@ -497,6 +499,29 @@ void AudioEngine::setPreferredBuffer(int samples)
         return;
     preferredBuffer_ = samples;
     settings_.savePreferredBuffer(samples);
+    applyPreferredTiming();
+}
+
+void AudioEngine::applyPreferredTiming()
+{
+    if (offlineTemplate_ || applyingTiming_)
+        return;
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    if (live == nullptr || ! live->isOpen())
+        return;
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup(setup);
+    const bool rateSame = std::abs(setup.sampleRate - preferredRate_) < 1.0;
+    const bool bufferSame = setup.bufferSize == preferredBuffer_;
+    if (rateSame && bufferSame)
+        return;
+    setup.sampleRate = preferredRate_;
+    setup.bufferSize = preferredBuffer_;
+    applyingTiming_ = true;
+    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+    applyingTiming_ = false;
+    if (error.isNotEmpty())
+        openError_ = error;
 }
 
 bool AudioEngine::isRecording() const
@@ -1981,6 +2006,10 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     setup.outputDeviceName = outputName;
     setup.useDefaultInputChannels = true;
     setup.useDefaultOutputChannels = true;
+    if (preferredRate_ > 0.0)
+        setup.sampleRate = preferredRate_;
+    if (preferredBuffer_ >= 16)
+        setup.bufferSize = preferredBuffer_;
     wantedName_ = name;
     awaitingSavedDevice_ = false;
     startupDeviceNote_.clear();

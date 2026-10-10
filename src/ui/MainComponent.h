@@ -19,7 +19,6 @@
 namespace youhost
 {
 
-class BitDepthSlot;
 class RecordLockButton;
 
 class MainComponent : public juce::Component,
@@ -45,7 +44,6 @@ private:
     void onPluginSlot(int channel);
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
-    void hideDeviceTestTone();
     void toggleSetup();
     void showPage(int page);
     void toggleScanner();
@@ -136,8 +134,6 @@ private:
     juce::Viewport meterViewport_;
     MeterScaleRail leftScale_;
     MeterScaleRail rightScale_;
-    juce::AudioDeviceSelectorComponent deviceSelector_;
-    std::unique_ptr<BitDepthSlot> bitDepthSlot_;
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
     std::unique_ptr<juce::DocumentWindow> helpWindow_;
