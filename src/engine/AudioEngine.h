@@ -301,7 +301,7 @@ private:
     bool offlineTemplate_ = false;
     bool recordLockArmed_ = false;
     double preferredRate_ = 48000.0;
-    int preferredBuffer_ = 64;
+    int preferredBuffer_ = kNewSessionBufferSamples;
     juce::String sessionRateNotice_;
     int sessionChannelCount_ = kMaxChannels;
     std::atomic<int> sessionVisible_ { kMaxChannels };
@@ -344,6 +344,8 @@ private:
 
     std::atomic<bool> deviceStarting_ { false };
     std::atomic<bool> deviceDown_ { false };
+    bool setupLocked_ = false;
+    bool inventoryForce_ = false;
     std::atomic<bool> closingDevice_ { false };
     bool deviceLostBanner_ = false;
     bool reopenInProgress_ = false;

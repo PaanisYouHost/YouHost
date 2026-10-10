@@ -862,7 +862,6 @@ private:
                         false),
               parent_(engine.defaultSessionParent())
         {
-            addAndMakeVisible(intro_);
             addAndMakeVisible(deviceViewport_);
             addAndMakeVisible(nameLabel_);
             addAndMakeVisible(name_);
@@ -875,11 +874,6 @@ private:
             addAndMakeVisible(internal_);
             addAndMakeVisible(recentLabel_);
             addAndMakeVisible(recentViewport_);
-            intro_.setText("Choose the interface, sample rate, and buffer size, then create a session or open one. "
-                           "Recordings usually go on an external drive. The interface opens with all channels. "
-                           "Channel use is chosen only with the REC, INPUT, and OFF buttons.",
-                           juce::dontSendNotification);
-            intro_.setJustificationType(juce::Justification::topLeft);
             nameLabel_.setText("Session name", juce::dontSendNotification);
             locationLabel_.setText("Location", juce::dontSendNotification);
             recentLabel_.setText("Open recent", juce::dontSendNotification);
@@ -937,8 +931,6 @@ private:
         void resized() override
         {
             auto area = getLocalBounds().reduced(16, 12);
-            intro_.setBounds(area.removeFromTop(68));
-            area.removeFromTop(6);
             deviceViewport_.setBounds(area.removeFromTop(168));
             const int width = std::max(520, deviceViewport_.getMaximumVisibleWidth());
             selector_.setSize(width, std::max(selector_.getHeight(), 140));
@@ -1305,7 +1297,6 @@ private:
         bool offlineLaidOut_ = false;
         juce::File parent_;
         std::unique_ptr<juce::FileChooser> chooser_;
-        juce::Label intro_;
         juce::Viewport deviceViewport_;
         juce::Label nameLabel_;
         juce::TextEditor name_;
@@ -1640,7 +1631,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     commandManager_.setFirstCommandTarget(this);
     engine_.setGlobalKeyListener(commandManager_.getKeyMappings());
     latencyReadout_.setResetHandler([this] { engine_.resetDropouts(); });
-    latencyReadout_.setGraphHandler([this] { toggleDropouts(); });
     latencyReadout_.setAlignHandler([this](int mode) { engine_.setAlignGroup(mode); });
     timeline_.setWaveformGainHandler([this](float gain) { engine_.setWaveformGain(gain); });
     fileMenu_ = std::make_unique<FileMenu>(*this);
@@ -1694,8 +1684,14 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     dropoutsButton_.setTooltip("Open or close the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
     latencyButton_.setTooltip("Open or close the latency card (" + juce::String(shortcutChord(ShortcutId::latency)) + ").");
     fileButton_.setTooltip("New, Open, Open Recent, Save As, Import Recording Folder, and Clear Timeline.");
-    groupButton_.setTooltip("Rename or recolor a group, or make a group from the selection.");
-    groupButton_.onClick = [this] { showGroupsMenu(); };
+    groupButton_.setTooltip("New group from the selected channels ("
+                             + juce::String(shortcutChord(ShortcutId::makeGroup))
+                             + "). The name is selected. Colour swatches sit under it. Enter folds the group.");
+    groupButton_.onClick = [this]
+    {
+        showMakeGroupDialog(engine_);
+        refresh();
+    };
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
     saveButton_.setTooltip("Save session.youhost (" + juce::String(shortcutChord(ShortcutId::save)) + ").");
@@ -1714,9 +1710,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     globalRecButton_.onClick = [this] { applyGlobalListen(ChannelListen::record); };
     globalInputButton_.onClick = [this] { applyGlobalListen(ChannelListen::input); };
     globalOffButton_.onClick = [this] { applyGlobalListen(ChannelListen::off); };
-    globalRecButton_.setTooltip("Set every session channel to REC. With a selection, only those channels.");
-    globalInputButton_.setTooltip("Set every session channel to INPUT. With a selection, only those channels. Leaving REC while recording asks first.");
-    globalOffButton_.setTooltip("Set every session channel to OFF. With a selection, only those channels. Leaving REC while recording asks first.");
+    globalRecButton_.setTooltip("Set every visible channel to REC. A selection does not limit this.");
+    globalInputButton_.setTooltip("Set every visible channel to INPUT. A selection does not limit this. Leaving REC while recording asks first.");
+    globalOffButton_.setTooltip("Set every visible channel to OFF. A selection does not limit this. Leaving REC while recording asks first.");
     recordLock_->onClick = [this]
     {
         engine_.setRecordLockArmed(! engine_.recordLockArmed());
@@ -1784,7 +1780,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     meterGrid_.setChannelMenuHandler([this](int channel)
     {
-        showChannelMenu(engine_, meterGrid_, channel, [this](int chosen) { meterGrid_.beginNameEdit(chosen); });
+        if (! engine_.isChannelSelected(channel))
+            engine_.selectChannel(channel, false);
+        showMakeGroupDialog(engine_);
+        refresh();
     });
     meterGrid_.setNameCommitHandler([this](int channel, juce::String name) { engine_.setChannelName(channel, name); });
     meterGrid_.setNameStepHandler([this](int channel, int direction)
@@ -1983,6 +1982,10 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
             return true;
         case ShortcutId::goToChannel:
             timeline_.focusChannelJump();
+            return true;
+        case ShortcutId::makeGroup:
+            showMakeGroupDialog(engine_);
+            refresh();
             return true;
         case ShortcutId::lanesTaller:
             timeline_.verticalZoomIn();
@@ -2259,23 +2262,6 @@ void MainComponent::startRecordingIfReady()
 {
     showTransportResult(engine_.transportRecord());
     refresh();
-}
-
-void MainComponent::showGroupsMenu()
-{
-    juce::PopupMenu menu;
-    menu.addItem(50, "Make group from selection...", ! engine_.selectedChannels().empty());
-    menu.addSeparator();
-    for (int group = 0; group < kMaxDisplayGroups; ++group)
-        menu.addItem(group + 1, engine_.groupName(group));
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&groupButton_),
-                       [this](int result)
-                       {
-                           if (result == 50)
-                               showMakeGroupDialog(engine_);
-                           else if (result > 0)
-                               showGroupMenu(engine_, groupButton_, result - 1);
-                       });
 }
 
 void MainComponent::layoutMeters()
@@ -2858,20 +2844,6 @@ void MainComponent::refresh()
     globalRecButton_.setEnabled(listenOk);
     globalInputButton_.setEnabled(listenOk);
     globalOffButton_.setEnabled(listenOk);
-    const bool hasSelection = ! engine_.selectedChannels().empty();
-    const auto recText = hasSelection ? juce::String("REC") : juce::String("ALL REC");
-    const auto inputText = hasSelection ? juce::String("INPUT") : juce::String("ALL INPUT");
-    const auto offText = hasSelection ? juce::String("OFF") : juce::String("ALL OFF");
-    if (globalRecButton_.getButtonText() != recText)
-        globalRecButton_.setButtonText(recText);
-    if (globalInputButton_.getButtonText() != inputText)
-        globalInputButton_.setButtonText(inputText);
-    if (globalOffButton_.getButtonText() != offText)
-        globalOffButton_.setButtonText(offText);
-    const juce::String scope = hasSelection ? "the selected channels" : "every session channel";
-    globalRecButton_.setTooltip("Set " + scope + " to REC.");
-    globalInputButton_.setTooltip("Set " + scope + " to INPUT. Leaving REC while recording asks first.");
-    globalOffButton_.setTooltip("Set " + scope + " to OFF. Leaving REC while recording asks first.");
     meterGrid_.setListenChangesEnabled(listenOk);
     const bool loading = engine_.isLoadingPlugins();
     if (loading != heavyPaintSuspended_)

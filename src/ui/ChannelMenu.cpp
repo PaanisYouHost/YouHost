@@ -193,48 +193,61 @@ private:
     bool finished_ = false;
 };
 
-class MakeGroupContent : public juce::Component
+class NameNewGroupContent : public juce::Component
 {
 public:
-    MakeGroupContent(AudioEngine& engine, std::function<void(bool)> done)
+    NameNewGroupContent(AudioEngine& engine, int freeSlot, std::function<void(bool)> done)
         : engine_(engine),
+          freeSlot_(freeSlot),
           done_(std::move(done))
     {
-        addAndMakeVisible(label_);
-        addAndMakeVisible(groups_);
+        addAndMakeVisible(editor_);
         addAndMakeVisible(ok_);
         addAndMakeVisible(cancel_);
-        const int count = static_cast<int>(engine_.selectedChannels().size());
-        label_.setText("Assign " + juce::String(count) + (count == 1 ? " channel" : " channels")
-                           + " to a group. The group then folds. Click its bar to open it.",
-                       juce::dontSendNotification);
-        label_.setJustificationType(juce::Justification::topLeft);
-        int shared = -2;
-        for (int channel : engine_.selectedChannels())
-        {
-            const int group = engine_.channelGroup(channel);
-            if (shared == -2)
-                shared = group;
-            else if (shared != group)
-                shared = -1;
-        }
-        for (int group = 0; group < kMaxDisplayGroups; ++group)
-            groups_.addItem(engine_.groupName(group), group + 1);
-        groups_.setSelectedId(shared >= 0 ? shared + 1 : 1, juce::dontSendNotification);
+        editor_.setText("Group " + juce::String(freeSlot_ + 1), false);
+        editor_.setSelectAllWhenFocused(true);
+        editor_.setFont(juce::Font(juce::FontOptions(15.0f)));
+        editor_.onReturnKey = [this] { commit(); };
+        editor_.onEscapeKey = [this] { dismiss(); };
         ok_.onClick = [this] { commit(); };
         cancel_.onClick = [this] { dismiss(); };
         ok_.setMouseClickGrabsKeyboardFocus(false);
         cancel_.setMouseClickGrabsKeyboardFocus(false);
         ok_.addShortcut(juce::KeyPress(juce::KeyPress::returnKey));
         cancel_.addShortcut(juce::KeyPress(juce::KeyPress::escapeKey));
+        for (int index = 0; index < kX32ColourCount; ++index)
+        {
+            auto swatch = std::make_unique<Swatch>(*this, index);
+            addAndMakeVisible(*swatch);
+            swatches_.push_back(std::move(swatch));
+        }
+    }
+
+    void focusName()
+    {
+        focusEditorSoon(&editor_);
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(theme::background);
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced(16, 12);
-        label_.setBounds(area.removeFromTop(48));
+        editor_.setBounds(area.removeFromTop(28));
         area.removeFromTop(8);
-        groups_.setBounds(area.removeFromTop(28));
+        auto swatchRow = area.removeFromTop(28);
+        const int count = static_cast<int>(swatches_.size());
+        const int gap = 4;
+        const int width = count > 0 ? std::max(16, (swatchRow.getWidth() - gap * (count - 1)) / count) : 16;
+        for (int index = 0; index < count; ++index)
+        {
+            swatches_[static_cast<std::size_t>(index)]->setBounds(swatchRow.removeFromLeft(width));
+            if (index + 1 < count)
+                swatchRow.removeFromLeft(gap);
+        }
         area.removeFromTop(12);
         auto buttons = area.removeFromTop(28);
         cancel_.setBounds(buttons.removeFromRight(88));
@@ -242,30 +255,62 @@ public:
         ok_.setBounds(buttons.removeFromRight(88));
     }
 
-    bool keyPressed(const juce::KeyPress& key) override
-    {
-        if (key == juce::KeyPress::returnKey)
-        {
-            commit();
-            return true;
-        }
-        if (key == juce::KeyPress::escapeKey)
-        {
-            dismiss();
-            return true;
-        }
-        return false;
-    }
-
 private:
+    class Swatch : public juce::Component
+    {
+    public:
+        Swatch(NameNewGroupContent& owner, int color)
+            : owner_(owner),
+              color_(color)
+        {
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            auto bounds = getLocalBounds().toFloat().reduced(2.0f);
+            graphics.setColour(x32Fill(color_));
+            graphics.fillRoundedRectangle(bounds, 3.0f);
+            if (x32Fill(color_).getPerceivedBrightness() < 0.08f)
+            {
+                graphics.setColour(juce::Colour(0xff9aa3b5));
+                graphics.drawRoundedRectangle(bounds, 3.0f, 1.0f);
+            }
+            if (owner_.color_ == color_)
+            {
+                graphics.setColour(theme::text);
+                graphics.drawRoundedRectangle(bounds.reduced(1.0f), 3.0f, 2.0f);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent&) override
+        {
+            owner_.color_ = color_;
+            owner_.repaint();
+        }
+
+    private:
+        NameNewGroupContent& owner_;
+        int color_ = 0;
+    };
+
     void commit()
     {
         if (finished_)
             return;
+        const auto selected = engine_.selectedChannels();
+        const auto plan = planNewGroup(! selected.empty(),
+                                       freeSlot_,
+                                       editor_.getText().toStdString(),
+                                       normaliseX32Colour(color_));
+        if (! plan.created)
+        {
+            dismiss();
+            return;
+        }
         finished_ = true;
-        const int group = groups_.getSelectedId() - 1;
-        if (group >= 0)
-            engine_.assignChannelsToGroup(engine_.selectedChannels(), group);
+        engine_.setGroupColor(plan.group, plan.color);
+        engine_.setGroupName(plan.group, juce::String::fromUTF8(plan.name.c_str()));
+        engine_.assignChannelsToGroup(selected, plan.group);
         if (done_ != nullptr)
             done_(true);
     }
@@ -280,13 +325,23 @@ private:
     }
 
     AudioEngine& engine_;
+    int freeSlot_ = 0;
+    int color_ = 0;
     std::function<void(bool)> done_;
-    juce::Label label_;
-    juce::ComboBox groups_;
+    juce::TextEditor editor_;
     juce::TextButton ok_ { "OK" };
     juce::TextButton cancel_ { "Cancel" };
+    std::vector<std::unique_ptr<Swatch>> swatches_;
     bool finished_ = false;
 };
+
+int firstFreeGroupSlot(const AudioEngine& engine)
+{
+    int membership[kMaxChannels];
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        membership[channel] = engine.channelGroup(channel);
+    return firstUnusedGroup(membership, kMaxChannels, kMaxDisplayGroups);
+}
 
 juce::PopupMenu colorMenu(int ticked)
 {
@@ -417,13 +472,22 @@ void showMakeGroupDialog(AudioEngine& engine)
     if (engine.selectedChannels().empty())
     {
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
-                                               "Make group from selection",
+                                               "New group",
                                                "Select one or more channels first.");
         return;
     }
 
-    auto* window = new juce::DialogWindow("Make group from selection", theme::background, true, true);
-    auto* content = new MakeGroupContent(engine, [window](bool)
+    const int freeSlot = firstFreeGroupSlot(engine);
+    if (freeSlot < 0)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                               "New group",
+                                               "All 10 groups are already in use.");
+        return;
+    }
+
+    auto* window = new juce::DialogWindow("New group", theme::background, true, true);
+    auto* content = new NameNewGroupContent(engine, freeSlot, [window](bool)
     {
         juce::MessageManager::callAsync([window] { window->exitModalState(0); });
     });
@@ -431,9 +495,8 @@ void showMakeGroupDialog(AudioEngine& engine)
     window->centreWithSize(groupRenameWindowWidth(), groupRenameWindowHeight());
     window->setResizable(false, false);
     window->setUsingNativeTitleBar(true);
-    content->setWantsKeyboardFocus(true);
     window->enterModalState(true, nullptr, true);
-    content->grabKeyboardFocus();
+    content->focusName();
 }
 
 void showGroupMenu(AudioEngine& engine, juce::Component& target, int group)

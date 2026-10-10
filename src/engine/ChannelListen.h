@@ -81,27 +81,27 @@ inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const i
     return false;
 }
 
-// Global REC, INPUT, and OFF apply to the selection. With nothing selected
-// they apply to every visible channel.
+// ALL REC, ALL INPUT, and ALL OFF set every visible channel. A selection does
+// not narrow them. REC page and HOST page both use this list.
 inline std::vector<int> channelsForGlobalListen(const int* selected, int selectedCount, int visible)
 {
+    (void) selected;
+    (void) selectedCount;
     std::vector<int> channels;
     if (visible < 0)
         visible = 0;
-    if (selected != nullptr && selectedCount > 0)
-    {
-        for (int index = 0; index < selectedCount; ++index)
-        {
-            const int channel = selected[index];
-            if (channel >= 0 && channel < visible)
-                channels.push_back(channel);
-        }
-        return channels;
-    }
     channels.reserve(static_cast<std::size_t>(visible));
     for (int channel = 0; channel < visible; ++channel)
         channels.push_back(channel);
     return channels;
+}
+
+// Page 1 is REC and page 2 is HOST. Both return the same visible channels.
+inline std::vector<int> channelsForPageListen(int page, const int* selected, int selectedCount, int visible)
+{
+    if (page != 1 && page != 2)
+        return {};
+    return channelsForGlobalListen(selected, selectedCount, visible);
 }
 
 } // namespace youhost

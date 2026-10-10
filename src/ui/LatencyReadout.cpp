@@ -1,6 +1,5 @@
 #include "LatencyReadout.h"
 #include "engine/LatencyCard.h"
-#include "engine/Shortcuts.h"
 #include "Theme.h"
 
 namespace youhost
@@ -47,13 +46,11 @@ LatencyReadout::LatencyReadout()
     setOpaque(false);
     addAndMakeVisible(allButton_);
     addAndMakeVisible(groupButton_);
-    addAndMakeVisible(graphButton_);
     addAndMakeVisible(resetButton_);
     allButton_.setTooltip("Line every included channel up on the slowest plugin. A stereo pair stays together.");
     groupButton_.setTooltip("Each group lines up on its own slowest plugin. Ungrouped channels are not delayed. A pair split across groups can comb.");
-    graphButton_.setTooltip("Open the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
     resetButton_.setTooltip("Reset the dropout count and the graph. The CSV log is kept.");
-    for (auto* button : { &allButton_, &groupButton_, &graphButton_, &resetButton_ })
+    for (auto* button : { &allButton_, &groupButton_, &resetButton_ })
         button->setMouseClickGrabsKeyboardFocus(false);
     allButton_.onClick = [this]
     {
@@ -94,18 +91,11 @@ void LatencyReadout::setResetHandler(std::function<void()> handler)
     resetButton_.onClick = std::move(handler);
 }
 
-void LatencyReadout::setGraphHandler(std::function<void()> handler)
-{
-    graphButton_.onClick = std::move(handler);
-}
-
 void LatencyReadout::resized()
 {
     const auto layout = layoutLatencyCard(std::max(1, getWidth()));
     auto row = cardBlock(layout.dropouts, layout.textWidth).toNearestInt();
     resetButton_.setBounds(row.removeFromRight(72).withSizeKeepingCentre(72, 22));
-    row.removeFromRight(6);
-    graphButton_.setBounds(row.removeFromRight(86).withSizeKeepingCentre(86, 22));
     auto modes = cardBlock(layout.modes, layout.textWidth).toNearestInt();
     allButton_.setBounds(modes.removeFromLeft(110).reduced(0, 2));
     modes.removeFromLeft(6);
@@ -152,7 +142,7 @@ void LatencyReadout::paint(juce::Graphics& graphics)
     drawStat(graphics, cardBlock(layout.compensation, layout.textWidth), "Compensation", numbers_.compensationSamples, rate, theme::dim);
 
     auto dropoutRow = cardBlock(layout.dropouts, layout.textWidth);
-    dropoutRow.removeFromRight(156.0f);
+    dropoutRow.removeFromRight(80.0f);
     graphics.setColour(theme::dim);
     graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
     graphics.drawText("Dropouts", dropoutRow.removeFromLeft(132.0f), juce::Justification::centredLeft, false);

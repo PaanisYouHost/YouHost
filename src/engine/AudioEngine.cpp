@@ -254,7 +254,7 @@ AudioEngine::AudioEngine(AppSettings& settings)
     if (preferredRate_ < 1000.0)
         preferredRate_ = 48000.0;
     if (preferredBuffer_ < 16)
-        preferredBuffer_ = 64;
+        preferredBuffer_ = kNewSessionBufferSamples;
     dropoutOriginNs_ = steadyNowNs();
     playbackMax_ = 32768;
     playbackScratch_.assign(static_cast<std::size_t>(kMaxChannels) * static_cast<std::size_t>(playbackMax_), 0.0f);
@@ -1082,6 +1082,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         startupDeviceNote_.clear();
         startupFallbackName_.clear();
         downSinceMs_ = 0;
+        setupLocked_ = true;
     }
     const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
     rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
@@ -1820,8 +1821,14 @@ juce::String AudioEngine::transportPlay()
 
 std::vector<ListedDevice> AudioEngine::connectedDevices()
 {
+    const bool force = inventoryForce_;
+    inventoryForce_ = false;
+    const bool lost = deviceDown_.load(std::memory_order_relaxed);
+    if (! deviceInventoryQueryAllowed(setupLocked_, lost, force, deviceInventory_.empty()))
+        return deviceInventory_;
+
     const auto now = juce::Time::getMillisecondCounter();
-    if (! deviceInventory_.empty() && now - deviceInventoryMs_ < 1500u)
+    if (! force && ! deviceInventory_.empty() && now - deviceInventoryMs_ < 1500u)
         return deviceInventory_;
 
     std::vector<ListedDevice> found;
@@ -1887,6 +1894,8 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     wantedName_ = name;
     awaitingSavedDevice_ = false;
     startupDeviceNote_.clear();
+    setupLocked_ = false;
+    inventoryForce_ = true;
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     if (error.isNotEmpty())
         openError_ = error;

@@ -60,7 +60,6 @@ private:
     void openRecent(int index);
     void showFileMenu();
     void showHelp();
-    void showGroupsMenu();
     void layoutMeters();
     void openStartup();
     void dismissStartup();

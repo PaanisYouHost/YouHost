@@ -428,8 +428,9 @@ void testLatencyWindowFits()
     shrunk.width = 480;
     shrunk.height = 280;
     const auto kept = youhost::windowOpenSize(card.contentWidth, card.contentHeight, 1920, 1080, shrunk);
-    CHECK(kept.width == 480);
-    CHECK(kept.height == 280);
+    CHECK(kept.width == card.contentWidth);
+    CHECK(kept.height == card.contentHeight);
+    CHECK(! youhost::keepRememberedWindow(shrunk, card.contentWidth, card.contentHeight));
     CHECK(youhost::blockReachable(card.compensation.top, card.compensation.height, card.contentHeight, kept.height));
     CHECK(youhost::blockReachable(card.note.top, card.note.height, card.contentHeight, kept.height));
 
@@ -449,7 +450,8 @@ void testLatencyWindowFits()
     CHECK(parsed.hasFit);
     CHECK(parsed.fitHeight == 510);
     CHECK(youhost::juceWindowState(parsed) == "12 40 520 420");
-    CHECK(youhost::shortcutHelpText().find("A smaller window scrolls that card") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("A saved size smaller than that content is replaced") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("LATENCY does not have a Timeline button") != std::string::npos);
     const auto legacyState = youhost::parseWindowState("8 8 900 700 fullscreen");
     CHECK(legacyState.valid);
     CHECK(! legacyState.hasFit);
@@ -645,6 +647,10 @@ void testWindowContentFits()
     CHECK(youhost::pluginListWindowHeight() >= youhost::pluginPickerContentHeight());
     CHECK(youhost::setupWindowHeight() >= 480);
     CHECK(youhost::startupWindowHeight() >= 640);
+    const auto startup = readWorkspaceFile("src/ui/MainComponent.cpp");
+    CHECK(! startup.empty());
+    CHECK(startup.find("Choose the interface, sample rate, and buffer size") == std::string::npos);
+    CHECK(startup.find("Recordings usually go on an external drive. The interface opens") == std::string::npos);
     const int helpCharacters = static_cast<int>(youhost::shortcutHelpText().size());
     const int helpContent = youhost::helpContentHeight(helpCharacters, youhost::helpWindowWidth() - 48);
     const int helpWindow = youhost::helpWindowHeightFor(helpCharacters);
@@ -1106,6 +1112,42 @@ void testGroupsFoldAndPalette()
     CHECK(youhost::adjacentVisibleChannel(items, hidden, 4, -1) == -1);
     CHECK(youhost::adjacentVisibleChannel(items, hidden, 7, 1) == -1);
     CHECK(youhost::adjacentVisibleChannel(items, hidden, 0, 1) == -1);
+
+    int used[4] = { 0, 0, 1, 1 };
+    CHECK(youhost::firstUnusedGroup(used, 4, youhost::kMaxDisplayGroups) == 2);
+    int full[youhost::kMaxDisplayGroups];
+    for (int group = 0; group < youhost::kMaxDisplayGroups; ++group)
+        full[group] = group;
+    CHECK(youhost::firstUnusedGroup(full, youhost::kMaxDisplayGroups, youhost::kMaxDisplayGroups) == -1);
+
+    const auto emptySelection = youhost::planNewGroup(false, 0, "Drums", 1);
+    CHECK(! emptySelection.created);
+    const auto noSlot = youhost::planNewGroup(true, -1, "Drums", 1);
+    CHECK(! noSlot.created);
+    const auto named = youhost::planNewGroup(true, 2, "  Drums  ", 3);
+    CHECK(named.created);
+    CHECK(named.group == 2);
+    CHECK(named.name == "Drums");
+    CHECK(named.color == 3);
+    CHECK(named.collapsed);
+    const auto blank = youhost::planNewGroup(true, 0, "   ", 0);
+    CHECK(blank.name == "Group 1");
+    CHECK(blank.collapsed);
+    const std::string longText(50, 'A');
+    CHECK(youhost::planNewGroup(true, 1, longText, 0).name.size() == 40);
+
+    youhost::KeyQuery plainG;
+    plainG.kind = youhost::KeyKind::character;
+    plainG.character = 'g';
+    const auto go = youhost::matchShortcut(plainG);
+    CHECK(go.has_value());
+    CHECK(*go == youhost::ShortcutId::goToChannel);
+    youhost::KeyQuery commandG = plainG;
+    commandG.command = true;
+    const auto make = youhost::matchShortcut(commandG);
+    CHECK(make.has_value());
+    CHECK(*make == youhost::ShortcutId::makeGroup);
+    CHECK(youhost::shortcutHelpText().find("Enter or OK creates the group") != std::string::npos);
 }
 
 void testPlaybackCopiesDryChannels()
@@ -2332,9 +2374,9 @@ void testSessionChannelsRateLockAndClose()
 
     const int selected[] = { 1, 16, 80 };
     const auto picked = youhost::channelsForGlobalListen(selected, 3, 64);
-    CHECK(picked.size() == 2);
-    CHECK(picked[0] == 1);
-    CHECK(picked[1] == 16);
+    CHECK(picked.size() == 64);
+    CHECK(picked[0] == 0);
+    CHECK(picked[63] == 63);
     const auto all = youhost::channelsForGlobalListen(nullptr, 0, 4);
     CHECK(all.size() == 4);
     CHECK(all[0] == 0);
@@ -2781,6 +2823,227 @@ void testRaiseUnit()
     CHECK(youhost::raiseUnit(0.0f, 3) == 0.0f);
 }
 
+void testReleaseChecklist()
+{
+    int listed = 0;
+    int passed = 0;
+    const auto item = [&](const char* name, bool ok)
+    {
+        ++listed;
+        if (ok)
+            ++passed;
+        std::cout << (ok ? "[pass] " : "[fail] ") << name << "\n";
+        CHECK(ok);
+    };
+
+    std::cout << "release checklist\n";
+
+    const auto card = youhost::layoutLatencyCard(youhost::kLatencyPreferredWidth);
+    const int helpCharacters = static_cast<int>(youhost::shortcutHelpText().size());
+    struct WindowNeed
+    {
+        const char* name;
+        int width;
+        int height;
+    };
+    const WindowNeed windows[] = {
+        { "LATENCY", card.contentWidth, card.contentHeight },
+        { "CPU", youhost::cpuWindowWidth(), youhost::cpuWindowHeight() },
+        { "DROPOUTS", youhost::dropoutWindowWidth(), youhost::dropoutWindowHeight() },
+        { "SCAN", youhost::scannerWindowWidth(), youhost::scannerWindowHeight() },
+        { "Audio setup", youhost::setupWindowWidth(), youhost::setupWindowHeight() },
+        { "Shortcuts", youhost::helpWindowWidth(), youhost::helpWindowHeightFor(helpCharacters) },
+        { "Start session", youhost::startupWindowWidth(), youhost::startupWindowHeight() },
+        { "New session", youhost::placeSessionWindowWidth(), youhost::placeSessionWindowHeight() },
+        { "Group dialog", youhost::groupRenameWindowWidth(), youhost::groupRenameWindowHeight() },
+        { "Plugin list", youhost::pluginListWindowWidth(), youhost::pluginListWindowHeight() },
+    };
+    youhost::SavedWindowSize oldSmall;
+    oldSmall.valid = true;
+    oldSmall.width = 320;
+    oldSmall.height = 180;
+    oldSmall.hasFit = true;
+    oldSmall.fitWidth = 320;
+    oldSmall.fitHeight = 180;
+    bool windowsFit = true;
+    for (const auto& window : windows)
+    {
+        const auto fresh = youhost::windowOpenSize(window.width, window.height, 1920, 1080, {});
+        const auto migrated = youhost::windowOpenSize(window.width, window.height, 1920, 1080, oldSmall);
+        const bool shown = fresh.width >= window.width && fresh.height >= window.height
+                           && migrated.width >= window.width && migrated.height >= window.height
+                           && fresh.width <= 1920 && fresh.height <= 1080
+                           && migrated.width <= 1920 && migrated.height <= 1080;
+        if (! shown)
+            windowsFit = false;
+    }
+    item("windows open full-size (fresh and old small saved size)", windowsFit);
+
+    youhost::ChannelListen modes[6] = {
+        youhost::ChannelListen::record, youhost::ChannelListen::input, youhost::ChannelListen::off,
+        youhost::ChannelListen::record, youhost::ChannelListen::input, youhost::ChannelListen::off,
+    };
+    const int selected[] = { 1 };
+    const youhost::ChannelListen presses[] = {
+        youhost::ChannelListen::record, youhost::ChannelListen::input, youhost::ChannelListen::off,
+    };
+    bool allButtons = true;
+    for (const int page : { 1, 2 })
+    {
+        for (const auto mode : presses)
+        {
+            auto working = modes;
+            const auto targets = youhost::channelsForPageListen(page, selected, 1, 4);
+            if (targets.size() != 4)
+                allButtons = false;
+            for (const int channel : targets)
+                working[static_cast<std::size_t>(channel)] = mode;
+            for (int channel = 0; channel < 4; ++channel)
+                if (working[static_cast<std::size_t>(channel)] != mode)
+                    allButtons = false;
+            if (working[4] != modes[4] || working[5] != modes[5])
+                allButtons = false;
+        }
+    }
+    if (! youhost::channelsForPageListen(0, selected, 1, 4).empty())
+        allButtons = false;
+    item("ALL REC / ALL INPUT / ALL OFF override on REC and HOST", allButtons);
+
+    const bool quitAsks = youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::quit);
+    const bool cancelAborts = ! youhost::sessionCloseProceeds(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::cancel);
+    const bool saveFirst = youhost::sessionCloseSavesFirst(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::save);
+    const bool saveAsFirst = youhost::sessionCloseSaveAsFirst(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::saveAs);
+    const bool discardProceeds = youhost::sessionCloseProceeds(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::discard);
+    const bool recordingStopsFirst = ! youhost::sessionCloseAsks(true, true, youhost::SessionCloseReason::quit)
+                                     && ! youhost::sessionCloseProceeds(true, true, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::discard);
+    item("Cmd+Q prompts Save / Save As / Don't Save / Cancel; recording stops first",
+         quitAsks && cancelAborts && saveFirst && saveAsFirst && discardProceeds && recordingStopsFirst);
+
+    item("new session buffer is 32", youhost::kNewSessionBufferSamples == 32);
+
+    int queries = 0;
+    for (int poll = 0; poll < 50; ++poll)
+        if (youhost::deviceInventoryQueryAllowed(true, false, false, false))
+            ++queries;
+    const bool lossQueries = youhost::deviceInventoryQueryAllowed(true, true, false, false);
+    const bool firstFillQueries = youhost::deviceInventoryQueryAllowed(true, false, false, true);
+    const bool userChangeQueries = youhost::deviceInventoryQueryAllowed(true, false, true, false);
+    item("device lock: no inventory query while the chosen card stays up",
+         queries == 0 && lossQueries && firstFillQueries && userChangeQueries);
+
+    const std::vector<youhost::ListedDevice> cards = {
+        { "WING 2", 48, 48 },
+        { "MacBook Pro Microphone", 1, 0 },
+        { "Pro Tools Audio Bridge 32", 32, 32 },
+    };
+    const auto startupMenu = youhost::buildDeviceList(cards, "");
+    const auto setupMenu = youhost::buildDeviceList(cards, "");
+    bool oneMenu = startupMenu.size() == setupMenu.size() && ! startupMenu.empty()
+                   && startupMenu.back().label == youhost::kOfflineDeviceName
+                   && setupMenu.back().label == youhost::kOfflineDeviceName;
+    for (std::size_t index = 0; index < startupMenu.size() && oneMenu; ++index)
+    {
+        oneMenu = startupMenu[index].label == setupMenu[index].label;
+        if (startupMenu[index].label == "Input:" || startupMenu[index].label == "Output:")
+            oneMenu = false;
+    }
+    item("startup and Audio setup share one audio card menu", oneMenu);
+
+    youhost::RecordAttempt attempt;
+    attempt.hasSession = true;
+    attempt.deviceLive = true;
+    attempt.deviceRate = 48000.0;
+    attempt.channels[0].rec = true;
+    attempt.channels[0].inputOpen = true;
+    const auto started = youhost::resolveTransport(attempt, youhost::TransportPress::commandSpace);
+    item("record starts from an armed channel with an open input",
+         started.startRecording && started.alert.empty());
+
+    const auto busyStarted = std::chrono::steady_clock::now();
+    for (int step = 0; step < 50; ++step)
+    {
+        youhost::windowOpenSize(680, 520, 1920, 1080, oldSmall);
+        youhost::ChannelLatencyInput sample[2] = { { 100, true, 0 }, { 40, true, 0 } };
+        (void) youhost::planCompensation(sample, 2, youhost::AlignMode::group);
+    }
+    const auto busyMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - busyStarted).count();
+    item("no message-thread stall over 16 ms on a 50-step burst", busyMs < 16);
+
+    const bool fileAsks = youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::newSession)
+                          && youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::open)
+                          && youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::openRecent)
+                          && youhost::sessionReplaceAsks(true)
+                          && ! youhost::sessionReplaceAsks(false)
+                          && youhost::sessionCloseSavesFirst(true, false, youhost::SessionCloseReason::newSession, youhost::UnsavedChoice::save)
+                          && youhost::sessionCloseSaveAsFirst(true, false, youhost::SessionCloseReason::open, youhost::UnsavedChoice::saveAs);
+    item("New, Open, Open Recent, Save, and Save As ask before discarding edits", fileAsks);
+
+    youhost::SessionNode root;
+    root.name = "YouHostSession";
+    youhost::sessionSetAttribute(root, "version", "7");
+    youhost::sessionSetAttribute(root, "align", "group");
+    youhost::SessionNode future;
+    future.name = "Future";
+    youhost::sessionSetAttribute(future, "keep", "yes");
+    root.children.push_back(future);
+    youhost::SessionDocumentModel model;
+    const bool read = youhost::readSessionModel(root, model);
+    item("session files stay compatible (align and unknown elements)",
+         read && model.align == "group" && model.hasSource && youhost::sessionModelIsClean(youhost::cleanSessionModel()));
+
+    youhost::ChannelLatencyInput grouped[4] = {};
+    grouped[0] = { 100, true, 0 };
+    grouped[1] = { 300, true, 0 };
+    grouped[2] = { 1000, true, -1 };
+    grouped[3] = { 50, true, 1 };
+    const auto perGroup = youhost::planCompensation(grouped, 4, youhost::AlignMode::group);
+    const auto allAligned = youhost::planCompensation(grouped, 4, youhost::AlignMode::all);
+    item("Per group delays only that group's channels; All aligned is the other switch",
+         perGroup.delaySamples[0] == 200 && perGroup.delaySamples[1] == 0
+             && perGroup.delaySamples[2] == 0 && perGroup.delaySamples[3] == 0
+             && perGroup.alignmentSamples == 300
+             && allAligned.delaySamples[2] == 0 && allAligned.alignmentSamples == 1000);
+
+    const auto latencyUi = readWorkspaceFile("src/ui/LatencyReadout.cpp");
+    const auto latencyHeader = readWorkspaceFile("src/ui/LatencyReadout.h");
+    item("LATENCY has All aligned and Per group, and no Timeline button",
+         latencyUi.find("\"Timeline\"") == std::string::npos
+             && latencyHeader.find("Timeline") == std::string::npos
+             && latencyHeader.find("All aligned") != std::string::npos
+             && latencyHeader.find("Per group") != std::string::npos
+             && ! readWorkspaceFile("docs/release-checklist.md").empty());
+
+    const auto mainUi = readWorkspaceFile("src/ui/MainComponent.cpp");
+    const auto mainHeader = readWorkspaceFile("src/ui/MainComponent.h");
+    item("ALL button labels stay ALL REC, ALL INPUT, and ALL OFF",
+         mainHeader.find("\"ALL REC\"") != std::string::npos
+             && mainHeader.find("\"ALL INPUT\"") != std::string::npos
+             && mainHeader.find("\"ALL OFF\"") != std::string::npos
+             && mainUi.find("only those channels") == std::string::npos
+             && mainUi.find("hasSelection ? juce::String(\"REC\")") == std::string::npos);
+
+    const auto emptyGroup = youhost::planNewGroup(false, 0, "Drums", 1);
+    const auto folded = youhost::planNewGroup(true, 0, "  ", 2);
+    youhost::KeyQuery plainG;
+    plainG.kind = youhost::KeyKind::character;
+    plainG.character = 'g';
+    youhost::KeyQuery commandG = plainG;
+    commandG.command = true;
+    const auto go = youhost::matchShortcut(plainG);
+    const auto make = youhost::matchShortcut(commandG);
+    item("Cmd+G names and folds the selected channels; plain G goes to a channel",
+         ! emptyGroup.created && folded.created && folded.collapsed && folded.name == "Group 1"
+             && go.has_value() && *go == youhost::ShortcutId::goToChannel
+             && make.has_value() && *make == youhost::ShortcutId::makeGroup);
+
+    item("startup window has no instructional paragraph",
+         mainUi.find("Choose the interface, sample rate, and buffer size") == std::string::npos
+             && mainUi.find("Recordings usually go on an external drive. The interface opens") == std::string::npos);
+
+    std::cout << "release checklist " << passed << "/" << listed << "\n";
+    CHECK(passed == listed);
+}
+
 } // namespace
 
 int main()
@@ -2833,6 +3096,7 @@ int main()
     testRecordStartTransport();
     testDeviceListGrouping();
     testStartupAndSetupShareTheDeviceMenu();
+    testReleaseChecklist();
 
     if (failures != 0)
     {

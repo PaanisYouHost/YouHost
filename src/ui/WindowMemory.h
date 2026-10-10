@@ -8,6 +8,12 @@
 namespace youhost
 {
 
+inline void saveRememberedWindow(juce::DocumentWindow& window,
+                                 AppSettings& settings,
+                                 const juce::String& key,
+                                 int fitWidth,
+                                 int fitHeight);
+
 inline void prepareRememberedWindow(juce::DocumentWindow& window,
                                     AppSettings& settings,
                                     const juce::String& key,
@@ -17,7 +23,7 @@ inline void prepareRememberedWindow(juce::DocumentWindow& window,
                                     int minHeight)
 {
     window.setResizable(true, false);
-    window.setResizeLimits(minWidth, minHeight, 4000, 2400);
+    juce::ignoreUnused(minWidth, minHeight);
     const auto saved = parseWindowState(settings.loadNamedWindow(key).toStdString());
     int screenWidth = 0;
     int screenHeight = 0;
@@ -32,14 +38,20 @@ inline void prepareRememberedWindow(juce::DocumentWindow& window,
         }
     }
     const auto open = windowOpenSize(defaultWidth, defaultHeight, screenWidth, screenHeight, saved);
-    if (keepRememberedWindow(saved, defaultWidth, defaultHeight)
-        && window.restoreWindowStateFromString(juce::String(juceWindowState(saved))))
+    const auto floor = clampWindowToScreen(defaultWidth, defaultHeight, screenWidth, screenHeight, 48);
+    window.setResizeLimits(floor.width, floor.height, 4000, 2400);
+    const bool covers = keepRememberedWindow(saved, defaultWidth, defaultHeight);
+    if (covers && window.restoreWindowStateFromString(juce::String(juceWindowState(saved))))
     {
         if (window.getWidth() != open.width || window.getHeight() != open.height)
             window.setSize(open.width, open.height);
-        return;
     }
-    window.centreWithSize(open.width, open.height);
+    else
+    {
+        window.centreWithSize(open.width, open.height);
+    }
+    if (saved.valid && ! covers)
+        saveRememberedWindow(window, settings, key, defaultWidth, defaultHeight);
 }
 
 inline void saveRememberedWindow(juce::DocumentWindow& window,

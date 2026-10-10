@@ -937,7 +937,9 @@ public:
     {
         if (event.mods.isPopupMenu())
         {
-            showChannelMenu(engine_, *this, channel_, [this](int) { editName(); });
+            if (! engine_.isChannelSelected(channel_))
+                engine_.selectChannel(channel_, false);
+            showMakeGroupDialog(engine_);
             return;
         }
         const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();

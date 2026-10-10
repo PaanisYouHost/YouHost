@@ -32,6 +32,7 @@ enum class ShortcutId
     save,
     saveAs,
     goToChannel,
+    makeGroup,
     count
 };
 
@@ -70,6 +71,8 @@ struct Binding
 };
 
 inline constexpr Binding kBindings[] = {
+    { ShortcutId::makeGroup, KeyKind::character, 'g', 0, 1, 0, "Cmd+G",
+      "Name a group from the selected channels, pick a colour, and fold it", false, 0 },
     { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
       "Go to channel. Type the number and press Return.", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
@@ -229,8 +232,10 @@ inline constexpr const char* kShortcutNotes =
     "5. In the startup window, choose the audio card.\n"
     "Click a channel to select it. Shift+click selects the channels from the anchor through the one you click. "
     "Cmd+click, or Ctrl+click, adds or removes that one channel.\n"
-    "Make group from selection assigns those channels to one of the 10 groups and folds the group. "
-    "The group bar stays visible. Click it to open the channels again. Use the channel menu or the Group button.\n"
+    "Cmd+G, the Group button, or a right-click opens one dialog for the selected channels. "
+    "The name is selected so you can type, and the colour swatches sit under it. "
+    "Enter or OK creates the group, applies the name and colour, and folds it. Esc cancels. "
+    "The group bar stays visible. Click it to open the channels again.\n"
     "On the REC page a group bar shows the group name in the centre. On the HOST page the name stays on the left. "
     "The fold mark is a fixed column, \u25BE 8 ch when open and \u25B8 8 ch when folded.\n"
     "Double-click a channel name, or choose Rename. The editor opens with the name selected. Enter commits. Esc cancels. "
@@ -258,7 +263,7 @@ inline constexpr const char* kShortcutNotes =
     "Session channel N is device channel N. Channels past the card stay hidden on REC, HOST, and the timeline. "
     "They stay in the session and are not processed. A card with enough channels shows them again. "
     "Hide unused channels with groups and Hide. "
-    "The channel list header has ALL REC, ALL INPUT, and ALL OFF. With a selection they read REC, INPUT, and OFF and apply only to the selected channels. "
+    "The channel list header has ALL REC, ALL INPUT, and ALL OFF on REC and on HOST. They set every visible channel. A selection does not limit them. "
     "Leaving REC while recording asks first. The record lock still blocks them. "
     "If the card rate is higher than the session, YouHost shows Session moves to 48 kHz. A lower rate changes with no prompt. "
     "Plugins are prepared again off the audio thread. Takes keep the rate in their WAV files.\n"
@@ -300,15 +305,16 @@ inline constexpr const char* kShortcutNotes =
     "Loaded plugin slots turn amber and blink slowly until you click the button again. The recorded WAV is always the raw input.\n"
     "LATENCY chooses All aligned or Per group. All aligned lines every included channel up on the slowest plugin. "
     "Per group lines each group up on its own slowest plugin. Ungrouped channels are not delayed. "
-    "The window opens large enough to show the compensation value and the alignment note. "
-    "A smaller window scrolls that card, so the text stays reachable.\n"
+    "The dropout graph is the DROPOUTS window. LATENCY does not have a Timeline button. "
+    "The window opens large enough to show the compensation value, All aligned, Per group, and the alignment note. "
+    "A saved size smaller than that content is replaced.\n"
     "FX and PDC on a row are that channel's plugin latency and the extra delay that lines it up.\n"
     "New starts a clean session: no plugins, no channel names, no colours, groups back to defaults, every channel REC, "
     "output gain 0 dB, bypass off, and an empty timeline. The device, sample rate, bit depth, and buffer stay as they are. "
     "New, Open, and Open Recent ask before discarding unsaved changes. Save writes this session. The first save asks for a name and a folder. "
     "Save As copies the whole folder, including the WAV files, and continues in the copy.\n"
-    "Windows open large enough to show their contents. You can shrink one afterwards, and that size is remembered. "
-    "A smaller window scrolls so the text can still be reached.\n"
+    "Windows open at least as large as their content, and never smaller than that unless the screen itself is smaller. "
+    "A larger size is remembered. An older smaller size is replaced so the text stays visible.\n"
     "New sessions are named with the date, DD.MM.YYYY. If that folder already exists, the name becomes DD.MM.YYYY_1, then _2. "
     "A crash copy is named DD.MM.YYYY_crash_HH-MM.\n"
     "Every 5 minutes YouHost writes a backup of the session file into the session's Backups folder and keeps the 10 newest. "

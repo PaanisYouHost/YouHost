@@ -5,9 +5,8 @@
 namespace youhost
 {
 
-// Heights are the content that must be on screen the first time a window opens.
-// A smaller remembered size is kept only after the user has resized it, and the
-// content then scrolls.
+// Heights are the content that must be on screen when a window opens.
+// The open size is at least this large. A larger remembered size is kept.
 
 inline int cpuCardHeight(int workers) noexcept
 {

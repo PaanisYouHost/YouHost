@@ -96,6 +96,16 @@ inline bool deviceMaskIsComplete(const bool* open, int reported) noexcept
 }
 
 // Turns on every channel the device reported, up to 128. The caller supplies at least that many flags.
+// A chosen device stays put. Polls do not scan or probe it again until the
+// device is actually lost, the inventory is still empty, or the user picks
+// another card.
+inline bool deviceInventoryQueryAllowed(bool setupLocked, bool deviceLost, bool force, bool inventoryEmpty) noexcept
+{
+    if (force || deviceLost || inventoryEmpty)
+        return true;
+    return ! setupLocked;
+}
+
 inline void openAllReportedChannels(bool* open, int reported) noexcept
 {
     const int count = channelsToOpen(reported);

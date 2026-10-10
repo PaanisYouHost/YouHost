@@ -110,8 +110,8 @@ public:
     int loadPreferredBuffer()
     {
         if (auto* settings = properties_.getUserSettings())
-            return settings->getIntValue("preferredBuffer", 64);
-        return 64;
+            return settings->getIntValue("preferredBuffer", kNewSessionBufferSamples);
+        return kNewSessionBufferSamples;
     }
 
     void savePreferredBuffer(int samples)

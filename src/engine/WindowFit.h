@@ -1,14 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 namespace youhost
 {
 
-// A window opens at the size that shows its content. A smaller size is kept
-// only after the user has resized it for the current content. If the content
-// grows, a remembered size that would hide part of it opens at the fit size.
+// A window opens at max(remembered size, content size), then clamps to the
+// screen. A remembered size smaller than the content is ignored.
 struct WindowFit
 {
     int width = 0;
@@ -127,18 +127,13 @@ inline std::string stampWindowState(const std::string& juceState, int fitWidth, 
     return juceState + " fit " + std::to_string(fitWidth) + " " + std::to_string(fitHeight);
 }
 
-// A remembered size is kept when it was chosen for this content. A size saved
-// before the content grew, or an old size with no content stamp that is
-// smaller than the fit, opens at the fit size instead.
+// True only when the saved frame is already large enough. A smaller frame,
+// including one stamped by an older version, is not restored.
 inline bool keepRememberedWindow(const SavedWindowSize& saved, int fitWidth, int fitHeight) noexcept
 {
     if (! saved.valid || fitWidth <= 0 || fitHeight <= 0)
         return false;
-    if (! saved.hasFit)
-        return saved.width >= fitWidth && saved.height >= fitHeight;
-    const bool grewWider = fitWidth > saved.fitWidth && saved.width < fitWidth;
-    const bool grewTaller = fitHeight > saved.fitHeight && saved.height < fitHeight;
-    return ! grewWider && ! grewTaller;
+    return saved.width >= fitWidth && saved.height >= fitHeight;
 }
 
 inline WindowFit clampWindowToScreen(int width, int height, int screenWidth, int screenHeight, int margin) noexcept
@@ -163,10 +158,16 @@ inline WindowFit windowOpenSize(int fitWidth,
                                 int screenHeight,
                                 const SavedWindowSize& saved) noexcept
 {
-    const auto fit = clampWindowToScreen(fitWidth, fitHeight, screenWidth, screenHeight, 48);
-    if (! keepRememberedWindow(saved, fitWidth, fitHeight))
-        return fit;
-    return clampWindowToScreen(saved.width, saved.height, screenWidth, screenHeight, 24);
+    int width = fitWidth;
+    int height = fitHeight;
+    if (saved.valid)
+    {
+        if (saved.width > width)
+            width = saved.width;
+        if (saved.height > height)
+            height = saved.height;
+    }
+    return clampWindowToScreen(width, height, screenWidth, screenHeight, 48);
 }
 
 // Every pixel of a block can be brought into a viewport of the given height.

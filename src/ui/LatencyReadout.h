@@ -17,7 +17,6 @@ public:
     void setNumbers(const LatencyNumbers& numbers);
     void setAlignGroup(int perGroup);
     void setResetHandler(std::function<void()> handler);
-    void setGraphHandler(std::function<void()> handler);
     void setAlignHandler(std::function<void(int perGroup)> handler);
 
     void paint(juce::Graphics& graphics) override;
@@ -29,7 +28,6 @@ private:
     std::function<void(int)> onAlign_;
     juce::TextButton allButton_ { "All aligned" };
     juce::TextButton groupButton_ { "Per group" };
-    juce::TextButton graphButton_ { "Timeline" };
     juce::TextButton resetButton_ { "Reset" };
 };
 

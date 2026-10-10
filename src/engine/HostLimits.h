@@ -24,6 +24,9 @@ inline constexpr int kDefaultRmsReferenceDb = -20;
 // 16 and 24 are integer PCM. 32 is 32-bit float. Anything else becomes 24.
 inline constexpr int kDefaultWavBitDepth = 24;
 
+// A new session asks the device for this buffer. 32 samples is the standing default.
+inline constexpr int kNewSessionBufferSamples = 32;
+
 inline int normaliseWavBitDepth(int bits) noexcept
 {
     if (bits == 16 || bits == 32)
