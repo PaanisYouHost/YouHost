@@ -433,28 +433,11 @@ const AudioThreadConfig& AudioEngine::currentConfig() const
 
 SessionChannelView AudioEngine::channelView() const
 {
+    if (offlineTemplate_)
+        return sessionChannelView(0, false, true, false);
     const bool open = deviceOpen_.load(std::memory_order_relaxed);
     const int inputs = open ? inputCount() : 0;
-    return sessionChannelView(sessionChannelCount_, inputs, open, offlineTemplate_);
-}
-
-void AudioEngine::setSessionChannelCount(int count)
-{
-    if (isRecording())
-        return;
-    const int next = normaliseSessionChannelCount(count);
-    if (next == sessionChannelCount_)
-        return;
-    sessionChannelCount_ = next;
-    publishSessionChannelLimit();
-    if (sessionFolder_ != juce::File())
-        noteSessionEdit();
-    ++displayRevision_;
-}
-
-bool AudioEngine::channelHasNoInput(int channel) const
-{
-    return youhost::channelHasNoInput(channel, channelView());
+    return sessionChannelView(inputs, open, false, revealUnsupported_);
 }
 
 void AudioEngine::setOfflineTemplate(bool offline)
@@ -558,9 +541,9 @@ void AudioEngine::publishSessionChannelLimit()
 {
     const auto view = channelView();
     sessionVisible_.store(view.visible, std::memory_order_relaxed);
-    sessionAudioLimit_.store(view.processed, std::memory_order_relaxed);
+    sessionAudioLimit_.store(view.cardInputs, std::memory_order_relaxed);
     if (rack_ != nullptr)
-        rack_->setActiveChannels(view.processed);
+        rack_->setActiveChannels(view.cardInputs);
 }
 
 void AudioEngine::setRevealUnsupportedChannels(bool reveal)
@@ -2082,7 +2065,7 @@ SessionData AudioEngine::captureSessionData()
     if (recorder_ != nullptr)
         recorder_->captureSession(data);
     captureDisplay(data);
-    data.channelCount = sessionChannelCount_;
+    data.channelCount = kMaxChannels;
     data.page = sessionPage_;
     data.waveformGain = waveformGain_;
     data.alignGroup = alignGroup_;
@@ -2172,7 +2155,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     sessionReferenceDb_ = data.rmsReferenceDb;
     setWavBitDepth(data.wavBitDepth, false);
     sessionPage_ = data.page == 2 ? 2 : 1;
-    sessionChannelCount_ = normaliseSessionChannelCount(data.channelCount);
+    sessionChannelCount_ = kMaxChannels;
     if (meterRestoreHandler_ != nullptr)
         meterRestoreHandler_(sessionPeak_, sessionReferenceDb_);
     if (pageRestoreHandler_ != nullptr)

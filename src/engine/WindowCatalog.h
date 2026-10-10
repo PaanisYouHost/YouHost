@@ -148,7 +148,7 @@ inline int placeSessionWindowWidth() noexcept
 
 inline int placeSessionWindowHeight() noexcept
 {
-    return 360;
+    return 320;
 }
 
 } // namespace youhost

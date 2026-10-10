@@ -138,7 +138,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return false;
     };
 
-    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate", "channels" }))
+    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate" }))
         return true;
     if (listed("Meters", { "peak", "reference" }))
         return true;
@@ -324,9 +324,8 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
     if (const auto* align = sessionAttribute(root, "align"))
         model.align = *align == "group" ? "group" : "all";
     model.rate = sessionAttributeDouble(root, "rate", 0.0);
+    // A stored channels attribute is ignored. The session always holds 128.
     model.channelCount = kMaxChannels;
-    if (sessionHasAttribute(root, "channels"))
-        model.channelCount = normaliseSessionChannelCount(sessionAttributeInt(root, "channels", kMaxChannels));
 
     if (const auto* meters = sessionChild(root, "Meters"))
     {
@@ -473,7 +472,6 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
     sessionSetAttribute(root, "align", model.align == "group" ? "group" : "all");
     if (model.rate > 0.0)
         sessionSetAttribute(root, "rate", std::to_string(model.rate));
-    sessionSetAttribute(root, "channels", std::to_string(normaliseSessionChannelCount(model.channelCount)));
 
     SessionNode meters;
     meters.name = "Meters";

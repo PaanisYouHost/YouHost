@@ -808,11 +808,7 @@ public:
             arm_.setColour(juce::TextButton::buttonColourId, theme::button);
             arm_.setColour(juce::TextButton::textColourOffId, theme::fainter);
         }
-        const bool noInput = engine_.channelHasNoInput(channel_);
-        setAlpha(noInput ? 0.72f : 1.0f);
-        pdc_.setColour(juce::Label::textColourId, noInput ? theme::amber : theme::dim);
-        pdc_.setText(noInput ? juce::String(kNoInputLabel) : engine_.channelPdcText(channel_),
-                     juce::dontSendNotification);
+        pdc_.setText(engine_.channelPdcText(channel_), juce::dontSendNotification);
         const float db = engine_.outputDb(channel_);
         const float dbDelta = db - gainShown_;
         if (dbDelta > 0.01f || dbDelta < -0.01f)

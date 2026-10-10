@@ -59,8 +59,6 @@ public:
     LatencyNumbers latencyNumbers() const;
     int visibleChannels() const;
     int sessionChannelCount() const noexcept { return sessionChannelCount_; }
-    void setSessionChannelCount(int count);
-    bool channelHasNoInput(int channel) const;
     bool revealUnsupportedChannels() const noexcept { return revealUnsupported_; }
     void setRevealUnsupportedChannels(bool reveal);
     juce::String hiddenChannelNote() const;

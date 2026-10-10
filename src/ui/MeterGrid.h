@@ -42,7 +42,6 @@ struct BridgeCell
     int color = 0;
     bool collapsed = false;
     bool selected = false;
-    bool noInput = false;
     juce::String title;
     MeterReading reading {};
     bool anyPlugin = false;
