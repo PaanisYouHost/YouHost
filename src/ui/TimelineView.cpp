@@ -356,7 +356,7 @@ juce::Rectangle<float> TimelineView::waveformArea() const
 {
     auto bounds = getLocalBounds().toFloat().reduced(8.0f, 6.0f);
     bounds.removeFromBottom(32.0f);
-    bounds.removeFromTop(14.0f);
+    bounds.removeFromTop(static_cast<float>(kTimelineRulerHeightPx));
     bounds.removeFromRight(18.0f);
     return bounds;
 }
@@ -400,7 +400,7 @@ void TimelineView::resized()
     scroll_.setBounds(bottom);
     auto lanes = getLocalBounds().reduced(8, 6);
     lanes.removeFromBottom(32);
-    lanes.removeFromTop(14);
+    lanes.removeFromTop(kTimelineRulerHeightPx);
     laneScrollBar_.setBounds(lanes.removeFromRight(18));
     clampLaneScroll();
     syncScroll();
@@ -513,7 +513,7 @@ void TimelineView::paint(juce::Graphics& graphics)
     graphics.fillRoundedRectangle(bounds, 8.0f);
 
     auto inner = waveformArea();
-    auto header = getLocalBounds().toFloat().reduced(8.0f, 6.0f).removeFromTop(14.0f);
+    auto header = getLocalBounds().toFloat().reduced(8.0f, 6.0f).removeFromTop(static_cast<float>(kTimelineRulerHeightPx));
     const double rate = view_.sampleRate > 0.0 ? view_.sampleRate : 48000.0;
     const auto visible = std::max<std::int64_t>(1, visibleSamples());
     graphics.setColour(theme::dim);
@@ -531,6 +531,12 @@ void TimelineView::paint(juce::Graphics& graphics)
     graphics.saveState();
     graphics.reduceClipRegion(inner.toNearestInt());
     std::vector<TakeMark> takeMarks;
+    struct CornerTag
+    {
+        TimelineLabelRect box;
+        juce::String text;
+    };
+    std::vector<CornerTag> cornerTags;
 
     const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes)
     {
@@ -626,15 +632,10 @@ void TimelineView::paint(juce::Graphics& graphics)
         }
         if (showNumbers)
         {
-            const auto label = juce::String::fromUTF8(laneCornerLabel(lane.number, lane.title, lane.group).c_str());
-            const float tagHeight = std::min(16.0f, std::max(10.0f, laneHeight - 2.0f));
-            auto tag = juce::Rectangle<float>(row.getX() + 2.0f, row.getY() + 1.0f,
-                                              std::min(200.0f, std::max(24.0f, row.getWidth() - 4.0f)), tagHeight);
-            graphics.setColour(theme::panel.withAlpha(0.88f));
-            graphics.fillRoundedRectangle(tag, 3.0f);
-            graphics.setColour(theme::text);
-            graphics.setFont(juce::Font(juce::FontOptions(std::min(12.0f, tagHeight - 1.0f))));
-            graphics.drawText(label, tag.reduced(4.0f, 0.0f), juce::Justification::centredLeft, true);
+            CornerTag tag;
+            tag.box = laneCornerLabelRect(row.getX(), row.getY(), row.getWidth(), row.getHeight());
+            tag.text = juce::String::fromUTF8(laneCornerLabel(lane.number, lane.title, lane.group).c_str());
+            cornerTags.push_back(std::move(tag));
         }
     }
     };
@@ -651,7 +652,6 @@ void TimelineView::paint(juce::Graphics& graphics)
             return left.start < right.start;
         return left.number < right.number;
     });
-    graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
     for (std::size_t markIndex = 0; markIndex < takeMarks.size(); ++markIndex)
     {
         const float markX = sampleToX(takeMarks[markIndex].start);
@@ -659,18 +659,6 @@ void TimelineView::paint(juce::Graphics& graphics)
             continue;
         graphics.setColour(theme::amber);
         graphics.drawLine(markX, inner.getY(), markX, inner.getBottom(), 2.0f);
-        float nextX = inner.getRight();
-        if (markIndex + 1 < takeMarks.size())
-            nextX = sampleToX(takeMarks[markIndex + 1].start);
-        const float room = nextX - markX;
-        const auto label = room < 58.0f ? juce::String(takeMarks[markIndex].number)
-                                        : "TAKE " + juce::String(takeMarks[markIndex].number);
-        auto pill = juce::Rectangle<float>(markX + 3.0f, inner.getY() + 1.0f,
-                                           std::min(78.0f, std::max(18.0f, room - 6.0f)), 16.0f);
-        graphics.setColour(theme::amber);
-        graphics.fillRoundedRectangle(pill, 3.0f);
-        graphics.setColour(juce::Colour(0xff141414));
-        graphics.drawText(label, pill, juce::Justification::centred, true);
     }
 
     const auto playhead = view_.position;
@@ -681,7 +669,40 @@ void TimelineView::paint(juce::Graphics& graphics)
         graphics.drawLine(playX, inner.getY(), playX, inner.getBottom(), 2.0f);
     }
 
+    for (const auto& tag : cornerTags)
+    {
+        if (tag.box.width < 8.0f || tag.box.height < 8.0f)
+            continue;
+        auto pill = juce::Rectangle<float>(tag.box.x, tag.box.y, tag.box.width, tag.box.height);
+        graphics.setColour(theme::panel);
+        graphics.fillRoundedRectangle(pill, 3.0f);
+        graphics.setColour(theme::text);
+        graphics.setFont(juce::Font(juce::FontOptions(std::min(12.0f, tag.box.height - 1.0f))));
+        graphics.drawText(tag.text, pill.reduced(4.0f, 0.0f), juce::Justification::centredLeft, true);
+    }
+
     graphics.restoreState();
+
+    graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
+    for (std::size_t markIndex = 0; markIndex < takeMarks.size(); ++markIndex)
+    {
+        const float markX = sampleToX(takeMarks[markIndex].start);
+        if (markX < inner.getX() - 1.0f || markX > inner.getRight() + 1.0f)
+            continue;
+        float nextX = inner.getRight();
+        if (markIndex + 1 < takeMarks.size())
+            nextX = sampleToX(takeMarks[markIndex + 1].start);
+        const float room = nextX - markX;
+        const auto placed = takeRulerLabelRect(inner.getX(), header.getY(), inner.getWidth(), header.getHeight(), markX, nextX);
+        if (placed.width < 8.0f || placed.height < 8.0f)
+            continue;
+        auto pill = juce::Rectangle<float>(placed.x, placed.y, placed.width, placed.height);
+        graphics.setColour(theme::amber);
+        graphics.fillRoundedRectangle(pill, 3.0f);
+        graphics.setColour(juce::Colour(0xff141414));
+        const auto label = juce::String::fromUTF8(takeRulerLabelText(takeMarks[markIndex].number, room).c_str());
+        graphics.drawText(label, pill, juce::Justification::centred, true);
+    }
 
     graphics.setColour(theme::panelEdge);
     graphics.fillRect(0, getHeight() - 4, getWidth(), 4);
