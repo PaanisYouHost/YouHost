@@ -1646,7 +1646,7 @@ RecordAttempt AudioEngine::makeRecordAttempt()
     attempt.playing = recorder_ != nullptr && recorder_->isPlaying();
     attempt.hasSession = hasSession();
     const auto folderProblem = sessionRecordProblem();
-    attempt.folderWritable = ! attempt.hasSession || folderProblem.isEmpty();
+    attempt.folderWritable = attempt.hasSession && folderProblem.isEmpty();
     if (folderProblem.isNotEmpty())
         attempt.folderProblem = folderProblem.toStdString();
     attempt.offline = offlineTemplate_;
@@ -2049,7 +2049,7 @@ juce::String AudioEngine::missingSessionParentNote() const
 juce::String AudioEngine::sessionRecordProblem() const
 {
     if (sessionFolder_ == juce::File())
-        return "This session has no folder yet. Recording did not start.";
+        return {};
 
     const auto parent = sessionFolder_.getParentDirectory();
     if (! parent.isDirectory())

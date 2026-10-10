@@ -910,6 +910,37 @@ void testChannelPick()
 void testSessionNames()
 {
     CHECK(youhost::europeanSessionDate(9, 10, 2026) == "09.10.2026");
+    CHECK(! youhost::startupLeaveEntersMain(youhost::StartupLeave::close));
+    CHECK(youhost::startupLeaveEntersMain(youhost::StartupLeave::newSession));
+    CHECK(youhost::startupLeaveEntersMain(youhost::StartupLeave::openSession));
+    CHECK(youhost::startupLeaveEntersMain(youhost::StartupLeave::openRecent));
+    CHECK(! youhost::mainWindowAllowed(false, false));
+    CHECK(! youhost::mainWindowAllowed(false, true));
+    CHECK(youhost::mainWindowAllowed(true, true));
+
+    const auto planned = youhost::planNewSession("/Volumes/Recordings", 10, 10, 2026, {});
+    CHECK(planned.location == "/Volumes/Recordings");
+    CHECK(planned.name == "10.10.2026");
+    CHECK(planned.folder == "/Volumes/Recordings/10.10.2026");
+    CHECK(planned.folderCreatedImmediately);
+    const auto again = youhost::planNewSession("/Volumes/Recordings/", 10, 10, 2026, { "10.10.2026" });
+    CHECK(again.name == "10.10.2026_1");
+    CHECK(again.folder == "/Volumes/Recordings/10.10.2026_1");
+    CHECK(again.folderCreatedImmediately);
+    const auto layout = youhost::sessionLayoutFor(planned.folder);
+    const auto root = std::filesystem::temp_directory_path() / "youhost-required-session";
+    std::filesystem::remove_all(root);
+    const auto created = root / planned.name;
+    std::filesystem::create_directories(created / "audio");
+    {
+        std::ofstream session((created / "session.youhost").string());
+        session << "session";
+    }
+    CHECK(std::filesystem::is_directory(created / "audio"));
+    CHECK(std::filesystem::is_regular_file(created / "session.youhost"));
+    CHECK(layout.sessionFile.find("session.youhost") != std::string::npos);
+    CHECK(layout.audioFolder.find("/audio") != std::string::npos);
+    std::filesystem::remove_all(root);
     CHECK(youhost::crashRecoverySessionName(9, 10, 2026, 14, 32) == "09.10.2026_crash_14-32");
     CHECK(youhost::nextFreeSessionName("09.10.2026", std::vector<std::string> {}) == "09.10.2026");
     CHECK(youhost::nextFreeSessionName("09.10.2026", std::vector<std::string> { "09.10.2026" }) == "09.10.2026_1");
@@ -2542,7 +2573,10 @@ void testRecordStartTransport()
     auto noSession = card;
     noSession.hasSession = false;
     const auto folder = youhost::resolveTransport(noSession, youhost::TransportPress::play);
-    CHECK(folder.alert.find("no folder") != std::string::npos);
+    CHECK(! folder.startRecording);
+    CHECK(folder.alert.find("no folder") == std::string::npos);
+    CHECK(folder.log.find("no folder") == std::string::npos);
+    CHECK(folder.alert.empty());
 
     auto stoppedDevice = card;
     stoppedDevice.deviceLive = false;

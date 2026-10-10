@@ -58,6 +58,56 @@ inline std::string nextFreeSessionName(std::string_view base, const std::vector<
     });
 }
 
+// The startup window stays up until the user creates a session or opens one.
+// Closing it, including in Offline, does not enter the main window.
+enum class StartupLeave
+{
+    close,
+    newSession,
+    openSession,
+    openRecent
+};
+
+inline bool startupLeaveEntersMain(StartupLeave leave) noexcept
+{
+    return leave == StartupLeave::newSession
+           || leave == StartupLeave::openSession
+           || leave == StartupLeave::openRecent;
+}
+
+// Offline is a device choice. It does not allow a main window with no session.
+inline bool mainWindowAllowed(bool hasSessionFolder, bool offline) noexcept
+{
+    (void) offline;
+    return hasSessionFolder;
+}
+
+struct PlannedNewSession
+{
+    std::string location;
+    std::string name;
+    std::string folder;
+    bool folderCreatedImmediately = true;
+};
+
+// New, at startup and from the File menu, uses the last location and DD.MM.YYYY.
+// The folder is created as soon as the user confirms, not on the first save.
+inline PlannedNewSession planNewSession(std::string_view lastLocation,
+                                        int day,
+                                        int month,
+                                        int year,
+                                        const std::vector<std::string>& taken)
+{
+    PlannedNewSession plan;
+    plan.location.assign(lastLocation.begin(), lastLocation.end());
+    while (! plan.location.empty() && (plan.location.back() == '/' || plan.location.back() == '\\'))
+        plan.location.pop_back();
+    plan.name = nextFreeSessionName(europeanSessionDate(day, month, year), taken);
+    plan.folder = plan.location.empty() ? plan.name : plan.location + "/" + plan.name;
+    plan.folderCreatedImmediately = true;
+    return plan;
+}
+
 struct BackupStamp
 {
     std::string name;

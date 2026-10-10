@@ -13,6 +13,7 @@
 #include "engine/RecordStart.h"
 #include "engine/HostLog.h"
 #include "engine/SessionChannels.h"
+#include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
 
 #include <vector>
@@ -927,7 +928,15 @@ public:
 
     void closeButtonPressed() override
     {
-        finish();
+        if (startupLeaveEntersMain(StartupLeave::close))
+        {
+            finish();
+            return;
+        }
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                               "Create or open a session",
+                                               "Create a session or open one before continuing. "
+                                               "The folder is created when you confirm the name.");
     }
 
 private:
@@ -2203,6 +2212,12 @@ void MainComponent::openStartup()
 
 void MainComponent::dismissStartup()
 {
+    if (! mainWindowAllowed(engine_.hasSession(), engine_.offlineTemplate()))
+    {
+        if (startupWindow_ == nullptr)
+            openStartup();
+        return;
+    }
     if (startupWindow_ == nullptr)
         return;
     if (startupWindow_->isCurrentlyModal())
@@ -2248,15 +2263,6 @@ void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
                                     safe->chooseSaveAsDestination([safe, action](bool saved)
                                     {
                                         if (saved && safe != nullptr)
-                                            action();
-                                    });
-                                    return;
-                                }
-                                if (! safe->engine_.hasSession())
-                                {
-                                    safe->promptForSession("Choose Where to Save This Session", [safe, action](bool placed)
-                                    {
-                                        if (placed && safe != nullptr)
                                             action();
                                     });
                                     return;
@@ -2349,16 +2355,6 @@ void MainComponent::requestRecord()
     {
         appendHostLog(settings_, "record start failed: the session window is still open");
         showTransportResult("Close the session window before recording.");
-        return;
-    }
-    if (! engine_.hasSession())
-    {
-        appendHostLog(settings_, "record start failed: This session has no folder yet. Recording did not start.");
-        promptForSession("Choose Where to Record", [this](bool placed)
-        {
-            if (placed)
-                startRecordingIfReady();
-        });
         return;
     }
     startRecordingIfReady();
@@ -2464,22 +2460,12 @@ void MainComponent::toggleLatency()
 
 void MainComponent::saveSession()
 {
-    if (! engine_.hasSession())
-    {
-        promptForSession("Choose Where to Save This Session", nullptr);
-        return;
-    }
     engine_.saveSession();
     refresh();
 }
 
 void MainComponent::saveSessionAs()
 {
-    if (! engine_.hasSession())
-    {
-        saveSession();
-        return;
-    }
     if (engine_.recordingLocked())
     {
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
@@ -2557,15 +2543,6 @@ void MainComponent::importRecordings()
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                "Stop recording first",
                                                "Stop the take before importing.");
-        return;
-    }
-    if (! engine_.hasSession())
-    {
-        promptForSession("Choose Where to Save This Session", [this](bool placed)
-        {
-            if (placed)
-                importRecordings();
-        });
         return;
     }
     if (fileChooser_ != nullptr)
@@ -3125,9 +3102,7 @@ void MainComponent::paint(juce::Graphics& graphics)
     if (hiddenChannels.isNotEmpty())
         status << "   " << hiddenChannels;
     status << "   CPU " << juce::String(juce::roundToInt(engine_.cpuUsage() * 100.0f)) << "%";
-    if (! engine_.hasSession())
-        status << "   No session";
-    else
+    if (engine_.hasSession())
         status << "   " << engine_.sessionName();
     if (engine_.sessionIsOnInternalDisk())
         status << " (internal disk)";

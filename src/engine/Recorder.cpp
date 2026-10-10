@@ -496,12 +496,6 @@ juce::String Recorder::record(const std::int16_t* inputPacked, int packedCount, 
         livePeaks_.clear();
     }
 
-    if (folder.getFullPathName().isEmpty())
-    {
-        const std::lock_guard<CheckedMutex> lock(stateLock_);
-        status_ = "This session has no folder yet. Recording did not start.";
-        return status_;
-    }
     folder.createDirectory();
 
     std::array<std::uint8_t, kMaxChannels> mask {};

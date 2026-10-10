@@ -108,7 +108,10 @@ inline RecordAttemptResult planRecordStart(const RecordAttempt& attempt)
     if (attempt.copyBusy)
         return failAttempt("Finish saving the copy before recording.");
     if (! attempt.hasSession)
-        return failAttempt("This session has no folder yet. Recording did not start.");
+    {
+        RecordAttemptResult skipped;
+        return skipped;
+    }
     if (! attempt.folderWritable)
     {
         if (! attempt.folderProblem.empty())
