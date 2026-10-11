@@ -212,7 +212,7 @@ void logHostedPlugin(AppSettings* settings,
             }
             else
             {
-                stagePluginChannels(pointers, buses.inputChannels, buses.outputChannels, mono.data() + offset, block);
+                preparePluginBlock(pointers, buses.inputChannels, buses.outputChannels, mono.data() + offset, block);
                 juce::AudioBuffer<float> view(pointers, width, block);
                 midi.clear();
                 instance.processBlock(view, midi);
@@ -302,7 +302,9 @@ struct PluginRack::LiveGraph
     std::array<int, kMaxChannels> delayWrite {};
     std::array<std::vector<float>, kMaxChannels> delay {};
     std::vector<float> scratch;
-    std::array<std::array<float*, kScratchCap>, kMaxChannels> scratchPtrs {};
+    // One pair per slot. Slots must not share a right channel: the previous
+    // plugin's output would be the next plugin's input.
+    std::array<std::array<std::array<float*, kScratchCap>, kSlotsPerChannel>, kMaxChannels> scratchPtrs {};
     std::array<juce::MidiBuffer, kMaxChannels> midi {};
     int maxBlock = 0;
     int feedCapacity = 0;
@@ -616,6 +618,28 @@ void PluginRack::timerCallback()
     if (stateChanged)
         notifyDirty();
 
+    int paintChannel = -1;
+    int paintSlot = -1;
+    int paintTrigger = 0;
+    const auto nowMs = static_cast<std::int64_t>(steadyNs() / 1000000ULL);
+    if (uiRepaint_.take(nowMs, paintChannel, paintSlot, paintTrigger) && settings_ != nullptr)
+    {
+        const auto notes = uiRepaint_.notes();
+        const auto now = steadyNs();
+        if (triggerLogNs_ == 0 || now - triggerLogNs_ > 2000000000ULL)
+        {
+            juce::String line = "ui trigger ";
+            line << repaintTriggerName(paintTrigger)
+                 << " x" << (notes - triggerLoggedNotes_)
+                 << " coalesced, slot repaint only";
+            if (paintChannel >= 0)
+                line << " ch " << (paintChannel + 1) << " slot " << (paintSlot + 1);
+            appendHostLog(*settings_, line);
+            triggerLogNs_ = now;
+            triggerLoggedNotes_ = notes;
+        }
+    }
+
     int faultChannel = -1;
     int faultSlot = -1;
     if (takeNaNFault(faultChannel, faultSlot) && settings_ != nullptr)
@@ -636,6 +660,8 @@ void PluginRack::timerCallback()
 
 void PluginRack::audioProcessorParameterChanged(juce::AudioProcessor*, int, float)
 {
+    // Note only. The message thread paints one slot, at most 30 times a second.
+    uiRepaint_.note(-1, -1, kRepaintParameter);
     if (! capturing_.load(std::memory_order_relaxed))
         stateDirty_.store(true, std::memory_order_relaxed);
 }
@@ -643,7 +669,10 @@ void PluginRack::audioProcessorParameterChanged(juce::AudioProcessor*, int, floa
 void PluginRack::audioProcessorChanged(juce::AudioProcessor*, const juce::AudioProcessorListener::ChangeDetails& details)
 {
     if (details.latencyChanged)
+    {
+        uiRepaint_.note(-1, -1, kRepaintLatency);
         latencyDirty_.store(true, std::memory_order_relaxed);
+    }
     if (details.nonParameterStateChanged && ! capturing_.load(std::memory_order_relaxed))
         stateDirty_.store(true, std::memory_order_relaxed);
 }
@@ -808,11 +837,14 @@ void PluginRack::clearChannelMemory(LiveGraph& graph, int channel) noexcept
     const int block = graph.maxBlock;
     if (block > 0)
     {
-        for (int index = 0; index < LiveGraph::kScratchCap; ++index)
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
-            float* scratch = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(index)];
-            if (scratch != nullptr)
-                std::memset(scratch, 0, sizeof(float) * static_cast<std::size_t>(block));
+            for (int index = 0; index < LiveGraph::kScratchCap; ++index)
+            {
+                float* scratch = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][static_cast<std::size_t>(index)];
+                if (scratch != nullptr)
+                    std::memset(scratch, 0, sizeof(float) * static_cast<std::size_t>(block));
+            }
         }
         if (! graph.blockWork.empty())
         {
@@ -886,56 +918,54 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 continue;
             }
 
-            float* pointers[LiveGraph::kScratchCap] {};
+            float* scratch[LiveGraph::kScratchCap] = {
+                graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][0],
+                graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][1]
+            };
             const bool trueStereo = right != nullptr && inputs >= 2 && outputsN >= 2;
-            if (trueStereo)
+            if (! trueStereo && (scratch[0] == nullptr || (width > 1 && scratch[1] == nullptr)))
             {
-                pointers[0] = buffer;
-                pointers[1] = right;
-            }
-            else if (width == 1)
-            {
-                pointers[0] = buffer;
-            }
-            else
-            {
-                bool ready = true;
-                for (int index = 0; index < width; ++index)
-                {
-                    pointers[index] = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(index)];
-                    if (pointers[index] == nullptr)
-                        ready = false;
-                }
-                if (! ready)
-                {
-                    if (gate != nullptr)
-                        gate->depth.fetch_sub(1, std::memory_order_release);
-                    continue;
-                }
-                // Stereo-in gets two identical copies (no sample offset).
-                // Mono-in/stereo-out gets one copy and a silent second channel.
-                stagePluginChannels(pointers, inputs, outputsN, buffer, count);
+                if (gate != nullptr)
+                    gate->depth.fetch_sub(1, std::memory_order_release);
+                continue;
             }
 
             const auto began = steadyNs();
-            const int viewWidth = trueStereo ? 2 : width;
-            juce::AudioBuffer<float> view(pointers, viewWidth, count);
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
-            midi.clear();
-            instance->processBlock(view, midi);
-            if (! trueStereo && width != 1)
-                takeFoldedChannel(buffer, pointers, outputsN, count, stereoFoldFromInt(live.stereoFold));
-            const auto leftReport = sanitizeAudioBlock(buffer, count);
+            const auto fold = stereoFoldFromInt(live.stereoFold);
+            auto runOne = [&](float* mono)
+            {
+                renderFoldedMono(mono, count, inputs, outputsN, fold, scratch[0], scratch[1],
+                                 [&](float** channels, int viewWidth, int)
+                                 {
+                                     midi.clear();
+                                     juce::AudioBuffer<float> view(channels, viewWidth, count);
+                                     instance->processBlock(view, midi);
+                                 });
+            };
+            SanitizeReport leftReport;
             SanitizeReport rightReport;
             if (trueStereo)
-                rightReport = sanitizeAudioBlock(right, count);
-            else if (right != nullptr && width == 1)
             {
-                pointers[0] = right;
+                float* pair[2] = { buffer, right };
                 midi.clear();
-                juce::AudioBuffer<float> rightView(pointers, 1, count);
-                instance->processBlock(rightView, midi);
+                juce::AudioBuffer<float> view(pair, 2, count);
+                instance->processBlock(view, midi);
+                leftReport = sanitizeAudioBlock(buffer, count);
                 rightReport = sanitizeAudioBlock(right, count);
+            }
+            else
+            {
+                // Private scratch, zeroed, then filled from this block's mono
+                // input. The channel buffer is not an input the plugin can
+                // alias with last block's output.
+                runOne(buffer);
+                leftReport = sanitizeAudioBlock(buffer, count);
+                if (right != nullptr && width == 1)
+                {
+                    runOne(right);
+                    rightReport = sanitizeAudioBlock(right, count);
+                }
             }
             if (leftReport.nonFinite || rightReport.nonFinite)
                 noteNaN(channel, slot);
@@ -1604,6 +1634,45 @@ void PluginRack::finishLoad(int channel,
         finishChannelWork(channel, ticket);
 }
 
+void PluginRack::silencePublished()
+{
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        requestChannelReset(channel);
+
+    const bool outside = waitUntilOutsideCallback();
+    std::vector<std::shared_ptr<HostedPlugin>> plugins;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto* graph = published_.load(std::memory_order_acquire);
+        const bool idle = (callbackEpoch_.load(std::memory_order_acquire) & 1u) == 0u
+                          && inUse_.load(std::memory_order_acquire) == nullptr;
+        if (outside && idle && graph != nullptr)
+        {
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+                clearChannelMemory(*graph, channel);
+        }
+        if (outside)
+        {
+            for (auto& row : model_)
+                for (auto& slot : row)
+                    if (slot.plugin != nullptr && slot.plugin->prepared)
+                        plugins.push_back(slot.plugin);
+        }
+    }
+    if (! outside)
+        return;
+
+    for (auto& plugin : plugins)
+    {
+        if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr)
+            continue;
+        if (! pauseGate(*plugin->gate))
+            continue;
+        plugin->instance->reset();
+        resumeGate(*plugin->gate);
+    }
+}
+
 void PluginRack::clearAll(bool markDirty)
 {
     ++restoreGeneration_;
@@ -1769,6 +1838,7 @@ void PluginRack::transferPlugin(int fromChannel, int fromSlot, int toChannel, in
             tracePlugin(toChannel, toSlot, "move", name, identifier);
         }
         notifyDirty();
+        uiRepaint_.note(toChannel, toSlot, kRepaintMove);
         return;
     }
 
@@ -2396,13 +2466,15 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
     graph->feedIn.assign(static_cast<std::size_t>(kMaxChannels * graph->feedCapacity), 0.0f);
     graph->feedOut.assign(static_cast<std::size_t>(kMaxChannels * graph->feedCapacity), 0.0f);
     graph->blockWork.assign(static_cast<std::size_t>(kMaxChannels * block), 0.0f);
-    graph->scratch.assign(static_cast<std::size_t>(kMaxChannels * LiveGraph::kScratchCap * block), 0.0f);
+    graph->scratch.assign(static_cast<std::size_t>(kMaxChannels * kSlotsPerChannel * LiveGraph::kScratchCap * block), 0.0f);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
         graph->midi[static_cast<std::size_t>(channel)].ensureSize(256);
-        for (int index = 0; index < LiveGraph::kScratchCap; ++index)
-            graph->scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(index)]
-                = graph->scratch.data() + static_cast<std::size_t>((channel * LiveGraph::kScratchCap + index) * block);
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            for (int index = 0; index < LiveGraph::kScratchCap; ++index)
+                graph->scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][static_cast<std::size_t>(index)]
+                    = graph->scratch.data()
+                      + static_cast<std::size_t>(((channel * kSlotsPerChannel + slot) * LiveGraph::kScratchCap + index) * block);
     }
 
     return graph;

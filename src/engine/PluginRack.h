@@ -4,6 +4,7 @@
 #include "LatencyCompensation.h"
 #include "Passthrough.h"
 #include "PluginLoadPace.h"
+#include "RepaintCoalesce.h"
 #include "SessionDocument.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -120,6 +121,10 @@ public:
     bool stereoLink(int leftChannel) const noexcept;
     void requestChannelReset(int channel) noexcept;
     bool takeNaNFault(int& channel, int& slot) noexcept;
+    // Zeros meters' partner memory: delay lines, per-slot scratch, and the
+    // feed rings. Resets prepared plugins once the audio thread is outside
+    // the callback. New, Open, and Offline call this.
+    void silencePublished();
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
@@ -321,6 +326,9 @@ private:
     std::atomic<int> bypassAll_ { 0 };
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
+    RepaintCoalescer uiRepaint_;
+    std::uint64_t triggerLogNs_ = 0;
+    int triggerLoggedNotes_ = 0;
     std::atomic<bool> capturing_ { false };
     std::atomic<std::uint64_t> lastCallbackNs_ { 0 };
 

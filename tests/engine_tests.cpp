@@ -11,6 +11,8 @@
 #include "engine/RecordLock.h"
 #include "engine/OutputGain.h"
 #include "engine/SignalPath.h"
+#include "engine/RepaintCoalesce.h"
+#include "engine/MeterBallistics.h"
 #include "engine/WaveformScale.h"
 #include "engine/DisplayLayout.h"
 #include "engine/DropoutDetect.h"
@@ -3397,6 +3399,99 @@ bool groupMeterShotMatches(std::string* ppm)
     return shot;
 }
 
+void testScratchSilenceAndRepaint()
+{
+    constexpr int n = 16;
+    float mono[n] {};
+    float left[n];
+    float right[n];
+    auto summing = [](float** channels, int width, int count)
+    {
+        for (int index = 0; index < count; ++index)
+        {
+            const float inL = channels[0] != nullptr ? channels[0][index] : 0.0f;
+            const float inR = width > 1 && channels[1] != nullptr ? channels[1][index] : 0.0f;
+            if (channels[0] != nullptr)
+                channels[0][index] = inL + inR;
+            if (width > 1 && channels[1] != nullptr)
+                channels[1][index] = inL;
+        }
+    };
+
+    std::fill(left, left + n, 0.8f);
+    std::fill(right, right + n, 0.8f);
+    float peak = 0.0f;
+    for (int block = 0; block < 24; ++block)
+    {
+        youhost::renderFoldedMono(mono, n, 2, 2, youhost::StereoFold::left, left, right, summing);
+        for (float sample : mono)
+            peak = std::max(peak, std::fabs(sample));
+    }
+    CHECK(peak == 0.0f);
+
+    mono[0] = 0.25f;
+    youhost::renderFoldedMono(mono, n, 2, 2, youhost::StereoFold::left, left, right, summing);
+    CHECK(youhost::sameFloatBits(mono[0], 0.5f));
+    std::fill(mono, mono + n, 0.0f);
+    float tail = 0.0f;
+    for (int block = 0; block < 8; ++block)
+    {
+        youhost::renderFoldedMono(mono, n, 2, 2, youhost::StereoFold::left, left, right, summing);
+        for (float sample : mono)
+            tail = std::max(tail, std::fabs(sample));
+    }
+    CHECK(tail == 0.0f);
+
+    std::fill(right, right + n, 0.8f);
+    std::fill(mono, mono + n, 0.0f);
+    mono[0] = 0.25f;
+    youhost::renderFoldedMono(mono, n, 1, 2, youhost::StereoFold::left, left, right, summing);
+    CHECK(youhost::sameFloatBits(mono[0], 0.25f));
+
+    youhost::ChannelStrip strip;
+    strip.meter.peak.store(4.0f);
+    strip.meter.rms.store(4.0f);
+    strip.meter.clipped.store(true);
+    strip.meterState.heldPeak = 4.0f;
+    strip.meterState.meanSquare = 16.0f;
+    strip.meterState.clipped = true;
+    youhost::clearMeterBallistics(strip);
+    CHECK(strip.meter.peak.load() == 0.0f);
+    CHECK(strip.meter.rms.load() == 0.0f);
+    CHECK(! strip.meter.clipped.load());
+    CHECK(strip.meterState.heldPeak == 0.0f);
+    CHECK(! strip.meterState.clipped);
+    CHECK(youhost::gainToDb(strip.meter.peak.load()) <= -160.0f);
+
+    float memory[8];
+    std::fill(memory, memory + 8, 1.0f);
+    std::memset(memory, 0, sizeof(memory));
+    bool bitsZero = true;
+    for (float sample : memory)
+        bitsZero = bitsZero && sample == 0.0f;
+    CHECK(bitsZero);
+
+    youhost::RepaintCoalescer paints;
+    for (int index = 0; index < 1000; ++index)
+        paints.note(1, 0, youhost::kRepaintLatency);
+    int channel = -1;
+    int slot = -1;
+    int trigger = 0;
+    CHECK(paints.take(1000, channel, slot, trigger));
+    CHECK(channel == 1);
+    CHECK(slot == 0);
+    CHECK(trigger == youhost::kRepaintLatency);
+    CHECK(! paints.take(1020, channel, slot, trigger));
+    CHECK(paints.notes() == 1000);
+    CHECK(paints.paints() == 1);
+    CHECK(! paints.wantsFullWindow());
+    paints.note(2, 1, youhost::kRepaintMove);
+    CHECK(paints.take(1033, channel, slot, trigger));
+    CHECK(channel == 2);
+    CHECK(slot == 1);
+    CHECK(trigger == youhost::kRepaintMove);
+}
+
 void testReleaseChecklist()
 {
     int listed = 0;
@@ -4030,6 +4125,26 @@ void testReleaseChecklist()
              && youhost::pluginBusMark(true, true) == "M/ST"
              && hostUi.find("isPluginBusMark") != std::string::npos);
 
+    const auto timerAt = mainUi.find("void MainComponent::timerCallback()");
+    const auto beatAt = timerAt == std::string::npos ? std::string::npos : mainUi.find("beatMessageThread()", timerAt);
+    const auto lockedAt = timerAt == std::string::npos ? std::string::npos : mainUi.find("deviceSetupLocked()", timerAt);
+    item("message heartbeat runs while a card is open",
+         beatAt != std::string::npos && lockedAt != std::string::npos && beatAt < lockedAt);
+
+    int silenceCalls = 0;
+    for (std::size_t pos = 0; (pos = engineSrc.find("silenceLiveState()", pos)) != std::string::npos; pos += 1)
+        ++silenceCalls;
+    const auto rackSrc = readWorkspaceFile("src/engine/PluginRack.cpp");
+    item("New, Open, and Offline zero meters and plugin scratch",
+         silenceCalls >= 4
+             && engineSrc.find("clearMeterBallistics") != std::string::npos
+             && rackSrc.find("void PluginRack::silencePublished()") != std::string::npos
+             && rackSrc.find("preparePluginBlock") != std::string::npos
+             && rackSrc.find("kSlotsPerChannel * LiveGraph::kScratchCap") != std::string::npos
+             && mainUi.find("performAnyPendingRepaintsNow") == std::string::npos
+             && rackSrc.find("kRepaintParameter") != std::string::npos
+             && rackSrc.find("kRepaintLatency") != std::string::npos);
+
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
 }
@@ -4361,6 +4476,7 @@ int main()
     testRecordStartTransport();
     testDeviceListGrouping();
     testStartupAndSetupShareTheDeviceMenu();
+    testScratchSilenceAndRepaint();
     testReleaseChecklist();
 
     if (failures != 0)

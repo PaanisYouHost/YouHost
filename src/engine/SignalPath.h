@@ -55,6 +55,29 @@ inline void stagePluginChannels(float* const* plugin,
     }
 }
 
+// Zero scratch that is not the live mono buffer, then copy the current input.
+// A right channel left from the previous block is the plugin's own output.
+// Feeding that back in is the loop that builds up and clips.
+inline void preparePluginBlock(float* const* plugin,
+                               int inputChannels,
+                               int outputChannels,
+                               const float* mono,
+                               int numSamples) noexcept
+{
+    if (plugin == nullptr || numSamples <= 0)
+        return;
+    const int width = std::max(inputChannels, outputChannels);
+    const auto bytes = sizeof(float) * static_cast<std::size_t>(numSamples);
+    for (int index = 0; index < width && index < 2; ++index)
+    {
+        float* dest = plugin[index];
+        if (dest == nullptr || dest == mono)
+            continue;
+        std::memset(dest, 0, bytes);
+    }
+    stagePluginChannels(plugin, inputChannels, outputChannels, mono, numSamples);
+}
+
 // Keep the first plugin output. Never add or subtract the other channel.
 // Adding a delayed right side combs. Subtracting it is a high-pass.
 inline void takePluginChannel(float* mono,
@@ -134,6 +157,36 @@ inline void takeFoldedChannel(float* mono,
         const float leftSample = left != nullptr ? left[index] : 0.0f;
         mono[index] = (leftSample + right[index]) * 0.5f;
     }
+}
+
+// One mono channel through a stereo (or mono) plugin. Scratch belongs to this
+// slot only. The plugin never sees the previous block's output.
+template <typename Process>
+inline void renderFoldedMono(float* mono,
+                             int numSamples,
+                             int inputChannels,
+                             int outputChannels,
+                             StereoFold fold,
+                             float* scratchLeft,
+                             float* scratchRight,
+                             Process&& process)
+{
+    if (mono == nullptr || numSamples <= 0 || scratchLeft == nullptr)
+        return;
+    const int width = std::max(1, std::max(inputChannels, outputChannels));
+    if (width > 1 && scratchRight == nullptr)
+        return;
+    float* plugin[2] = { scratchLeft, scratchRight };
+    preparePluginBlock(plugin, inputChannels, outputChannels, mono, numSamples);
+    const int viewWidth = std::min(width, 2);
+    process(plugin, viewWidth, numSamples);
+    if (viewWidth <= 1)
+    {
+        if (scratchLeft != mono)
+            std::memcpy(mono, scratchLeft, sizeof(float) * static_cast<std::size_t>(numSamples));
+        return;
+    }
+    takeFoldedChannel(mono, plugin, outputChannels, numSamples, fold);
 }
 
 inline bool sameFloatBits(float left, float right) noexcept

@@ -474,6 +474,7 @@ void AudioEngine::setOfflineTemplate(bool offline)
         closingDevice_.store(false, std::memory_order_release);
         deviceOpen_.store(false, std::memory_order_relaxed);
         deviceName_ = juce::String(kOfflineDeviceName);
+        silenceLiveState();
     }
     publishSessionChannelLimit();
     ++displayRevision_;
@@ -658,6 +659,22 @@ void AudioEngine::requestClipClearAll()
         if (applyNow)
             strip.meter.clipped.store(false, std::memory_order_relaxed);
     }
+}
+
+void AudioEngine::beatMessageThread() noexcept
+{
+    noteMessageBeat();
+}
+
+void AudioEngine::silenceLiveState()
+{
+    for (auto& strip : strips_)
+        clearMeterBallistics(strip);
+    if (playbackScratch_.size() > 0
+        && (recorder_ == nullptr || recorder_->view().mode != TransportMode::playing))
+        std::fill(playbackScratch_.begin(), playbackScratch_.end(), 0.0f);
+    if (rack_ != nullptr)
+        rack_->silencePublished();
 }
 
 void AudioEngine::resetDropouts()
@@ -2167,6 +2184,7 @@ void AudioEngine::resetToCleanSession()
     recordReady_ = false;
     if (rack_ != nullptr)
         rack_->clearAll(false);
+    silenceLiveState();
     setBypassAll(false);
 
     std::uint64_t low = 0;
@@ -2575,6 +2593,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
 
     if (recorder_ != nullptr)
         recorder_->stop();
+    silenceLiveState();
 
     restoringSession_ = true;
     setBypassAll(false);

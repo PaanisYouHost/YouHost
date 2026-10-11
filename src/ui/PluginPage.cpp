@@ -323,7 +323,15 @@ class SlotButton : public juce::TextButton,
                    public juce::DragAndDropTarget
 {
 public:
+    SlotButton()
+    {
+        setOpaque(true);
+    }
+
     std::function<void()> onMenu;
+    std::uint32_t shownFill = 0;
+    std::uint32_t shownText = 0;
+    bool shownReady = false;
     std::function<bool()> canDrag;
     std::function<void(bool copy)> onDrag;
     std::function<void(int fromChannel, int fromSlot, bool copy)> onDrop;
@@ -733,6 +741,7 @@ public:
           gain_(engine, channel),
           onListen_(std::move(onListen))
     {
+        setOpaque(true);
         addAndMakeVisible(number_);
         addAndMakeVisible(name_);
         addAndMakeVisible(arm_);
@@ -933,8 +942,16 @@ public:
             const int color = engine_.channelColor(channel_);
             if (! blinkBypass && color != 0)
                 fill = fill.interpolatedWith(x32Hue(color), 0.28f);
-            button.setColour(juce::TextButton::buttonColourId, fill);
-            button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
+            const auto fillArgb = fill.getARGB();
+            const auto textArgb = (source.bypassed ? theme::dim : theme::text).getARGB();
+            if (! button.shownReady || button.shownFill != fillArgb || button.shownText != textArgb)
+            {
+                button.shownReady = true;
+                button.shownFill = fillArgb;
+                button.shownText = textArgb;
+                button.setColour(juce::TextButton::buttonColourId, juce::Colour(fillArgb));
+                button.setColour(juce::TextButton::textColourOffId, juce::Colour(textArgb));
+            }
             juce::String tip = "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.";
             if (source.occupied)
             {
@@ -953,9 +970,15 @@ public:
             colorDrawn_ = color;
             repaint();
         }
-        else if (! meterArea_.isEmpty())
+        const float level = showPeak_ ? engine_.peakFor(channel_) : engine_.rmsFor(channel_);
+        const bool clip = engine_.clipFor(channel_);
+        const int milli = static_cast<int>(level * 1000.0f);
+        if (milli != meterMilli_ || clip != meterClip_)
         {
-            repaint(meterArea_);
+            meterMilli_ = milli;
+            meterClip_ = clip;
+            if (! meterArea_.isEmpty())
+                repaint(meterArea_);
         }
     }
 
@@ -1146,6 +1169,8 @@ private:
     bool updating_ = false;
     bool selectedDrawn_ = false;
     int colorDrawn_ = -1;
+    int meterMilli_ = -1;
+    bool meterClip_ = false;
     float gainShown_ = 100.0f;
     juce::Label number_;
     juce::Label name_;

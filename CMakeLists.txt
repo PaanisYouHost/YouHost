@@ -114,4 +114,28 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework Cocoa")
     add_test(NAME YouHostAuDelayTest COMMAND YouHostAuDelayTest)
+
+    # Stereo Apple AUs on a mono channel, offline: poisoned scratch, silence,
+    # impulse, and a slot move. Fails if the output builds up or the message
+    # thread does not return.
+    add_executable(YouHostAuChainTest tests/au_chain.cpp)
+    target_include_directories(YouHostAuChainTest PRIVATE src)
+    target_compile_features(YouHostAuChainTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostAuChainTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostAuChainTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostAuChainTest COMMAND YouHostAuChainTest)
 endif()

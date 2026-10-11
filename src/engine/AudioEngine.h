@@ -94,6 +94,13 @@ public:
     bool inputActive(int channel) const;
     void requestClipClear(int channel);
     void requestClipClearAll();
+    // Message-thread heartbeat. The watchdog treats a silent beat as a stall,
+    // including while a card is open and the thread is idle in the run loop.
+    void beatMessageThread() noexcept;
+    // New, Open, and Offline. Zeros every meter, clip latch, delay line, and
+    // plugin scratch. No callback is running in Offline, so a flag alone
+    // would leave the last full-scale reading on screen.
+    void silenceLiveState();
     void resetDropouts();
     void noteDropout(int events);
     void drainDropoutLog();

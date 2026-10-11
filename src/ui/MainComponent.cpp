@@ -2502,6 +2502,10 @@ void MainComponent::openSession()
 
 void MainComponent::timerCallback()
 {
+    // The card-open branch below skips pollDeviceStats, which used to be the
+    // only heartbeat. An idle message thread was then logged as a stall that
+    // grew for as long as the card stayed up.
+    engine_.beatMessageThread();
     if (++pollDivider_ >= 6)
     {
         pollDivider_ = 0;
@@ -2528,10 +2532,6 @@ void MainComponent::onPluginSlot(int channel)
         repaint(statusArea_);
         repaint(hintArea_);
     }
-    // Paint the dirty rows before the next plugin is created. A later
-    // instantiate must not walk a stale full-window repaint.
-    if (auto* peer = getPeer())
-        peer->performAnyPendingRepaintsNow();
 }
 
 void MainComponent::publishMeters(bool repaintLevels)

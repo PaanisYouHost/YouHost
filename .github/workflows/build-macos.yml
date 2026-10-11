@@ -61,6 +61,18 @@ jobs:
           fi
           "${TEST}"
 
+      - name: Apple AU chain offline
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostAuChainTest
+          TEST=build/YouHostAuChainTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostAuChainTest was not produced"
+            find build -name 'YouHostAuChainTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: Ad-hoc sign
         run: |
           set -euo pipefail
