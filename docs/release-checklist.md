@@ -6,7 +6,7 @@ Every release runs the engine tests. They print one line per rule. The run passe
 g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/YouHostTests && /tmp/YouHostTests
 ```
 
-The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so the lock-reentry checks stay on, plus an Apple AUDelay silent-input load and an offline chain of AUDelay, AUDistortion, AUGraphicEQ, and AUBandpass. The job fails if any of them fail.
+The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so the lock-reentry checks stay on, plus an Apple AUDelay silent-input load and an offline chain of AUDelay, AUDistortion, AUGraphicEQ, and AUBandpass at factory defaults. Silence must stay silent. An impulse must decay: the tail peak never grows, each 1 s window has less energy than the one before, and the signal is at or below -60 dBFS by 10 s. Parameters are not pulled to zero. The job fails if any of them fail.
 
 `testReleaseChecklist` is the report for this file. The other tests in that binary stay part of the same gate. A Mac build of the app still has to open every window below, once with no saved size and once with an old small saved size, and the text must be on screen. This test checks that open size instead of a screenshot: there is no display in the unit-test run.
 
@@ -62,7 +62,7 @@ The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so t
 | Stereo link | HOST only. Right-click Stereo link with ch N+1, or LINK, joins 1-2, 3-4, and so on. The even channel's slots are hidden. One stereo plugin processes the pair. Unlink keeps the chain on the odd channel. REC, INPUT, OFF, name, colour, and group stay per channel. The REC page menu has no Stereo link. The recorder still writes one mono WAV per channel. |
 | Plugin list M/ST | Each plugin row shows M, ST, or M/ST from the scanned bus layouts. |
 | Message heartbeat | The 30 Hz timer beats the watchdog before the card-open branch. An open card no longer looks like a growing stall while the message thread is idle. |
-| New, Open, and Offline clear DSP | New, Open, and Offline zero every meter, clip latch, delay line, and per-slot scratch. A poisoned stereo scratch fed silence stays bit-zero. Parameter and latency callbacks do not paint the whole window. |
+| New, Open, and Offline clear DSP | New, Open, and Offline zero every meter, clip latch, delay line, and per-slot scratch. A poisoned stereo scratch fed silence stays bit-zero, and a cleared meter sits at the -160 dB floor. Parameter and latency callbacks do not paint the whole window. |
 
 ## Windows to photograph on a Mac release
 

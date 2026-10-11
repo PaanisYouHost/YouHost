@@ -1,7 +1,8 @@
-// Offline host path for Apple stereo AUs on a mono channel.
-// Scratch starts full of garbage. Silence must stay silence. An impulse must
-// decay, and a slot move must not feed the previous output back in.
-// The message thread must return while AUDelay is loaded. macOS CI runs this.
+// Offline host path for Apple stereo AUs on a mono channel, at factory defaults.
+// Parameters are not edited. Silence in must stay silent, including when the
+// slot scratch starts full of garbage. An impulse must decay: after the loudest
+// second, the peak never grows, energy falls each second, and the signal is at
+// or below -60 dBFS by 10 s. macOS CI runs this.
 
 #include "engine/RepaintCoalesce.h"
 #include "engine/SignalPath.h"
@@ -13,6 +14,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,12 +23,12 @@ namespace
 
 constexpr double kSampleRate = 48000.0;
 constexpr int kBlock = 32;
+constexpr int kSeconds = 10;
+constexpr int kBlocksPerSecond = static_cast<int>(kSampleRate) / kBlock;
 constexpr float kPoison = 0.9f;
 constexpr float kImpulse = 0.25f;
-constexpr float kSilencePeak = 1.0e-3f;
-// Host ceiling. Distortion may raise an impulse. A feedback loop of the
-// poisoned scratch climbs far past this.
-constexpr float kImpulseCeiling = 4.0f;
+// -60 dBFS. At or below this, the tail has reached the floor.
+constexpr float kFloor = 1.0e-3f;
 
 struct AppleAu
 {
@@ -41,10 +43,33 @@ constexpr AppleAu kUnits[] = {
     { "AUBandpass", "AudioUnit:Effects/aufx,bpas,appl" },
 };
 
+struct Second
+{
+    float peak = 0.0f;
+    double energy = 0.0;
+};
+
 int fail(const std::string& message)
 {
     std::cerr << "AU chain failed: " << message << "\n";
     return 1;
+}
+
+float peakDb(float peak)
+{
+    if (peak <= 1.0e-10f)
+        return -160.0f;
+    return 20.0f * std::log10(peak);
+}
+
+std::string windowText(const std::vector<Second>& windows)
+{
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(1);
+    for (std::size_t index = 0; index < windows.size(); ++index)
+        out << " " << index << "s:" << peakDb(windows[index].peak) << "dB";
+    return out.str();
 }
 
 bool setStereoMain(juce::AudioPluginInstance& instance)
@@ -78,74 +103,35 @@ float blockPeak(const float* data, int count)
     return peak;
 }
 
-// Pull delay and feedback toward zero so a factory 2 second echo is not the
-// thing under test. The silence run still starts from poisoned scratch.
-void tameTail(juce::AudioPluginInstance& instance)
+void logFactoryParameters(const char* name, juce::AudioPluginInstance& instance)
 {
+    std::ostringstream out;
+    out << name << " factory defaults";
+    out.setf(std::ios::fixed);
+    out.precision(4);
     for (auto* param : instance.getParameters())
     {
         if (param == nullptr)
             continue;
-        const auto name = param->getName(64).toLowerCase();
-        const bool feedback = name.contains("feedback") || name.contains("decay");
-        const bool delay = name.contains("delay");
-        if (! feedback && ! delay)
-            continue;
-        auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param);
-        if (ranged == nullptr)
-        {
-            param->setValue(0.0f);
-            continue;
-        }
-        const float target = ranged->getNormalisableRange().snapToLegalValue(feedback ? 0.0f : 0.05f);
-        param->setValue(ranged->convertTo0to1(target));
+        float shown = param->getValue();
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param))
+            shown = ranged->convertFrom0to1(param->getValue());
+        out << " | " << param->getName(32).toStdString() << "=" << shown;
     }
+    std::cout << out.str() << "\n";
 }
 
-// Poison the slot scratch, then run the same prepare / process / fold path
-// the audio thread uses. `impulse` puts one sample in the first block only.
-bool runOffline(juce::AudioPluginInstance& instance, bool impulse, float& peak, float& tail)
+// One block through the same scratch path the audio thread uses.
+// Scratch is poisoned by the caller. renderFoldedMono must replace it from
+// this block's mono input before the plugin runs.
+float renderBlock(juce::AudioPluginInstance& instance,
+                   float* mono,
+                   float* scratchL,
+                   float* scratchR,
+                   juce::MidiBuffer& midi)
 {
-    instance.prepareToPlay(kSampleRate, kBlock);
-    tameTail(instance);
-    instance.reset();
-
     const int inputs = std::max(1, instance.getTotalNumInputChannels());
     const int outputs = std::max(1, instance.getTotalNumOutputChannels());
-    float mono[kBlock] {};
-    float scratchL[kBlock];
-    float scratchR[kBlock];
-    std::fill(scratchL, scratchL + kBlock, kPoison);
-    std::fill(scratchR, scratchR + kBlock, kPoison);
-    juce::MidiBuffer midi;
-    peak = 0.0f;
-    tail = 0.0f;
-
-    constexpr int kBlocks = 1500;
-    constexpr int kTailBlocks = 100;
-    for (int block = 0; block < kBlocks; ++block)
-    {
-        std::fill(mono, mono + kBlock, 0.0f);
-        if (impulse && block == 0)
-            mono[0] = kImpulse;
-        youhost::renderFoldedMono(mono, kBlock, inputs, outputs, youhost::StereoFold::left,
-                                  scratchL, scratchR,
-                                  [&](float** channels, int width, int)
-                                  {
-                                      midi.clear();
-                                      juce::AudioBuffer<float> view(channels, width, kBlock);
-                                      instance.processBlock(view, midi);
-                                  });
-        const float blockMax = blockPeak(mono, kBlock);
-        peak = std::max(peak, blockMax);
-        if (block >= kBlocks - kTailBlocks)
-            tail = std::max(tail, blockMax);
-    }
-
-    // A move lands the plugin on a scratch pair that still holds the last output.
-    std::fill(scratchL, scratchL + kBlock, kPoison);
-    std::fill(scratchR, scratchR + kBlock, kPoison);
-    std::fill(mono, mono + kBlock, 0.0f);
     youhost::renderFoldedMono(mono, kBlock, inputs, outputs, youhost::StereoFold::left,
                               scratchL, scratchR,
                               [&](float** channels, int width, int)
@@ -154,8 +140,100 @@ bool runOffline(juce::AudioPluginInstance& instance, bool impulse, float& peak, 
                                   juce::AudioBuffer<float> view(channels, width, kBlock);
                                   instance.processBlock(view, midi);
                               });
-    tail = std::max(tail, blockPeak(mono, kBlock));
+    return blockPeak(mono, kBlock);
+}
+
+// Factory defaults, silence in, scratch poisoned. `impulse` puts one sample
+// in the first block. Windows are one second each.
+bool renderSeconds(juce::AudioPluginInstance& instance,
+                   bool impulse,
+                   std::vector<Second>& windows,
+                   float& poisonPeak)
+{
+    instance.prepareToPlay(kSampleRate, kBlock);
+    instance.reset();
+
+    float scratchL[kBlock];
+    float scratchR[kBlock];
+    std::fill(scratchL, scratchL + kBlock, kPoison);
+    std::fill(scratchR, scratchR + kBlock, kPoison);
+    juce::MidiBuffer midi;
+    windows.assign(static_cast<std::size_t>(kSeconds), Second {});
+
+    for (int second = 0; second < kSeconds; ++second)
+    {
+        auto& window = windows[static_cast<std::size_t>(second)];
+        for (int block = 0; block < kBlocksPerSecond; ++block)
+        {
+            float mono[kBlock] {};
+            if (impulse && second == 0 && block == 0)
+                mono[0] = kImpulse;
+            const float blockMax = renderBlock(instance, mono, scratchL, scratchR, midi);
+            window.peak = std::max(window.peak, blockMax);
+            for (float sample : mono)
+                window.energy += static_cast<double>(sample) * static_cast<double>(sample);
+        }
+    }
+
+    std::fill(scratchL, scratchL + kBlock, kPoison);
+    std::fill(scratchR, scratchR + kBlock, kPoison);
+    float mono[kBlock] {};
+    poisonPeak = renderBlock(instance, mono, scratchL, scratchR, midi);
     return true;
+}
+
+int checkSilence(const char* name, const std::vector<Second>& windows, float poisonPeak)
+{
+    float peak = poisonPeak;
+    for (const auto& window : windows)
+        peak = std::max(peak, window.peak);
+    if (peak > kFloor || poisonPeak > kFloor)
+        return fail(std::string(name) + " factory silence built up, peak " + std::to_string(peak)
+                    + " poison " + std::to_string(poisonPeak) + windowText(windows));
+    std::cout << name << " factory silence passed, peak " << peak << "\n";
+    return 0;
+}
+
+int checkImpulse(const char* name, const std::vector<Second>& windows, float poisonPeak)
+{
+    if (windows.empty())
+        return fail(std::string(name) + " impulse produced no windows");
+
+    std::size_t loudest = 0;
+    for (std::size_t index = 1; index < windows.size(); ++index)
+        if (windows[index].peak > windows[loudest].peak)
+            loudest = index;
+
+    for (std::size_t index = loudest; index + 1 < windows.size(); ++index)
+    {
+        const auto& current = windows[index];
+        const auto& next = windows[index + 1];
+        if (current.peak <= kFloor)
+        {
+            if (next.peak > kFloor)
+                return fail(std::string(name) + " factory tail grew after reaching -60 dBFS"
+                            + windowText(windows));
+            continue;
+        }
+        if (next.peak > current.peak + 1.0e-5f)
+            return fail(std::string(name) + " factory tail peak grew"
+                        + windowText(windows));
+        if (! (next.energy < current.energy))
+            return fail(std::string(name) + " factory tail energy did not fall"
+                        + windowText(windows));
+    }
+
+    if (windows.back().peak > kFloor)
+        return fail(std::string(name) + " factory impulse still above -60 dBFS at "
+                    + std::to_string(kSeconds) + " s" + windowText(windows));
+
+    // The scratch from a slot move must not come back once the tail is on the floor.
+    if (poisonPeak > kFloor)
+        return fail(std::string(name) + " factory scratch poison returned after the impulse, peak "
+                    + std::to_string(poisonPeak));
+
+    std::cout << name << " factory impulse passed" << windowText(windows) << "\n";
+    return 0;
 }
 
 int run()
@@ -179,23 +257,20 @@ int run()
         if (! setStereoMain(*instance))
             return fail(std::string(unit.name) + " rejected a stereo main bus");
         instance->setNonRealtime(true);
+        logFactoryParameters(unit.name, *instance);
 
-        float silencePeak = 0.0f;
-        float silenceTail = 0.0f;
-        runOffline(*instance, false, silencePeak, silenceTail);
-        if (silencePeak > kSilencePeak || silenceTail > kSilencePeak)
-            return fail(std::string(unit.name) + " silence built up, peak " + std::to_string(silencePeak)
-                        + " tail " + std::to_string(silenceTail));
+        std::vector<Second> silence;
+        float silencePoison = 0.0f;
+        renderSeconds(*instance, false, silence, silencePoison);
+        if (const int code = checkSilence(unit.name, silence, silencePoison))
+            return code;
 
-        float impulsePeak = 0.0f;
-        float impulseTail = 0.0f;
-        runOffline(*instance, true, impulsePeak, impulseTail);
-        if (impulsePeak > kImpulseCeiling || impulseTail > kSilencePeak)
-            return fail(std::string(unit.name) + " impulse did not decay, peak " + std::to_string(impulsePeak)
-                        + " tail " + std::to_string(impulseTail));
+        std::vector<Second> impulse;
+        float impulsePoison = 0.0f;
+        renderSeconds(*instance, true, impulse, impulsePoison);
+        if (const int code = checkImpulse(unit.name, impulse, impulsePoison))
+            return code;
 
-        std::cout << unit.name << " offline mono passed, silence peak " << silencePeak
-                  << " impulse peak " << impulsePeak << " tail " << impulseTail << "\n";
         instance.reset();
     }
 
@@ -223,7 +298,7 @@ int run()
     if (elapsed > 1000u)
         return fail("message thread stalled " + std::to_string(elapsed) + " ms with AUDelay loaded");
 
-    std::cout << "AU chain offline passed, message thread returned in " << elapsed << " ms\n";
+    std::cout << "AU chain offline passed at factory defaults, message thread returned in " << elapsed << " ms\n";
     return 0;
 }
 

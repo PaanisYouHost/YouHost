@@ -3490,6 +3490,13 @@ void testScratchSilenceAndRepaint()
     CHECK(channel == 2);
     CHECK(slot == 1);
     CHECK(trigger == youhost::kRepaintMove);
+
+    const bool metersAtFloor = strip.meter.peak.load() == 0.0f
+                               && strip.meter.rms.load() == 0.0f
+                               && ! strip.meter.clipped.load()
+                               && youhost::gainToDb(0.0f) <= -160.0f;
+    if (peak == 0.0f && tail == 0.0f && metersAtFloor && bitsZero)
+        std::cout << "offline New session reset passed, meters at floor, scratch bit-zero\n";
 }
 
 void testReleaseChecklist()

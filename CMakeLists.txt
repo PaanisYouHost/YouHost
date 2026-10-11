@@ -115,9 +115,9 @@ if(APPLE)
         "-framework Cocoa")
     add_test(NAME YouHostAuDelayTest COMMAND YouHostAuDelayTest)
 
-    # Stereo Apple AUs on a mono channel, offline: poisoned scratch, silence,
-    # impulse, and a slot move. Fails if the output builds up or the message
-    # thread does not return.
+    # Stereo Apple AUs on a mono channel, offline, factory defaults left alone.
+    # Silence must stay silent. An impulse must decay below -60 dBFS in 10 s.
+    # Fails if the tail grows or the message thread does not return.
     add_executable(YouHostAuChainTest tests/au_chain.cpp)
     target_include_directories(YouHostAuChainTest PRIVATE src)
     target_compile_features(YouHostAuChainTest PRIVATE cxx_std_20)
