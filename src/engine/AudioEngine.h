@@ -270,6 +270,8 @@ private:
     void bumpDisplay();
     void armChannelReset(int channel);
     bool stereoRightIsLinked(int channel) const noexcept;
+    int stereoMirror(int channel) const noexcept;
+    void writeChannelListen(int channel, ChannelListen mode);
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void handleDeviceDown();

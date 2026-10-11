@@ -900,8 +900,7 @@ public:
         link_.setVisible(canLink && (channel_ & 1) == 0);
         link_.setColour(juce::TextButton::buttonColourId, linked ? theme::buttonOn : theme::button);
         link_.setColour(juce::TextButton::textColourOffId, theme::text);
-        link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
-                         + ". One plugin row for the pair. Recording stays one mono WAV per channel.");
+        link_.setTooltip("Stereo link. One plugin row for the pair. Recording stays one mono WAV per channel.");
         linkedNote_.setVisible(linked && ! showSlots);
         if (linked && ! showSlots)
             linkedNote_.setText("Linked to ch " + juce::String(channel_), juce::dontSendNotification);

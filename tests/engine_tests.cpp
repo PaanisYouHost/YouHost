@@ -1201,7 +1201,8 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Make group from selection") != std::string::npos);
     CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
     CHECK(help.find("Cmd+G does nothing while a text field has focus") != std::string::npos);
-    CHECK(help.find("Stereo link with ch N+1") != std::string::npos);
+    CHECK(help.find("choose Stereo link") != std::string::npos);
+    CHECK(help.find("two mono WAV files") != std::string::npos);
     CHECK(help.find("CH, MODE, NAME, DELAY COMP, PLUGINS, and GAIN") != std::string::npos);
     CHECK(help.find("M, ST, or M/ST") != std::string::npos);
     CHECK(help.find("makes it tall enough to read") != std::string::npos);
@@ -3966,15 +3967,33 @@ void testReleaseChecklist()
              && engineSrc.find("silenceNonFinite") != std::string::npos
              && engineSrc.find("armChannelReset") != std::string::npos
              && engineSrc.find("resetRequested") != std::string::npos);
-    item("stereo link is HOST only and does not touch the recorder",
-         youhost::stereoLinkMenuLabel(0) == "Stereo link with ch 2"
-             && youhost::stereoLinkMenuLabel(1) == "Stereo link with ch 2"
-             && ! youhost::hostPluginSlotsVisible(1, true)
-             && youhost::hostPluginSlotsVisible(0, true)
+    const auto menuSrc = readWorkspaceFile("src/ui/ChannelMenu.cpp");
+    const auto allChannels = youhost::channelsForGlobalListen(nullptr, 0, 4);
+    std::vector<int> groupMembers { 0 };
+    youhost::includeStereoPartners(groupMembers, [](int channel) { return channel == 0 || channel == 1; });
+    item("stereo link joins a pair on REC and HOST",
+         youhost::stereoLinkMenuLabel(0) == "Stereo link"
+             && youhost::stereoLinkMenuLabel(1) == "Stereo link"
+             && youhost::linkedEditPartner(1, true) == 0
+             && youhost::linkedEditPartner(0, false) == -1
+             && youhost::pairChainSamples(true, 0, 128) == 128
+             && youhost::pairChainSamples(false, 64, 128) == 64
+             && youhost::pairProcessCost(true, true, 256) < youhost::pairProcessCost(false, true, 256)
              && youhost::pluginProcessCallsForPair(true, true) == 1
              && youhost::pluginProcessCallsForPair(false, true) == 2
-             && hostUi.find("Stereo link with ch") != std::string::npos
+             && ! youhost::hostPluginSlotsVisible(1, true)
+             && youhost::hostPluginSlotsVisible(0, true)
+             && groupMembers.size() == 2
+             && groupMembers[1] == 1
+             && allChannels.size() == 4
+             && allChannels[0] == 0
+             && allChannels[1] == 1
+             && menuSrc.find("hostPage &&") == std::string::npos
+             && menuSrc.find("stereoLinkMenuLabel") != std::string::npos
+             && mainUi.find("showChannelMenu(engine_, meterGrid_") != std::string::npos
              && hostUi.find("showChannelMenu(engine_, *this, channel_, nullptr, true)") != std::string::npos
+             && engineSrc.find("stereoMirror") != std::string::npos
+             && readWorkspaceFile("src/engine/PluginRack.cpp").find("pairChainSamples") != std::string::npos
              && recorderSrc.find("stereoLink") == std::string::npos
              && recorderSrc.find("setStereoLink") == std::string::npos);
     item("plugin list marks M, ST, and M/ST",
@@ -4182,6 +4201,49 @@ void testNaNStereoAndColumns()
 
     calls = youhost::runLinkedPair(left, right, 4, false, true, [](float*, float*, int) {});
     CHECK(calls == 2);
+    CHECK(youhost::pairProcessCost(true, true, 512) < youhost::pairProcessCost(false, true, 512));
+    int stereoCalls = 0;
+    int monoCalls = 0;
+    float stereoLeft[32];
+    float stereoRight[32];
+    float monoLeft[32];
+    float monoRight[32];
+    for (int index = 0; index < 32; ++index)
+    {
+        stereoLeft[index] = 0.25f;
+        stereoRight[index] = -0.25f;
+        monoLeft[index] = 0.25f;
+        monoRight[index] = -0.25f;
+    }
+    auto burn = [](float* first, float* second, int count)
+    {
+        for (int index = 0; index < count; ++index)
+        {
+            float sample = first[index];
+            for (int tap = 0; tap < 24; ++tap)
+                sample = sample * 0.97f + 0.01f;
+            first[index] = sample;
+            if (second == nullptr)
+                continue;
+            sample = second[index];
+            for (int tap = 0; tap < 24; ++tap)
+                sample = sample * 0.97f + 0.01f;
+            second[index] = sample;
+        }
+    };
+    youhost::runLinkedPair(stereoLeft, stereoRight, 32, true, true, [&](float* first, float* second, int count)
+    {
+        ++stereoCalls;
+        burn(first, second, count);
+    });
+    youhost::runLinkedPair(monoLeft, monoRight, 32, false, true, [&](float* first, float* second, int count)
+    {
+        ++monoCalls;
+        burn(first, second, count);
+    });
+    CHECK(stereoCalls == 1);
+    CHECK(monoCalls == 2);
+    CHECK(stereoCalls < monoCalls);
 
     youhost::SessionChannelRecord linked;
     linked.index = 0;

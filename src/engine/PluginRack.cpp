@@ -4,6 +4,7 @@
 #include "HostPath.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
+#include "StereoLink.h"
 #include "PluginMoves.h"
 #include "SignalPath.h"
 #include "StallWatch.h"
@@ -2348,8 +2349,6 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         const bool linkedRight = (channel & 1) == 1
                                  && stereoLink_[static_cast<std::size_t>(channel - 1)].load(std::memory_order_relaxed) != 0;
         int chain = 0;
-        if (linkedRight)
-            chain = chainSamples_[static_cast<std::size_t>(channel - 1)];
         for (int slot = 0; slot < kSlotsPerChannel && ! linkedRight; ++slot)
         {
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -2371,6 +2370,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             graph->keepAlive.push_back(model.plugin);
         }
 
+        const int leftChain = channel > 0 ? chainSamples_[static_cast<std::size_t>(channel - 1)] : 0;
+        chain = pairChainSamples(linkedRight, chain, leftChain);
         chainSamples_[static_cast<std::size_t>(channel)] = chain;
         const bool outputOpen = routing_.outputPacked[static_cast<std::size_t>(channel)] >= 0;
         const bool counts = outputOpen && ! excluded_[static_cast<std::size_t>(channel)] && audible_[static_cast<std::size_t>(channel)];

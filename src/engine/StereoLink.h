@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace youhost
 {
@@ -34,14 +35,66 @@ inline bool canStereoLink(int channel, int channelCount) noexcept
     return left + 1 < limit;
 }
 
-// Right-click on a HOST strip. N is the odd channel's number, so ch 1 says
-// "Stereo link with ch 2". The same words are used from either strip of the pair.
-inline std::string stereoLinkMenuLabel(int channel)
+// The other channel of an adjacent pair, or -1 when channel is out of range.
+inline int stereoPartnerIndex(int channel) noexcept
 {
     const int left = stereoLeftIndex(channel);
-    if (left < 0)
+    const int right = stereoRightIndex(channel);
+    if (left < 0 || right < 0)
+        return -1;
+    return channel == left ? right : left;
+}
+
+// Right-click on REC or HOST. The same words are used from either strip.
+inline std::string stereoLinkMenuLabel(int channel)
+{
+    if (stereoLeftIndex(channel) < 0)
         return {};
-    return "Stereo link with ch " + std::to_string(left + 2);
+    return "Stereo link";
+}
+
+// While a pair is linked, an edit to listen, colour, group, or name on one
+// channel is copied to the other. Unlinked channels stay independent.
+inline int linkedEditPartner(int channel, bool pairLinked) noexcept
+{
+    if (! pairLinked)
+        return -1;
+    return stereoPartnerIndex(channel);
+}
+
+// A group or selection edit that names one channel of a linked pair includes
+// the partner, so the pair stays in one group.
+template <typename IsLinked>
+inline void includeStereoPartners(std::vector<int>& channels, IsLinked isLinked)
+{
+    const auto original = channels.size();
+    for (std::size_t index = 0; index < original; ++index)
+    {
+        const int channel = channels[index];
+        if (! isLinked(channel))
+            continue;
+        const int partner = stereoPartnerIndex(channel);
+        if (partner < 0)
+            continue;
+        bool present = false;
+        for (int existing : channels)
+        {
+            if (existing == partner)
+            {
+                present = true;
+                break;
+            }
+        }
+        if (! present)
+            channels.push_back(partner);
+    }
+}
+
+// The even channel of a linked pair reports the odd channel's plugin latency,
+// so compensation delays the pair together.
+inline int pairChainSamples(bool linkedRight, int ownChain, int leftChain) noexcept
+{
+    return linkedRight ? leftChain : ownChain;
 }
 
 // Linked pairs show one plugin row, on the odd channel. The even channel's
@@ -61,6 +114,16 @@ inline int pluginProcessCallsForPair(bool linked, bool stereoBuses) noexcept
     if (linked && stereoBuses)
         return 1;
     return 2;
+}
+
+// One stereo processBlock pays call overhead once and covers both channels.
+// Two mono processBlock calls pay it twice. The stereo cost is lower.
+inline int pairProcessCost(bool linked, bool stereoBuses, int samples) noexcept
+{
+    const int calls = pluginProcessCallsForPair(linked, stereoBuses);
+    constexpr int overhead = 64;
+    const int covered = (linked && stereoBuses) ? samples * 2 : samples;
+    return calls * (overhead + (samples > 0 ? covered : 0));
 }
 
 template <typename Plugin>
