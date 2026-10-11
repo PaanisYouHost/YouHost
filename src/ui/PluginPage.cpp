@@ -701,11 +701,12 @@ private:
 class PluginPage::Row : public juce::Component
 {
 public:
-    Row(AudioEngine& engine, int channel)
+    Row(AudioEngine& engine, int channel, std::function<void(int)> onListen)
         : engine_(engine),
           channel_(channel),
           tabKeys_(*this),
-          gain_(engine, channel)
+          gain_(engine, channel),
+          onListen_(std::move(onListen))
     {
         addAndMakeVisible(number_);
         addAndMakeVisible(name_);
@@ -751,7 +752,13 @@ public:
         exclude_.setMouseClickGrabsKeyboardFocus(false);
         exclude_.setButtonText("Ex");
         exclude_.setTooltip("Exclude from alignment. This channel stays undelayed and does not move the others.");
-        arm_.onClick = [this] { engine_.cycleChannelListen(channel_); };
+        arm_.onClick = [this]
+        {
+            if (onListen_)
+                onListen_(channel_);
+            else
+                engine_.cycleChannelListen(channel_);
+        };
         pdc_.setFont(juce::Font(juce::FontOptions(11.0f)));
         pdc_.setColour(juce::Label::textColourId, theme::dim);
         pdc_.setJustificationType(juce::Justification::centredLeft);
@@ -901,6 +908,11 @@ public:
         }
     }
 
+    void setListenHandler(std::function<void(int)> handler)
+    {
+        onListen_ = std::move(handler);
+    }
+
     void resized() override
     {
         auto area = getLocalBounds().reduced(4, 2);
@@ -967,9 +979,7 @@ public:
     {
         if (event.mods.isPopupMenu())
         {
-            if (! engine_.isChannelSelected(channel_))
-                engine_.selectChannel(channel_, false);
-            showMakeGroupDialog(engine_);
+            showChannelMenu(engine_, *this, channel_);
             return;
         }
         const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
@@ -1089,6 +1099,7 @@ private:
     OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
     juce::Rectangle<int> meterArea_;
+    std::function<void(int)> onListen_;
 };
 
 PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
@@ -1119,6 +1130,13 @@ PluginPage::~PluginPage()
     rows_.clear();
     headers_.clear();
     viewport_.setViewedComponent(nullptr, false);
+}
+
+void PluginPage::setListenHandler(std::function<void(int channel)> handler)
+{
+    listenHandler_ = std::move(handler);
+    for (auto& row : rows_)
+        row->setListenHandler(listenHandler_);
 }
 
 void PluginPage::setMeterMode(bool peak, int referenceDb)
@@ -1155,7 +1173,7 @@ void PluginPage::rebuild()
         }
         else
         {
-            auto row = std::make_unique<Row>(engine_, item.channel);
+            auto row = std::make_unique<Row>(engine_, item.channel, listenHandler_);
             row->setMeterMode(showPeak_, referenceDb_);
             content_.addAndMakeVisible(*row);
             order_.push_back(row.get());

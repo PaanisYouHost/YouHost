@@ -22,7 +22,8 @@ public:
     int backupMinute() const noexcept { return backupMinute_.load(std::memory_order_acquire); }
 
     bool startBackup(SessionData data, juce::File sessionFolder, juce::String dateStem);
-    bool startCopy(juce::File source,
+    bool startCopy(SessionData data,
+                   juce::File source,
                    juce::File destination,
                    std::function<void(bool ok, juce::String message)> finished);
     bool startCrashCopy(juce::File sessionFile, juce::String folderName);

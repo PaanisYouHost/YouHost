@@ -168,7 +168,7 @@ public:
         rangeBox_.addItem("Last 10 min", 1);
         rangeBox_.addItem("Last 1 hour", 2);
         rangeBox_.addItem("Whole session", 3);
-        rangeBox_.setSelectedId(1, juce::dontSendNotification);
+        rangeBox_.setSelectedId(dropoutRangeOnOpen(), juce::dontSendNotification);
         rangeBox_.onChange = [this]
         {
             body_.setData(snapshot_, loadText_, selectedWindowNs());
@@ -194,6 +194,11 @@ public:
     ~Content() override
     {
         viewport_.setViewedComponent(nullptr, false);
+    }
+
+    void openOnWholeSession()
+    {
+        rangeBox_.setSelectedId(dropoutRangeOnOpen(), juce::dontSendNotification);
     }
 
     void refresh()
@@ -263,7 +268,10 @@ void DropoutWindow::toggle()
     if (isVisible())
     {
         if (content_ != nullptr)
+        {
+            content_->openOnWholeSession();
             content_->refresh();
+        }
         toFront(true);
     }
 }

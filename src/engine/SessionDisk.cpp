@@ -1,56 +1,10 @@
 #include "SessionDisk.h"
+#include "SessionCopy.h"
 #include "SessionFiles.h"
 #include "SessionNames.h"
 
 namespace youhost
 {
-namespace
-{
-
-bool copyFileChunked(const juce::File& source,
-                     const juce::File& destination,
-                     std::int64_t& done,
-                     std::int64_t total,
-                     std::atomic<float>& progress,
-                     const std::function<bool()>& shouldStop)
-{
-    destination.getParentDirectory().createDirectory();
-    std::unique_ptr<juce::FileInputStream> input(source.createInputStream());
-    if (input == nullptr)
-        return false;
-    destination.deleteFile();
-    std::unique_ptr<juce::FileOutputStream> output(destination.createOutputStream());
-    if (output == nullptr)
-        return false;
-
-    constexpr int chunk = 256 * 1024;
-    juce::HeapBlock<char> buffer(static_cast<size_t>(chunk));
-    int yields = 0;
-    for (;;)
-    {
-        if (shouldStop())
-            return false;
-        const int read = input->read(buffer.getData(), chunk);
-        if (read < 0)
-            return false;
-        if (read == 0)
-            break;
-        if (! output->write(buffer.getData(), static_cast<size_t>(read)))
-            return false;
-        done += read;
-        const float fraction = total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 1.0f;
-        progress.store(juce::jlimit(0.0f, 1.0f, fraction), std::memory_order_release);
-        if (++yields >= 4)
-        {
-            yields = 0;
-            juce::Thread::sleep(1);
-        }
-    }
-    output->flush();
-    return true;
-}
-
-} // namespace
 
 SessionDisk::SessionDisk()
     : juce::Thread("youhost-disk")
@@ -86,12 +40,14 @@ bool SessionDisk::startBackup(SessionData data, juce::File sessionFolder, juce::
     return post(std::move(request));
 }
 
-bool SessionDisk::startCopy(juce::File source,
+bool SessionDisk::startCopy(SessionData data,
+                            juce::File source,
                             juce::File destination,
                             std::function<void(bool, juce::String)> finished)
 {
     Request request;
     request.job = Job::copy;
+    request.data = std::move(data);
     request.source = std::move(source);
     request.destination = std::move(destination);
     request.finished = std::move(finished);
@@ -205,6 +161,18 @@ void SessionDisk::runCopy(Request& request)
         return;
     }
 
+    // Fast copy: clonefile (APFS copy-on-write) when the volume matches, otherwise
+    // sendfile or a large read/write. No sleep and no per-file fsync.
+    const auto audioSource = request.source.getChildFile(kAudioFolderName);
+    const auto audioDest = request.destination.getChildFile(kAudioFolderName);
+    if (! audioDest.createDirectory())
+    {
+        if (! existed)
+            request.destination.deleteRecursively();
+        finish(false, "Could not create " + audioDest.getFullPathName());
+        return;
+    }
+
     struct Item
     {
         juce::File source;
@@ -212,31 +180,15 @@ void SessionDisk::runCopy(Request& request)
         std::int64_t bytes = 0;
     };
     std::vector<Item> items;
-    const auto add = [&items](const juce::File& source, const juce::File& destination)
+    if (audioSource.isDirectory())
     {
-        if (! source.existsAsFile())
-            return;
-        items.push_back({ source, destination, std::max<std::int64_t>(0, source.getSize()) });
-    };
-
-    for (const auto& child : request.source.findChildFiles(juce::File::findFiles, false))
-        add(child, request.destination.getChildFile(child.getFileName()));
-
-    const auto audio = request.source.getChildFile(kAudioFolderName);
-    if (audio.isDirectory())
-    {
-        for (const auto& wav : audio.findChildFiles(juce::File::findFiles, false))
-            add(wav, request.destination.getChildFile(kAudioFolderName).getChildFile(wav.getFileName()));
-    }
-
-    const auto backups = request.source.getChildFile("Backups");
-    if (backups.isDirectory())
-    {
-        for (const auto& dir : backups.findChildFiles(juce::File::findDirectories, false))
+        for (const auto& wav : audioSource.findChildFiles(juce::File::findFiles, false))
         {
-            const auto session = dir.getChildFile(kSessionFileName);
-            add(session,
-                request.destination.getChildFile("Backups").getChildFile(dir.getFileName()).getChildFile(kSessionFileName));
+            if (! wav.existsAsFile())
+                continue;
+            items.push_back({ wav,
+                              audioDest.getChildFile(wav.getFileName()),
+                              std::max<std::int64_t>(0, wav.getSize()) });
         }
     }
 
@@ -250,16 +202,43 @@ void SessionDisk::runCopy(Request& request)
     progress_.store(0.0f, std::memory_order_release);
     for (const auto& item : items)
     {
-        if (! copyFileChunked(item.source, item.destination, done, total, progress_, [this]
-                              { return threadShouldExit(); }))
+        if (threadShouldExit())
+        {
+            if (! existed)
+                request.destination.deleteRecursively();
+            finish(false, "The copy was interrupted.");
+            return;
+        }
+        const auto result = copyFileFast(
+            item.source.getFullPathName().toStdString(),
+            item.destination.getFullPathName().toStdString(),
+            [this, &done, total](std::uint64_t copied)
+            {
+                const float fraction = static_cast<float>(done + static_cast<std::int64_t>(copied))
+                                       / static_cast<float>(total);
+                progress_.store(juce::jlimit(0.0f, 1.0f, fraction), std::memory_order_release);
+            });
+        if (! result.ok)
         {
             if (! existed)
                 request.destination.deleteRecursively();
             finish(false, "Could not copy " + item.source.getFileName());
             return;
         }
+        done += static_cast<std::int64_t>(result.bytes);
     }
 
+    if (! writeSessionFile(request.destination.getChildFile(kSessionFileName), request.data))
+    {
+        if (! existed)
+            request.destination.deleteRecursively();
+        finish(false, "Could not write the session file.");
+        return;
+    }
+
+    fsyncDirectory(audioDest.getFullPathName().toStdString());
+    fsyncDirectory(request.destination.getFullPathName().toStdString());
+    progress_.store(1.0f, std::memory_order_release);
     finish(true, {});
 }
 

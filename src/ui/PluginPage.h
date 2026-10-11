@@ -4,6 +4,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <functional>
 #include <memory>
 
 namespace youhost
@@ -20,6 +21,7 @@ public:
     ~PluginPage() override;
 
     void setMeterMode(bool peak, int referenceDb);
+    void setListenHandler(std::function<void(int channel)> handler);
     void refresh();
     void refreshChannel(int channel);
     void resized() override;
@@ -45,6 +47,7 @@ private:
     std::unique_ptr<PluginListWindow> pluginList_;
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
+    std::function<void(int)> listenHandler_;
     int channels_ = -1;
     int revision_ = -1;
 };

@@ -44,12 +44,19 @@ inline int normaliseRmsReferenceDb(int db)
     return best;
 }
 
-// RMS ticks run from +20 to -40 around the reference, a 60 dB ruler.
-// With the default -20 dBFS reference the top tick is 0 dBFS.
+// Headroom from the chosen line level up to 0 dBFS. -14 gives 14.
+inline int rmsHeadroomDb(int referenceDb) noexcept
+{
+    return -normaliseRmsReferenceDb(referenceDb);
+}
+
+// The RMS ruler is pinned at 0 dBFS on top and the meter floor on the bottom.
+// Changing the reference moves the 0 line and the tick numbers. It does not
+// slide the whole ruler, which would leave the 0 line looking stuck.
 inline MeterSpan rmsMeterSpan(int referenceDb)
 {
-    const int reference = normaliseRmsReferenceDb(referenceDb);
-    return { static_cast<float>(reference - 40), static_cast<float>(reference + 20) };
+    (void) referenceDb;
+    return { kMeterFloorDb, 0.0f };
 }
 
 inline MeterSpan peakMeterSpan()
@@ -60,15 +67,24 @@ inline MeterSpan peakMeterSpan()
 inline int rmsTicks(int referenceDb, MeterTick* out, int capacity)
 {
     const int reference = normaliseRmsReferenceDb(referenceDb);
+    const int headroom = rmsHeadroomDb(reference);
     int count = 0;
     if (out == nullptr || capacity <= 0)
         return 0;
 
+    const auto push = [&](int label, float dbFs)
+    {
+        if (count >= capacity || dbFs > 0.0f || dbFs < kMeterFloorDb)
+            return;
+        out[count++] = MeterTick { label, dbFs };
+    };
+
+    push(headroom, 0.0f);
     for (int label : kRmsTickLabels)
     {
-        if (count >= capacity)
-            break;
-        out[count++] = MeterTick { label, static_cast<float>(reference + label) };
+        if (label >= headroom)
+            continue;
+        push(label, static_cast<float>(reference + label));
     }
     return count;
 }

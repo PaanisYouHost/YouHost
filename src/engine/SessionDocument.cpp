@@ -1,4 +1,5 @@
 #include "SessionDocument.h"
+#include "ChannelColor.h"
 #include "MeterScale.h"
 #include "SignalPath.h"
 #include "X32Colours.h"
@@ -160,6 +161,7 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         if (customGain)
             element->setAttribute("outputDb", source.outputDb);
         element->setAttribute("color", source.color);
+        element->setAttribute("colorOwn", source.colorOwn ? 1 : 0);
         if (grouped)
             element->setAttribute("group", source.group);
         if (named)
@@ -284,6 +286,9 @@ bool readSessionFile(const juce::File& file, SessionData& data)
             destination.listen = channel->getBoolAttribute("record", true) ? ChannelListen::record : ChannelListen::off;
         destination.recordEnabled = destination.listen == ChannelListen::record;
         destination.color = normaliseX32Colour(channel->getIntAttribute("color", 0));
+        destination.colorOwn = colorIsOwnInSession(channel->hasAttribute("colorOwn"),
+                                                   channel->getBoolAttribute("colorOwn", false),
+                                                   destination.color);
         destination.group = channel->getIntAttribute("group", -1);
         if (destination.group < 0 || destination.group >= kMaxDisplayGroups)
             destination.group = -1;

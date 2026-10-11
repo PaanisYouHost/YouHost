@@ -335,6 +335,7 @@ private:
     std::atomic<std::uint64_t> channelOnLo_ { ~std::uint64_t { 0 } };
     std::atomic<std::uint64_t> channelOnHi_ { ~std::uint64_t { 0 } };
     std::array<int, kMaxChannels> channelColor_ {};
+    std::array<bool, kMaxChannels> channelColorOwn_ {};
     std::array<int, kMaxChannels> channelGroup_ {};
     std::array<ChannelListen, kMaxChannels> listen_ {};
     std::array<float, kMaxChannels> outputDb_ {};

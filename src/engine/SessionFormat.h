@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChannelColor.h"
 #include "ChannelListen.h"
 #include "DisplayLayout.h"
 #include "HostLimits.h"
@@ -142,7 +143,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return true;
     if (listed("Meters", { "peak", "reference" }))
         return true;
-    if (listed("Channel", { "index", "exclude", "record", "listen", "outputDb", "color", "group", "name" }))
+    if (listed("Channel", { "index", "exclude", "record", "listen", "outputDb", "color", "colorOwn", "group", "name" }))
         return true;
     if (listed("Slot", { "index", "bypass", "fold" }))
         return true;
@@ -263,6 +264,7 @@ struct SessionChannelRecord
     std::string listen = "rec";
     bool exclude = false;
     int color = 0;
+    bool colorOwn = false;
     double outputDb = 0.0;
     std::vector<SessionSlotRecord> slots;
 };
@@ -369,6 +371,9 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
             record.group = -1;
         record.exclude = sessionAttributeBool(channel, "exclude", false);
         record.color = sessionAttributeInt(channel, "color", 0);
+        record.colorOwn = colorIsOwnInSession(sessionHasAttribute(channel, "colorOwn"),
+                                              sessionAttributeBool(channel, "colorOwn", false),
+                                              record.color);
         record.outputDb = sessionAttributeDouble(channel, "outputDb", 0.0);
         if (const auto* listen = sessionAttribute(channel, "listen"))
             record.listen = channelListenName(channelListenFromName(*listen));
@@ -515,6 +520,7 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
         if (std::abs(channel.outputDb) > 0.01)
             sessionSetAttribute(element, "outputDb", std::to_string(channel.outputDb));
         sessionSetAttribute(element, "color", std::to_string(channel.color));
+        sessionSetAttribute(element, "colorOwn", channel.colorOwn ? "1" : "0");
         if (channel.group >= 0)
             sessionSetAttribute(element, "group", std::to_string(channel.group));
         if (! channel.name.empty())

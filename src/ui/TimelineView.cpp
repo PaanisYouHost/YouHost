@@ -65,7 +65,7 @@ TimelineView::TimelineView()
     zoomInButton_.setTooltip("Zoom in (T).");
     verticalOutButton_.setTooltip("Shorter lanes (Cmd+]).");
     verticalInButton_.setTooltip("Taller lanes (Cmd+[).");
-    fitButton_.setTooltip("Fit every take across the width and every lane down the timeline (Option+R).");
+    fitButton_.setTooltip("Fit every take across the width and every lane down the timeline (F or Option+R).");
     fitButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2f6f4e));
     fitButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     gotoBox_.setWantsKeyboardFocus(false);

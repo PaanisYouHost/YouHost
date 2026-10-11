@@ -1,4 +1,6 @@
+#include "engine/ChannelColor.h"
 #include "engine/ChannelEnable.h"
+#include "engine/SessionCopy.h"
 #include "engine/ChannelSelect.h"
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
@@ -585,12 +587,13 @@ void testSessionFileActions()
     CHECK(opened.channels[0].name == "Kick");
     CHECK(opened.channels[0].color == 3);
 
-    const auto plan = youhost::planSessionCopy({ "session.youhost" }, { "Kick.wav", "Snare.wav" }, { "01" });
-    CHECK(plan.size() == 4);
+    const auto plan = youhost::planSessionCopy({ "session.youhost", "dropouts.csv" }, { "Kick.wav", "Snare.wav" }, { "01" });
+    CHECK(plan.size() == 3);
     CHECK(plan[0].relativePath == "session.youhost");
     CHECK(plan[1].relativePath == "audio/Kick.wav");
     CHECK(plan[2].relativePath == "audio/Snare.wav");
-    CHECK(plan[3].relativePath == "Backups/01/session.youhost");
+    for (const auto& entry : plan)
+        CHECK(entry.relativePath.find("Backups/") == std::string::npos);
     CHECK(youhost::folderAfterSaveAs("/old", "/new", true) == "/new");
     CHECK(youhost::folderAfterSaveAs("/old", "/new", false) == "/old");
 
@@ -787,13 +790,34 @@ void testMeterScales()
     CHECK(ticks[8].dbFs == -60.0f);
 
     CHECK(youhost::rmsTicks(-18, ticks, 9) == 9);
-    CHECK(ticks[0].dbFs == 2.0f);
+    CHECK(ticks[0].label == 18);
+    CHECK(ticks[0].dbFs == 0.0f);
+    CHECK(ticks[3].label == 0);
     CHECK(ticks[3].dbFs == -18.0f);
 
     CHECK(youhost::rmsTicks(-14, ticks, 9) == 9);
-    CHECK(ticks[0].dbFs == 6.0f);
+    CHECK(ticks[0].label == 14);
+    CHECK(ticks[0].dbFs == 0.0f);
+    CHECK(ticks[3].label == 0);
     CHECK(ticks[3].dbFs == -14.0f);
     CHECK(ticks[8].dbFs == -54.0f);
+    CHECK(youhost::rmsHeadroomDb(-14) == 14);
+    CHECK(youhost::rmsHeadroomDb(-18) == 18);
+    CHECK(youhost::rmsHeadroomDb(-20) == 20);
+    const auto span14 = youhost::rmsMeterSpan(-14);
+    const auto span20 = youhost::rmsMeterSpan(-20);
+    CHECK(span14.topDb == 0.0f);
+    CHECK(span14.bottomDb == youhost::kMeterFloorDb);
+    CHECK(span20.topDb == 0.0f);
+    const float zero14 = youhost::normaliseDb(-14.0f, span14);
+    const float zero20 = youhost::normaliseDb(-20.0f, span20);
+    CHECK(zero14 > zero20);
+    CHECK(near(zero14, 46.0f / 60.0f, 0.001f));
+    CHECK(near(zero20, 40.0f / 60.0f, 0.001f));
+    CHECK(youhost::meterColourForDb(-15.0f, -14) == youhost::MeterColour::green);
+    CHECK(youhost::meterColourForDb(-14.0f, -14) == youhost::MeterColour::yellow);
+    CHECK(youhost::meterColourForDb(-21.0f, -20) == youhost::MeterColour::green);
+    CHECK(youhost::meterColourForDb(-20.0f, -20) == youhost::MeterColour::yellow);
 
     CHECK(youhost::peakTicks(ticks, 9) == 8);
     CHECK(ticks[0].label == 0);
@@ -808,8 +832,8 @@ void testMeterScales()
     CHECK(near(youhost::meterNormal(fullScale, false, -20), 1.0f, 0.001f));
     CHECK(near(youhost::meterNormal(line, false, -20), 40.0f / 60.0f, 0.001f));
     CHECK(near(youhost::meterNormal(floor, false, -20), 0.0f, 0.001f));
-    // -14 dBFS reference: full scale is only +14 VU, short of the +20 tick.
-    CHECK(near(youhost::meterNormal(fullScale, false, -14), 54.0f / 60.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(fullScale, false, -14), 1.0f, 0.001f));
+    CHECK(near(youhost::meterNormal(fullScale, false, -18), 1.0f, 0.001f));
     CHECK(near(youhost::meterNormal(fullScale, true, -14), 1.0f, 0.001f));
     CHECK(near(youhost::meterNormal(floor, true, -20), 0.0f, 0.001f));
 }
@@ -1124,7 +1148,13 @@ void testShortcutsMatchTheHelp()
     expect(youhost::ShortcutId::scanner, 's', youhost::KeyKind::character, false, false, false);
     expect(youhost::ShortcutId::zoomIn, 't', youhost::KeyKind::character, false, false, false);
     expect(youhost::ShortcutId::zoomOut, 0, youhost::KeyKind::letterR, false, false, false);
+    expect(youhost::ShortcutId::fit, 'f', youhost::KeyKind::character, false, false, false);
     expect(youhost::ShortcutId::fit, 0, youhost::KeyKind::letterR, false, false, true);
+    CHECK(youhost::shortcutChord(youhost::ShortcutId::fit) == "F or Option+R");
+    CHECK(youhost::fitShortcutApplies(1, false));
+    CHECK(youhost::fitShortcutApplies(2, false));
+    CHECK(! youhost::fitShortcutApplies(1, true));
+    CHECK(! youhost::fitShortcutApplies(3, false));
     expect(youhost::ShortcutId::lanesTaller, 0, youhost::KeyKind::bracketLeft, false, true, false);
     expect(youhost::ShortcutId::lanesShorter, 0, youhost::KeyKind::bracketRight, false, true, false);
     expect(youhost::ShortcutId::playOrStop, 0, youhost::KeyKind::space, false, false, false);
@@ -1167,6 +1197,12 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Cmd+G does nothing on the HOST page") != std::string::npos);
     CHECK(help.find("makes it tall enough to read") != std::string::npos);
     CHECK(help.find("FIT shows every lane again") != std::string::npos);
+    CHECK(help.find("It does the same as F and Option+R") != std::string::npos);
+    CHECK(help.find("F does nothing while a text field has focus") != std::string::npos);
+    CHECK(help.find("on a background thread") != std::string::npos);
+    CHECK(help.find("writes session.youhost once") != std::string::npos);
+    CHECK(help.find("skip the Backups folder") != std::string::npos);
+    CHECK(help.find("A progress bar shows the copy.") != std::string::npos);
     CHECK(help.find("even when a lane is only a pixel or two") != std::string::npos);
     CHECK(help.find("V- zooms out until every lane fits") != std::string::npos);
     CHECK(help.find("Lanes stay tall enough to read") == std::string::npos);
@@ -2424,11 +2460,33 @@ void testSessionChannelsRateLockAndClose()
     };
     CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, recordingModes, 2));
     CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::input, recordingModes, 1));
-    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, recordingModes, 2));
+    CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, recordingModes, 2));
     CHECK(! youhost::globalListenNeedsConfirm(false, youhost::ChannelListen::off, recordingModes, 2));
     const int quietModes[] = { static_cast<int>(youhost::ChannelListen::input) };
-    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, quietModes, 1));
+    CHECK(youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, quietModes, 1));
     CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::off, nullptr, 0));
+    const int already[] = { static_cast<int>(youhost::ChannelListen::record), static_cast<int>(youhost::ChannelListen::record) };
+    CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, already, 2));
+    CHECK(youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
+          == "Switch ch 5 REC -> INPUT");
+    CHECK(std::string(youhost::kListenChangeVerb) == "Switch");
+    CHECK(std::string(youhost::kListenChangeSureTitle) == "Are you sure?");
+    CHECK(youhost::globalListenChangeLine(youhost::ChannelListen::input) == "Switch every visible channel to INPUT");
+    CHECK(youhost::listenChangeApplies(youhost::ListenChangeKind::now, 0, 0));
+    CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 0, 1));
+    CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 0));
+    CHECK(youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 1));
+    CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::blocked, 1, 1));
+    CHECK(youhost::classifyListenChange(false, false, true) == youhost::ListenChangeKind::now);
+    CHECK(youhost::classifyListenChange(true, false, true) == youhost::ListenChangeKind::confirm);
+    CHECK(youhost::classifyListenChange(true, true, true) == youhost::ListenChangeKind::blocked);
+    CHECK(youhost::classifyListenChange(true, false, false) == youhost::ListenChangeKind::unchanged);
+    const int pageSelected[] = { 2, 3 };
+    const auto recPage = youhost::channelsForPageListen(1, pageSelected, 2, 8);
+    const auto hostPage = youhost::channelsForPageListen(2, pageSelected, 2, 8);
+    CHECK(recPage == hostPage);
+    CHECK(recPage.size() == 8);
+    CHECK(youhost::channelsForPageListen(3, pageSelected, 2, 8).empty());
 
     CHECK(youhost::formatRateKhz(48000.0) == "48");
     CHECK(youhost::formatRateKhz(44100.0) == "44.1");
@@ -2552,7 +2610,11 @@ void testSessionChannelsRateLockAndClose()
     CHECK(help.find("Show on mixer") == std::string::npos);
     CHECK(help.find("Channels past the card stay hidden") != std::string::npos);
     CHECK(help.find("ALL REC") != std::string::npos);
-    CHECK(help.find("Leaving REC while recording asks first") != std::string::npos);
+    CHECK(help.find("A mode change while recording asks twice") != std::string::npos);
+    CHECK(help.find("Switch in red") != std::string::npos);
+    CHECK(help.find("Are you sure?") != std::string::npos);
+    CHECK(help.find("When not recording there is no dialog") != std::string::npos);
+    CHECK(help.find("Leaving REC while recording asks first") == std::string::npos);
     CHECK(help.find("hidden on REC, HOST, and the timeline") != std::string::npos);
     CHECK(help.find("The session always keeps 128 channels") != std::string::npos);
     CHECK(help.find("8, 16, 32, 48, 64, or 128") == std::string::npos);
@@ -3168,7 +3230,16 @@ void testKeyDispatch()
     ran(macLetter('s', false, false, false), 1, false, youhost::ShortcutId::scanner);
     ran(macLetter('t', false, false, false), 1, false, youhost::ShortcutId::zoomIn);
     ran(macLetter('r', false, false, false), 1, false, youhost::ShortcutId::zoomOut);
+    ran(macLetter('f', false, false, false), 1, false, youhost::ShortcutId::fit);
+    ran(macLetter('f', false, false, false), 2, false, youhost::ShortcutId::fit);
     ran(macLetter('r', false, false, true), 1, false, youhost::ShortcutId::fit);
+    ran(macLetter('r', false, false, true), 2, false, youhost::ShortcutId::fit);
+    CHECK(! youhost::dispatchRawKey(macLetter('f', false, false, false), 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('f', false, false, false), 3, false).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('f', true, false, false), 1, false).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('f', false, true, false), 1, false).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('f', false, false, true), 1, false).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('r', false, false, true), 3, false).has_value());
     ran(macLetter(' ', false, false, false), 1, false, youhost::ShortcutId::playOrStop);
     ran(macLetter(' ', false, true, false), 1, false, youhost::ShortcutId::recordNow);
     ran(macLetter('s', false, true, false), 1, false, youhost::ShortcutId::save);
@@ -3773,8 +3844,222 @@ void testReleaseChecklist()
              && mainUi.find("publishMeters(false)") != std::string::npos
              && mainUi.find("channelSnapshot") == std::string::npos);
 
+    const auto menuAt = mainUi.find("setChannelMenuHandler");
+    const auto menuEnd = mainUi.find("setNameCommitHandler", menuAt);
+    const auto menuHandler = menuAt == std::string::npos || menuEnd == std::string::npos
+                                 ? std::string()
+                                 : mainUi.substr(menuAt, menuEnd - menuAt);
+    const auto popupAt = hostUi.find("showChannelMenu(engine_, *this, channel_)");
+    const auto popupHandler = popupAt == std::string::npos ? std::string() : hostUi.substr(popupAt, 80);
+    const auto copyStart = engineSrc.find("bool AudioEngine::beginSessionCopy");
+    const auto copyEnd = engineSrc.find("AudioEngine::", copyStart + 40);
+    const auto copyBody = copyStart == std::string::npos ? std::string() : engineSrc.substr(copyStart, copyEnd - copyStart);
+    const auto diskSrc = readWorkspaceFile("src/engine/SessionDisk.cpp");
+    const auto runAt = diskSrc.find("void SessionDisk::runCopy");
+    const auto runEnd = diskSrc.find("void SessionDisk::", runAt + 20);
+    const auto runCopy = runAt == std::string::npos ? std::string() : diskSrc.substr(runAt, runEnd - runAt);
+    const auto copyHeader = readWorkspaceFile("src/engine/SessionCopy.h");
+    const auto fastAt = copyHeader.find("copyFileFast");
+    const auto slowAt = copyHeader.find("copyFileSlow");
+    const auto fastBody = fastAt == std::string::npos || slowAt == std::string::npos
+                              ? std::string()
+                              : copyHeader.substr(fastAt, slowAt - fastAt);
+    const auto dropSrc = readWorkspaceFile("src/ui/DropoutWindow.cpp");
+    const auto scaleSrc = readWorkspaceFile("src/engine/MeterScale.h");
+    item("per-channel colour menu is back; group colour follows only uncoloured channels",
+         menuHandler.find("showChannelMenu") != std::string::npos
+             && menuHandler.find("showMakeGroupDialog") == std::string::npos
+             && popupHandler.find("showChannelMenu") != std::string::npos
+             && popupHandler.find("showMakeGroupDialog") == std::string::npos
+             && mainUi.find("groupButton_.onClick") != std::string::npos
+             && engineSrc.find("colorOwn") != std::string::npos
+             && engineSrc.find("chooseChannelColor") != std::string::npos
+             && engineSrc.find("followGroupColor") != std::string::npos
+             && engineSrc.find("leaveGroupColor") != std::string::npos);
+    item("DROPOUTS opens on Whole session",
+         youhost::dropoutRangeOnOpen() == youhost::kDropoutWholeSessionId
+             && std::string(youhost::kDropoutWholeSessionLabel) == "Whole session"
+             && dropSrc.find("openOnWholeSession") != std::string::npos
+             && dropSrc.find("dropoutRangeOnOpen()") != std::string::npos
+             && dropSrc.find("setSelectedId(1") == std::string::npos
+             && dropSrc.find("Last 10 min") != std::string::npos
+             && dropSrc.find("Last 1 hour") != std::string::npos);
+    item("F fits the REC and HOST timeline",
+         youhost::shortcutChord(youhost::ShortcutId::fit) == "F or Option+R"
+             && youhost::dispatchRawKey(macLetter('f', false, false, false), 1, false) == youhost::ShortcutId::fit
+             && youhost::dispatchRawKey(macLetter('f', false, false, false), 2, false) == youhost::ShortcutId::fit
+             && ! youhost::dispatchRawKey(macLetter('f', false, false, false), 1, true).has_value()
+             && ! youhost::dispatchRawKey(macLetter('f', false, true, false), 1, false).has_value());
+    item("mode change while recording asks twice, and not at all when stopped",
+         youhost::classifyListenChange(true, false, true) == youhost::ListenChangeKind::confirm
+             && youhost::classifyListenChange(false, false, true) == youhost::ListenChangeKind::now
+             && youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
+                    == "Switch ch 5 REC -> INPUT"
+             && mainUi.find("juce::Colours::red") != std::string::npos
+             && mainUi.find("kListenChangeVerb") != std::string::npos
+             && mainUi.find("kListenChangeSureTitle") != std::string::npos
+             && mainUi.find("requestChannelListenCycle") != std::string::npos
+             && hostUi.find("onListen_(channel_)") != std::string::npos
+             && youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 1)
+             && ! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 0));
+    item("RMS 0 reference moves the 0 line and the scale numbers",
+         near(youhost::normaliseDb(-14.0f, youhost::rmsMeterSpan(-14)), 46.0f / 60.0f, 0.001f)
+             && near(youhost::normaliseDb(-20.0f, youhost::rmsMeterSpan(-20)), 40.0f / 60.0f, 0.001f)
+             && youhost::rmsHeadroomDb(-14) == 14
+             && scaleSrc.find("kMeterFloorDb, 0.0f") != std::string::npos);
+    item("Save As copies audio in the background, skips Backups, and writes the session once",
+         copyBody.find("saveSession()") == std::string::npos
+             && copyBody.find("captureSessionData()") != std::string::npos
+             && copyBody.find("startCopy") != std::string::npos
+             && copyBody.find("sessionDirty_ = false") != std::string::npos
+             && runCopy.find("copyFileFast") != std::string::npos
+             && runCopy.find("writeSessionFile") != std::string::npos
+             && runCopy.find("Backups") == std::string::npos
+             && diskSrc.find("Thread::sleep") == std::string::npos
+             && diskSrc.find("clonefile") != std::string::npos
+             && fastBody.find("usleep") == std::string::npos
+             && fastBody.find("clonefile") != std::string::npos
+             && copyHeader.find("FICLONE") != std::string::npos);
+
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
+}
+
+void testChannelColorRules()
+{
+    youhost::ChannelPaint paint;
+    youhost::chooseChannelColor(paint, 1, 4, true);
+    CHECK(paint.own);
+    CHECK(paint.color == 1);
+    youhost::followGroupColor(paint, 2);
+    CHECK(paint.color == 1);
+    youhost::chooseChannelColor(paint, 0, 4, true);
+    CHECK(! paint.own);
+    CHECK(paint.color == 4);
+    youhost::followGroupColor(paint, 2);
+    CHECK(paint.color == 2);
+    youhost::leaveGroupColor(paint);
+    CHECK(paint.color == 0);
+
+    youhost::ChannelPaint ownedPaint;
+    youhost::chooseChannelColor(ownedPaint, 3, 4, true);
+    youhost::leaveGroupColor(ownedPaint);
+    CHECK(ownedPaint.own);
+    CHECK(ownedPaint.color == 3);
+
+    youhost::ChannelPaint members[3];
+    const int membership[] = { 0, 1, 0 };
+    youhost::chooseChannelColor(members[0], 1, 0, false);
+    youhost::followGroupColorOnMembers(members, membership, 3, 0, 5);
+    CHECK(members[0].color == 1);
+    CHECK(members[1].color == 0);
+    CHECK(members[2].color == 5);
+
+    CHECK(! youhost::colorIsOwnInSession(false, false, 0));
+    CHECK(youhost::colorIsOwnInSession(false, false, 3));
+    CHECK(! youhost::colorIsOwnInSession(true, false, 4));
+    CHECK(youhost::colorIsOwnInSession(true, true, 4));
+    CHECK(! youhost::colorIsOwnInSession(true, true, 0));
+
+    youhost::SessionDocumentModel model;
+    youhost::SessionChannelRecord owned;
+    owned.index = 1;
+    owned.color = 3;
+    owned.colorOwn = true;
+    youhost::SessionChannelRecord followed;
+    followed.index = 2;
+    followed.color = 4;
+    followed.colorOwn = false;
+    followed.group = 0;
+    model.channels.push_back(owned);
+    model.channels.push_back(followed);
+    const auto xml = youhost::writeSessionXml(youhost::writeSessionModel(model));
+    CHECK(xml.find("colorOwn=\"1\"") != std::string::npos);
+    CHECK(xml.find("colorOwn=\"0\"") != std::string::npos);
+    CHECK(xml.find("version=\"7\"") != std::string::npos);
+    youhost::SessionNode root;
+    CHECK(youhost::parseSessionXml(xml, root));
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(root, round));
+    bool sawOwn = false;
+    bool sawFollow = false;
+    for (const auto& channel : round.channels)
+    {
+        if (channel.index == 1)
+            sawOwn = channel.colorOwn && channel.color == 3;
+        if (channel.index == 2)
+            sawFollow = ! channel.colorOwn && channel.color == 4;
+    }
+    CHECK(sawOwn);
+    CHECK(sawFollow);
+
+    const char* legacy = R"(<YouHostSession version="7"><Channel index="3" color="5" name="Snare"/></YouHostSession>)";
+    youhost::SessionNode legacyRoot;
+    CHECK(youhost::parseSessionXml(legacy, legacyRoot));
+    youhost::SessionDocumentModel legacyModel;
+    CHECK(youhost::readSessionModel(legacyRoot, legacyModel));
+    CHECK(legacyModel.channels.size() == 1);
+    CHECK(legacyModel.channels[0].color == 5);
+    CHECK(legacyModel.channels[0].colorOwn);
+    CHECK(youhost::kSessionFormatVersion == 7);
+}
+
+void testSaveAsCopySpeed()
+{
+    const auto root = std::filesystem::path("/tmp/youhost-saveas-bench");
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    const auto audio = root / "audio";
+    const auto backups = root / "Backups" / "01";
+    const auto slow = root / "slow";
+    const auto fast = root / "fast";
+    std::filesystem::create_directories(audio);
+    std::filesystem::create_directories(backups);
+    std::filesystem::create_directories(slow / "audio");
+    std::filesystem::create_directories(slow / "Backups" / "01");
+    std::filesystem::create_directories(fast / "audio");
+
+    const std::string wav = (audio / "take.wav").string();
+    const std::string backup = (backups / "session.youhost").string();
+    {
+        std::ofstream out(wav, std::ios::binary);
+        std::vector<char> block(1024 * 1024, 7);
+        for (int index = 0; index < 8; ++index)
+            out.write(block.data(), static_cast<std::streamsize>(block.size()));
+    }
+    {
+        std::ofstream out(backup, std::ios::binary);
+        std::vector<char> block(1024 * 1024, 3);
+        for (int index = 0; index < 4; ++index)
+            out.write(block.data(), static_cast<std::streamsize>(block.size()));
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto slowWav = youhost::copyFileSlow(wav, (slow / "audio" / "take.wav").string());
+    const auto slowBackup = youhost::copyFileSlow(backup, (slow / "Backups" / "01" / "session.youhost").string());
+    const auto slowSessionA = youhost::copyFileSlow(backup, (slow / "session-a.youhost").string());
+    const auto slowSessionB = youhost::copyFileSlow(backup, (slow / "session-b.youhost").string());
+    const auto before = std::chrono::steady_clock::now();
+    const auto fastWav = youhost::copyFileFast(wav, (fast / "audio" / "take.wav").string());
+    {
+        std::ofstream out((fast / "session.youhost").string());
+        out << "<YouHostSession version=\"7\"/>\n";
+    }
+    const auto after = std::chrono::steady_clock::now();
+    const auto beforeMs = std::chrono::duration_cast<std::chrono::milliseconds>(before - started).count();
+    const auto afterMs = std::chrono::duration_cast<std::chrono::milliseconds>(after - before).count();
+    const auto beforeBytes = slowWav.bytes + slowBackup.bytes + slowSessionA.bytes + slowSessionB.bytes;
+    const auto afterBytes = fastWav.bytes + static_cast<std::uint64_t>(std::filesystem::file_size(fast / "session.youhost"));
+    std::cout << "save-as copy before " << beforeMs << " ms " << beforeBytes << " bytes\n";
+    std::cout << "save-as copy after " << afterMs << " ms " << afterBytes << " bytes\n";
+    CHECK(slowWav.ok);
+    CHECK(slowBackup.ok);
+    CHECK(slowSessionA.ok);
+    CHECK(slowSessionB.ok);
+    CHECK(fastWav.ok);
+    CHECK(afterBytes < beforeBytes);
+    CHECK(afterMs < beforeMs);
+    std::filesystem::remove_all(root, error);
 }
 
 } // namespace
@@ -3824,6 +4109,8 @@ int main()
     testPluginLoadPace();
     testShortcutsMatchTheHelp();
     testKeyDispatch();
+    testChannelColorRules();
+    testSaveAsCopySpeed();
     testGroupsFoldAndPalette();
     testSessionChannelsRateLockAndClose();
     testTimelinePaintDoesNotReenterLock();

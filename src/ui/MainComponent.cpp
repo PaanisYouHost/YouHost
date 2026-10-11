@@ -1387,7 +1387,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
     saveButton_.setTooltip("Save session.youhost (" + juce::String(shortcutChord(ShortcutId::save)) + ").");
-    saveAsButton_.setTooltip("Copy the whole session, including audio, then continue in the new folder ("
+    saveAsButton_.setTooltip("Copy the WAV files on a background thread, write session.youhost once, skip Backups, then continue in the new folder ("
                              + juce::String(shortcutChord(ShortcutId::saveAs)) + "). Not while recording.");
     latencyButton_.onClick = [this] { toggleLatency(); };
 
@@ -1402,9 +1402,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     globalRecButton_.onClick = [this] { applyGlobalListen(ChannelListen::record); };
     globalInputButton_.onClick = [this] { applyGlobalListen(ChannelListen::input); };
     globalOffButton_.onClick = [this] { applyGlobalListen(ChannelListen::off); };
-    globalRecButton_.setTooltip("Set every visible channel to REC. A selection does not limit this.");
-    globalInputButton_.setTooltip("Set every visible channel to INPUT. A selection does not limit this. Leaving REC while recording asks first.");
-    globalOffButton_.setTooltip("Set every visible channel to OFF. A selection does not limit this. Leaving REC while recording asks first.");
+    globalRecButton_.setTooltip("Set every visible channel to REC. A selection does not limit this. While recording, a change asks twice.");
+    globalInputButton_.setTooltip("Set every visible channel to INPUT. A selection does not limit this. While recording, a change asks twice.");
+    globalOffButton_.setTooltip("Set every visible channel to OFF. A selection does not limit this. While recording, a change asks twice.");
     recordLock_->onClick = [this]
     {
         engine_.setRecordLockArmed(! engine_.recordLockArmed());
@@ -1457,15 +1457,17 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     meterGrid_.setRecordHandler([this](int channel)
     {
-        engine_.cycleChannelListen(channel);
+        requestChannelListenCycle(channel);
     });
     meterGrid_.setChannelMenuHandler([this](int channel)
     {
-        if (! engine_.isChannelSelected(channel))
-            engine_.selectChannel(channel, false);
-        showMakeGroupDialog(engine_);
+        showChannelMenu(engine_, meterGrid_, channel, [this](int chosen)
+        {
+            meterGrid_.beginNameEdit(chosen);
+        });
         refresh();
     });
+    pluginPage_.setListenHandler([this](int channel) { requestChannelListenCycle(channel); });
     meterGrid_.setNameCommitHandler([this](int channel, juce::String name) { engine_.setChannelName(channel, name); });
     meterGrid_.setNameStepHandler([this](int channel, int direction)
     {
@@ -1869,32 +1871,140 @@ void MainComponent::requestApplicationQuit(std::function<void()> quit)
     runAfterUnsavedCheck(std::move(quit));
 }
 
+namespace
+{
+
+// The alert chrome is dark, so this body paints its own light panel.
+// "Switch" is red. The rest of the line is black.
+class ListenWarningBody : public juce::Component
+{
+public:
+    ListenWarningBody(juce::String headline, juce::String detail)
+        : headline_(std::move(headline)),
+          detail_(std::move(detail))
+    {
+        setSize(460, 78);
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(juce::Colour(0xfff7f4ee));
+        auto area = getLocalBounds().toFloat().reduced(8.0f, 6.0f);
+        graphics.setFont(juce::Font(juce::FontOptions(16.0f).withStyle("Bold")));
+        const juce::String verb(kListenChangeVerb);
+        auto line = area.removeFromTop(22.0f);
+        if (headline_.startsWith(verb))
+        {
+            const float verbWidth = juce::GlyphArrangement::getStringWidth(graphics.getCurrentFont(), verb);
+            graphics.setColour(juce::Colours::red);
+            graphics.drawText(verb, line.removeFromLeft(verbWidth), juce::Justification::centredLeft, false);
+            graphics.setColour(juce::Colours::black);
+            graphics.drawText(headline_.substring(verb.length()), line, juce::Justification::centredLeft, false);
+        }
+        else
+        {
+            graphics.setColour(juce::Colours::black);
+            graphics.drawText(headline_, line, juce::Justification::centredLeft, false);
+        }
+        graphics.setFont(juce::Font(juce::FontOptions(14.0f)));
+        graphics.setColour(juce::Colours::black);
+        graphics.drawFittedText(detail_, area.toNearestInt(), juce::Justification::topLeft, 3);
+    }
+
+private:
+    juce::String headline_;
+    juce::String detail_;
+};
+
+} // namespace
+
+void MainComponent::confirmListenChange(const juce::String& headline, std::function<void()> apply)
+{
+    auto* window = new juce::AlertWindow("Recording", {}, juce::MessageBoxIconType::WarningIcon);
+    window->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    window->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    auto* body = new ListenWarningBody(headline, kListenChangeDetail);
+    window->addCustomComponent(body);
+    window->enterModalState(true,
+                            juce::ModalCallbackFunction::create(
+                                [safe = juce::Component::SafePointer<MainComponent>(this), apply, body](int result)
+                                {
+                                    delete body;
+                                    if (result != 1 || safe == nullptr)
+                                        return;
+                                    juce::AlertWindow::showOkCancelBox(
+                                        juce::MessageBoxIconType::WarningIcon,
+                                        kListenChangeSureTitle,
+                                        "Apply this change to the running recording?",
+                                        "OK",
+                                        "Cancel",
+                                        nullptr,
+                                        juce::ModalCallbackFunction::create([safe, apply](int second)
+                                        {
+                                            if (safe == nullptr
+                                                || ! listenChangeApplies(ListenChangeKind::confirm, 1, second))
+                                                return;
+                                            apply();
+                                            safe->refresh();
+                                        }));
+                                }),
+                            true);
+}
+
+void MainComponent::requestChannelListenCycle(int channel)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    const bool recording = engine_.isRecording();
+    if (! recordActionAllowed(RecordDisrupt::channelListen, recording, engine_.recordLockArmed()))
+        return;
+    const auto current = engine_.channelListen(channel);
+    const auto next = cycleChannelListen(current);
+    const auto kind = classifyListenChange(recording, false, current != next);
+    if (kind == ListenChangeKind::now)
+    {
+        engine_.cycleChannelListen(channel);
+        refresh();
+        return;
+    }
+    if (kind != ListenChangeKind::confirm)
+        return;
+    confirmListenChange(channelListenChangeLine(channel, current, next),
+                        [safe = juce::Component::SafePointer<MainComponent>(this), channel]()
+                        {
+                            if (safe != nullptr)
+                                safe->engine_.cycleChannelListen(channel);
+                        });
+}
+
 void MainComponent::applyGlobalListen(ChannelListen mode)
 {
     const bool recording = engine_.isRecording();
     if (! recordActionAllowed(RecordDisrupt::globalListen, recording, engine_.recordLockArmed()))
         return;
-    if (! engine_.selectionListenNeedsConfirm(mode))
+    const auto selected = engine_.selectedChannels();
+    const auto targets = channelsForGlobalListen(selected.data(), static_cast<int>(selected.size()), engine_.visibleChannels());
+    bool differ = false;
+    for (const int channel : targets)
+        if (engine_.channelListen(channel) != mode)
+            differ = true;
+    const auto kind = classifyListenChange(recording, false, differ);
+    if (kind != ListenChangeKind::confirm)
     {
-        engine_.setSelectionListen(mode, true);
-        refresh();
+        if (kind == ListenChangeKind::now)
+        {
+            engine_.setSelectionListen(mode, true);
+            refresh();
+        }
         return;
     }
 
-    juce::AlertWindow::showOkCancelBox(
-        juce::MessageBoxIconType::WarningIcon,
-        "Leave REC while recording?",
-        "Those channels stop being written to this take.",
-        "Switch",
-        "Cancel",
-        nullptr,
-        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<MainComponent>(this), mode](int result)
-        {
-            if (result != 1 || safe == nullptr)
-                return;
-            safe->engine_.setSelectionListen(mode, true);
-            safe->refresh();
-        }));
+    confirmListenChange(globalListenChangeLine(mode),
+                        [safe = juce::Component::SafePointer<MainComponent>(this), mode]()
+                        {
+                            if (safe != nullptr)
+                                safe->engine_.setSelectionListen(mode, true);
+                        });
 }
 
 void MainComponent::promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean)

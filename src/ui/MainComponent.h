@@ -65,6 +65,8 @@ private:
     void openStartup();
     void dismissStartup();
     void applyGlobalListen(ChannelListen mode);
+    void requestChannelListenCycle(int channel);
+    void confirmListenChange(const juce::String& headline, std::function<void()> apply);
     void promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean = false);
     void runAfterUnsavedCheck(std::function<void()> action);
     void newSession();

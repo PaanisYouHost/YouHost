@@ -40,6 +40,7 @@ struct SessionChannel
     ChannelListen listen = ChannelListen::record;
     float outputDb = 0.0f;
     int color = 0;
+    bool colorOwn = false;
     int group = -1;
     juce::String name;
     std::array<SessionSlot, kSlotsPerChannel> slots {};

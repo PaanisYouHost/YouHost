@@ -2,6 +2,7 @@
 
 #include "ScanJobs.h"
 
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -69,14 +70,61 @@ inline ChannelListen cycleChannelListen(ChannelListen mode) noexcept
     return ChannelListen::record;
 }
 
-// True when a global INPUT or OFF would move a channel off REC during a take.
-// REC itself, and any change while the transport is stopped, applies at once.
+// The word painted red on the first warning. The second dialog title follows.
+inline constexpr const char* kListenChangeVerb = "Switch";
+inline constexpr const char* kListenChangeSureTitle = "Are you sure?";
+inline constexpr const char* kListenChangeDetail = "This changes channels in the running recording.";
+
+enum class ListenChangeKind
+{
+    now,
+    blocked,
+    unchanged,
+    confirm
+};
+
+// Any real mode difference while recording waits for two OK presses.
+// The same modes, a stopped transport, and the record lock do not open a dialog.
+inline ListenChangeKind classifyListenChange(bool recording, bool locked, bool anyDifference) noexcept
+{
+    if (locked)
+        return ListenChangeKind::blocked;
+    if (! anyDifference)
+        return ListenChangeKind::unchanged;
+    if (! recording)
+        return ListenChangeKind::now;
+    return ListenChangeKind::confirm;
+}
+
+// `now` applies with no dialog. `confirm` applies only after both results are OK (1).
+inline bool listenChangeApplies(ListenChangeKind kind, int firstOk, int secondOk) noexcept
+{
+    if (kind == ListenChangeKind::now)
+        return true;
+    if (kind == ListenChangeKind::confirm)
+        return firstOk == 1 && secondOk == 1;
+    return false;
+}
+
+// Channel numbers on the strip are 1-based. Example: "Switch ch 5 REC -> INPUT".
+inline std::string channelListenChangeLine(int channel, ChannelListen from, ChannelListen to)
+{
+    return std::string(kListenChangeVerb) + " ch " + std::to_string(channel + 1) + " "
+           + channelListenLabel(from) + " -> " + channelListenLabel(to);
+}
+
+inline std::string globalListenChangeLine(ChannelListen next)
+{
+    return std::string(kListenChangeVerb) + " every visible channel to " + channelListenLabel(next);
+}
+
+// True when a global REC, INPUT, or OFF would change any visible channel during a take.
 inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const int* targetModes, int targetCount) noexcept
 {
-    if (! recording || next == ChannelListen::record || targetModes == nullptr || targetCount <= 0)
+    if (! recording || targetModes == nullptr || targetCount <= 0)
         return false;
     for (int index = 0; index < targetCount; ++index)
-        if (targetModes[index] == static_cast<int>(ChannelListen::record))
+        if (targetModes[index] != static_cast<int>(next))
             return true;
     return false;
 }

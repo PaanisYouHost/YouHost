@@ -77,6 +77,17 @@ private:
     std::uint32_t read_ = 0;
 };
 
+// The DROPOUTS range menu. Whole session is what the window shows each time it opens.
+inline constexpr int kDropoutRangeTenMinutes = 1;
+inline constexpr int kDropoutRangeOneHour = 2;
+inline constexpr int kDropoutWholeSessionId = 3;
+inline constexpr const char* kDropoutWholeSessionLabel = "Whole session";
+
+inline int dropoutRangeOnOpen() noexcept
+{
+    return kDropoutWholeSessionId;
+}
+
 inline int countMarksInWindow(const DropoutMark* marks, int count, std::int64_t nowNs, std::int64_t windowNs)
 {
     if (marks == nullptr || count <= 0)

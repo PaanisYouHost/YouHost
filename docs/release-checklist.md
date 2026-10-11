@@ -49,6 +49,12 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | Background polling | While a chosen card is up, no timer scans the device list. The 30 Hz timer samples CPU. Audio setup's 4 Hz timer reads the cached list. A scan runs when the device is lost, the inventory is empty, or the user picks another card. |
 | Cmd+A and Cmd+G | Edit menu commands. A macOS Command event (no text character, uppercase key code) selects every visible channel or makes a group on REC. HOST and a focused text field do not. The same dispatch covers 1–5, Space, Cmd+Space, Cmd+S, Cmd+Shift+S, T/R, the arrows, and G. |
 | Group meters | REC and HOST group bars use one thin meter track. On REC it runs down almost the full strip. On HOST it runs across the bar. A level change repaints that track only. The checklist renders `rec_group_meter.ppm` and checks the track covers the bar. |
+| Channel colour | Right-click on REC and HOST opens the colour menu. That menu had been replaced by the new-group dialog, which is why colour looked gone. The Group button and Cmd+G still open the new-group dialog. A channel with no colour of its own takes the group colour and can still be recoloured. An own colour stays when the group colour changes. Off follows the group again. Leaving the group drops a borrowed colour. Session files store `colorOwn` and still open older files. The session version stays 7. |
+| DROPOUTS range | The DROPOUTS window opens on Whole session every time. Last 10 min and Last 1 hour stay in the menu. |
+| F fits | Plain F fits the timeline on REC and HOST when no text field is focused. Option+R still fits. Cmd+F, Shift+F, and Option+F do not. |
+| Mode change while recording | REC, INPUT, and OFF, for one channel and for ALL, on REC and HOST, ask twice while recording. The first warning shows Switch in red. The second is Are you sure? Cancel changes nothing. When not recording there is no dialog. The record lock still blocks the change. |
+| RMS 0 reference | The RMS ruler stays from -60 dBFS to 0 dBFS. Choosing -20, -18, or -14 moves the 0 line and the green/yellow boundary. The top number is the headroom up to 0 dBFS. |
+| Save As speed | Save As writes session.youhost once, copies WAV files on the background disk thread with a fast copy (clonefile when the volume allows), skips Backups, and shows the progress bar. The original folder is not saved first. |
 
 ## Windows to photograph on a Mac release
 

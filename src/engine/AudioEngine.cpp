@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include "AppSettings.h"
+#include "ChannelColor.h"
 #include "ChannelSelect.h"
 #include "OutputGain.h"
 #include "SignalPath.h"
@@ -548,14 +549,13 @@ juce::String AudioEngine::takeSessionRateNotice()
 
 bool AudioEngine::selectionListenNeedsConfirm(ChannelListen mode) const
 {
-    if (! isRecording() || mode == ChannelListen::record)
-        return false;
     const auto selected = selectedChannels();
     const auto targets = channelsForGlobalListen(selected.data(), static_cast<int>(selected.size()), visibleChannels());
+    std::vector<int> modes;
+    modes.reserve(targets.size());
     for (const int channel : targets)
-        if (channelListen(channel) == ChannelListen::record)
-            return true;
-    return false;
+        modes.push_back(static_cast<int>(channelListen(channel)));
+    return globalListenNeedsConfirm(isRecording(), mode, modes.data(), static_cast<int>(modes.size()));
 }
 
 void AudioEngine::setSelectionListen(ChannelListen mode, bool confirmed)
@@ -2112,6 +2112,7 @@ void AudioEngine::resetToCleanSession()
         outputDb_[index] = 0.0f;
         outputGain_[index].store(1.0f, std::memory_order_relaxed);
         channelColor_[index] = 0;
+        channelColorOwn_[index] = false;
         channelGroup_[index] = -1;
         strips_[index].excludeFromCompensation = false;
         audible[index] = true;
@@ -2662,8 +2663,6 @@ bool AudioEngine::beginSessionCopy(const juce::File& folder)
         sessionMessage_ = "Session folder " + sessionFolder_.getFullPathName();
         return true;
     }
-    if (! saveSession())
-        return false;
     if (folder.getFullPathName() == sessionFolder_.getFullPathName())
         return true;
     if (folder.isAChildOf(sessionFolder_) || sessionFolder_.isAChildOf(folder))
@@ -2676,7 +2675,8 @@ bool AudioEngine::beginSessionCopy(const juce::File& folder)
 
     auto life = alive_;
     const auto destination = folder;
-    if (! sessionDisk_->startCopy(sessionFolder_, destination, [life, this, destination](bool ok, juce::String message)
+    SessionData captured = captureSessionData();
+    if (! sessionDisk_->startCopy(std::move(captured), sessionFolder_, destination, [life, this, destination](bool ok, juce::String message)
     {
         if (life == nullptr || ! life->load())
             return;
@@ -2688,6 +2688,7 @@ bool AudioEngine::beginSessionCopy(const juce::File& folder)
             return;
         }
         sessionFolder_ = destination;
+        sessionDirty_ = false;
         dropoutHeaderWritten_ = false;
         lastBackupMs_ = 0;
         syncRecorderFolder();
@@ -2891,6 +2892,7 @@ void AudioEngine::captureDisplay(SessionData& data) const
     {
         auto& destination = data.channels[static_cast<std::size_t>(channel)];
         destination.color = channelColor_[static_cast<std::size_t>(channel)];
+        destination.colorOwn = channelColorOwn_[static_cast<std::size_t>(channel)];
         destination.group = channelGroup_[static_cast<std::size_t>(channel)];
         destination.listen = listen_[static_cast<std::size_t>(channel)];
         destination.recordEnabled = destination.listen == ChannelListen::record;
@@ -2908,6 +2910,7 @@ void AudioEngine::applyDisplay(const SessionData& data)
     {
         const auto& source = data.channels[static_cast<std::size_t>(channel)];
         channelColor_[static_cast<std::size_t>(channel)] = normaliseX32Colour(source.color);
+        channelColorOwn_[static_cast<std::size_t>(channel)] = source.colorOwn && channelColor_[static_cast<std::size_t>(channel)] != 0;
         const int group = source.group;
         channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
         listen_[static_cast<std::size_t>(channel)] = source.listen;
@@ -2941,7 +2944,15 @@ void AudioEngine::setChannelColor(int channel, int color)
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
-    channelColor_[static_cast<std::size_t>(channel)] = normaliseX32Colour(color);
+    const auto index = static_cast<std::size_t>(channel);
+    const int group = channelGroup_[index];
+    const int groupHue = (group >= 0 && group < kMaxDisplayGroups)
+                             ? groups_[static_cast<std::size_t>(group)].color
+                             : 0;
+    ChannelPaint paint { channelColor_[index], channelColorOwn_[index] };
+    chooseChannelColor(paint, color, groupHue, group >= 0);
+    channelColor_[index] = paint.color;
+    channelColorOwn_[index] = paint.own;
     bumpDisplay();
 }
 
@@ -2965,11 +2976,22 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
             stored.name = "Group " + juce::String(group + 1);
     }
 
+    const int groupHue = (group >= 0 && group < kMaxDisplayGroups)
+                             ? groups_[static_cast<std::size_t>(group)].color
+                             : 0;
     for (int channel : channels)
     {
         if (channel < 0 || channel >= kMaxChannels)
             continue;
-        channelGroup_[static_cast<std::size_t>(channel)] = group;
+        const auto index = static_cast<std::size_t>(channel);
+        channelGroup_[index] = group;
+        ChannelPaint paint { channelColor_[index], channelColorOwn_[index] };
+        if (group < 0)
+            leaveGroupColor(paint);
+        else
+            followGroupColor(paint, groupHue);
+        channelColor_[index] = paint.color;
+        channelColorOwn_[index] = paint.own;
     }
     syncCompensation();
     bumpDisplay();
@@ -2980,8 +3002,16 @@ void AudioEngine::clearGroup(int group)
     if (group < 0 || group >= kMaxDisplayGroups)
         return;
     for (int channel = 0; channel < kMaxChannels; ++channel)
-        if (channelGroup_[static_cast<std::size_t>(channel)] == group)
-            channelGroup_[static_cast<std::size_t>(channel)] = -1;
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        if (channelGroup_[index] != group)
+            continue;
+        ChannelPaint paint { channelColor_[index], channelColorOwn_[index] };
+        leaveGroupColor(paint);
+        channelColor_[index] = paint.color;
+        channelColorOwn_[index] = paint.own;
+        channelGroup_[index] = -1;
+    }
     syncCompensation();
     groups_[static_cast<std::size_t>(group)] = {};
     bumpDisplay();
@@ -3002,8 +3032,19 @@ void AudioEngine::setGroupColor(int group, int color)
 {
     if (group < 0 || group >= kMaxDisplayGroups)
         return;
-    groups_[static_cast<std::size_t>(group)].used = true;
-    groups_[static_cast<std::size_t>(group)].color = normaliseX32Colour(color);
+    auto& stored = groups_[static_cast<std::size_t>(group)];
+    stored.used = true;
+    stored.color = normaliseX32Colour(color);
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        if (channelGroup_[index] != group)
+            continue;
+        ChannelPaint paint { channelColor_[index], channelColorOwn_[index] };
+        followGroupColor(paint, stored.color);
+        channelColor_[index] = paint.color;
+        channelColorOwn_[index] = paint.own;
+    }
     bumpDisplay();
 }
 

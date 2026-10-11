@@ -98,6 +98,8 @@ inline constexpr Binding kBindings[] = {
       "Move 5 seconds forward", false, 0 },
     { ShortcutId::nextTake, KeyKind::right, 0, 0, -1, -1, "Right",
       "Next take", false, 0 },
+    { ShortcutId::fit, KeyKind::character, 'f', 0, 0, 0, "F",
+      "Fit the whole session across and down", false, 0 },
     { ShortcutId::fit, KeyKind::letterR, 0, 0, 0, 1, "Option+R",
       "Fit the whole session across and down", false, 0 },
     { ShortcutId::lanesTaller, KeyKind::bracketLeft, 0, 0, 1, -1, "Cmd+[",
@@ -290,6 +292,12 @@ inline int commandForRawKey(const RawKey& key) noexcept
     return 0;
 }
 
+// F and Option+R fit the timeline on REC and HOST. A text field keeps the key.
+inline bool fitShortcutApplies(int page, bool textFieldFocused) noexcept
+{
+    return (page == 1 || page == 2) && ! textFieldFocused;
+}
+
 // Select All and Make Group stay on the REC page, and a text field keeps the key.
 // Save stays available: the command manager already ran it while a field was focused.
 inline bool commandApplies(ShortcutId id, int page, bool textFieldFocused) noexcept
@@ -298,6 +306,8 @@ inline bool commandApplies(ShortcutId id, int page, bool textFieldFocused) noexc
         return selectAllShortcutApplies(page, textFieldFocused);
     if (id == ShortcutId::makeGroup)
         return makeGroupShortcutApplies(page, textFieldFocused);
+    if (id == ShortcutId::fit)
+        return fitShortcutApplies(page, textFieldFocused);
     return true;
 }
 
@@ -429,7 +439,9 @@ inline constexpr const char* kShortcutNotes =
     "Audio setup has a switch for those channels. They stay in the session and are not recorded or processed. "
     "Hide unused channels with groups and Hide. "
     "The channel list header has ALL REC, ALL INPUT, and ALL OFF on REC and on HOST. They set every visible channel. A selection does not limit them. "
-    "Leaving REC while recording asks first. The record lock still blocks them. "
+    "A mode change while recording asks twice. The first warning shows Switch in red. The second confirmation is Are you sure? "
+    "This covers one channel and ALL REC, ALL INPUT, and ALL OFF, on REC and on HOST. Cancel leaves the mode. "
+    "When not recording there is no dialog. The record lock still blocks them. "
     "If the card rate is higher than the session, YouHost shows Session moves to 48 kHz. A lower rate changes with no prompt. "
     "Plugins are prepared again off the audio thread. Takes keep the rate in their WAV files.\n"
     "The padlock beside the transport is the record lock. Click it to arm the lock, including before the take starts. "
@@ -450,7 +462,8 @@ inline constexpr const char* kShortcutNotes =
     "The + and - buttons zoom time the same way as T and R. The W+ and W- buttons change waveform height. "
     "That does not change the audio. Cmd or Option plus the wheel over the lanes does the same.\n"
     "FIT is the green button at the left of the timeline controls, on REC and on HOST. "
-    "It does the same as Option+R. With no takes yet the timeline shows 60 seconds. "
+    "It does the same as F and Option+R. F does nothing while a text field has focus. "
+    "With no takes yet the timeline shows 60 seconds. "
     "FIT shows every take, from 0 to just past the last take, and every lane, even when a lane is only a pixel or two. "
     "V- zooms out until every lane fits. V+ zooms in on fewer lanes. "
     "The bar on the right scrolls lanes that do not fit and can be dragged.\n"
@@ -480,7 +493,7 @@ inline constexpr const char* kShortcutNotes =
     "New starts a clean session: no plugins, no channel names, no colours, groups back to defaults, every channel REC, "
     "output gain 0 dB, bypass off, and an empty timeline. The device, sample rate, bit depth, and buffer stay as they are. "
     "New, Open, and Open Recent ask before discarding unsaved changes. Save writes this session. The first save asks for a name and a folder. "
-    "Save As copies the whole folder, including the WAV files, and continues in the copy.\n"
+    "Save As copies the WAV files on a background thread, writes session.youhost once, skips Backups, and continues in the copy.\n"
     "Windows open at least as large as their content, and never smaller than that unless the screen itself is smaller. "
     "A larger size is remembered. An older smaller size is replaced so the text stays visible.\n"
     "New sessions are named with the date, DD.MM.YYYY. If that folder already exists, the name becomes DD.MM.YYYY_1, then _2. "
@@ -488,8 +501,9 @@ inline constexpr const char* kShortcutNotes =
     "Every 5 minutes YouHost writes a backup of the session file into the session's Backups folder and keeps the 10 newest. "
     "Audio files are not copied into the backup. The status line shows Backup and the time. "
     "The backup waits if the disk is already busy or a take is recording.\n"
-    "Save writes session.youhost. The Save As button, and Cmd+Shift+S, copy the whole session folder including the audio "
-    "onto a new name and location, then continue in that copy. Save As does not run while recording; YouHost asks to stop first. "
+    "Save writes session.youhost. The Save As button, and Cmd+Shift+S, copy the WAV files on a background thread, "
+    "write session.youhost once, skip the Backups folder, then continue in that copy. Audio keeps running. "
+    "Save As does not run while recording; YouHost asks to stop first. "
     "A progress bar shows the copy.\n"
     "3, D, 4, 5, and S open that window, or close it when it is already open, including when that window is in front.\n"
     "DROPOUTS lists CPU only for channels that have a plugin, and the list scrolls.\n"

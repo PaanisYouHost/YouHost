@@ -64,18 +64,18 @@ struct SessionCopyEntry
     std::string relativePath;
 };
 
-// Save As copies the session file, every WAV in audio/, and each backup's session file.
+// Save As writes session.youhost once and copies every WAV in audio/.
+// Backups and other root files (dropouts, temp) are not copied.
 inline std::vector<SessionCopyEntry> planSessionCopy(const std::vector<std::string>& rootFiles,
                                                      const std::vector<std::string>& wavNames,
                                                      const std::vector<std::string>& backupFolders)
 {
+    (void) rootFiles;
+    (void) backupFolders;
     std::vector<SessionCopyEntry> plan;
-    for (const auto& file : rootFiles)
-        plan.push_back(SessionCopyEntry { file });
+    plan.push_back(SessionCopyEntry { kSessionFileName });
     for (const auto& wav : wavNames)
         plan.push_back(SessionCopyEntry { std::string(kAudioFolderName) + "/" + wav });
-    for (const auto& backup : backupFolders)
-        plan.push_back(SessionCopyEntry { std::string("Backups/") + backup + "/" + kSessionFileName });
     return plan;
 }
 
