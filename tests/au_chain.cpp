@@ -9,6 +9,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <CoreFoundation/CoreFoundation.h>
+
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -22,7 +24,9 @@ constexpr int kBlock = 32;
 constexpr float kPoison = 0.9f;
 constexpr float kImpulse = 0.25f;
 constexpr float kSilencePeak = 1.0e-3f;
-constexpr float kImpulseCeiling = 1.0f;
+// Host ceiling. Distortion may raise an impulse. A feedback loop of the
+// poisoned scratch climbs far past this.
+constexpr float kImpulseCeiling = 4.0f;
 
 struct AppleAu
 {
@@ -74,11 +78,36 @@ float blockPeak(const float* data, int count)
     return peak;
 }
 
+// Pull delay and feedback toward zero so a factory 2 second echo is not the
+// thing under test. The silence run still starts from poisoned scratch.
+void tameTail(juce::AudioPluginInstance& instance)
+{
+    for (auto* param : instance.getParameters())
+    {
+        if (param == nullptr)
+            continue;
+        const auto name = param->getName(64).toLowerCase();
+        const bool feedback = name.contains("feedback") || name.contains("decay");
+        const bool delay = name.contains("delay");
+        if (! feedback && ! delay)
+            continue;
+        auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param);
+        if (ranged == nullptr)
+        {
+            param->setValue(0.0f);
+            continue;
+        }
+        const float target = ranged->getNormalisableRange().snapToLegalValue(feedback ? 0.0f : 0.05f);
+        param->setValue(ranged->convertTo0to1(target));
+    }
+}
+
 // Poison the slot scratch, then run the same prepare / process / fold path
 // the audio thread uses. `impulse` puts one sample in the first block only.
 bool runOffline(juce::AudioPluginInstance& instance, bool impulse, float& peak, float& tail)
 {
     instance.prepareToPlay(kSampleRate, kBlock);
+    tameTail(instance);
     instance.reset();
 
     const int inputs = std::max(1, instance.getTotalNumInputChannels());
@@ -184,10 +213,14 @@ int run()
     if (! paints.take(1040, channel, slot, trigger) || trigger != youhost::kRepaintMove || channel != 0)
         return fail("moving AUDelay did not coalesce to that slot");
 
+    // JUCE builds with JUCE_MODAL_LOOPS_PERMITTED at 0, so runDispatchLoopUntil
+    // is not part of MessageManager. Pump the same run loop it would have used.
     const auto started = juce::Time::getMillisecondCounter();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+    const auto end = started + 200u;
+    while (juce::Time::getMillisecondCounter() < end)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, TRUE);
     const auto elapsed = juce::Time::getMillisecondCounter() - started;
-    if (elapsed > 1000)
+    if (elapsed > 1000u)
         return fail("message thread stalled " + std::to_string(elapsed) + " ms with AUDelay loaded");
 
     std::cout << "AU chain offline passed, message thread returned in " << elapsed << " ms\n";
