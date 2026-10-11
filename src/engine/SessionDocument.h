@@ -43,6 +43,7 @@ struct SessionChannel
     bool colorOwn = false;
     int group = -1;
     juce::String name;
+    bool stereoLink = false;
     std::array<SessionSlot, kSlotsPerChannel> slots {};
 };
 

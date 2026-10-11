@@ -75,11 +75,11 @@ struct Binding
 
 inline constexpr Binding kBindings[] = {
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
-      "Select every visible channel on the REC page", true, 'a' },
+      "Select every visible channel on the REC page and the HOST page", true, 'a' },
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 0, 0, "A",
-      "Select every visible channel on the REC page", false, 0 },
+      "Select every visible channel on the REC page and the HOST page", false, 0 },
     { ShortcutId::makeGroup, KeyKind::character, 'g', 0, 1, 0, "Cmd+G",
-      "On the REC page, name a group from the selected channels, pick a colour, and fold it", true, 'g' },
+      "On the REC page and the HOST page, name a group from the selected channels, pick a colour, and fold it", true, 'g' },
     { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
       "Go to channel. Type the number and press Return.", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
@@ -298,7 +298,7 @@ inline bool fitShortcutApplies(int page, bool textFieldFocused) noexcept
     return (page == 1 || page == 2) && ! textFieldFocused;
 }
 
-// Select All and Make Group stay on the REC page, and a text field keeps the key.
+// Select All and Make Group work on the REC page and the HOST page. A text field keeps the key.
 // Save stays available: the command manager already ran it while a field was focused.
 inline bool commandApplies(ShortcutId id, int page, bool textFieldFocused) noexcept
 {
@@ -399,12 +399,12 @@ inline constexpr const char* kShortcutNotes =
     "5. In the startup window, choose the audio card.\n"
     "Click a channel to select it. Shift+click selects the channels from the anchor through the one you click. "
     "Cmd+click, or Ctrl+click, adds or removes that one channel. "
-    "Cmd+A, or A, selects every visible channel on the REC page, so you can colour or group them together. "
-    "It does not select on the HOST page.\n"
-    "On the REC page, Cmd+G does the same thing as the Group button and right-click Make group from selection: "
+    "Cmd+A, or A, selects every visible channel on the REC page and the HOST page, so you can colour or group them together. "
+    "Click, Shift+click, and Cmd+click select on HOST the same way. A text field keeps the key.\n"
+    "Cmd+G does the same thing as the Group button and right-click Make group from selection on the REC page and the HOST page: "
     "one dialog for the selected channels. "
     "Cmd+A, then Cmd+G, groups every visible channel. "
-    "Cmd+G does nothing on the HOST page, and nothing while a text field has focus. "
+    "Cmd+G does nothing while a text field has focus. "
     "The name is selected so you can type, and the colour swatches sit under it. "
     "Enter or OK creates the group, applies the name and colour, and folds it. Esc cancels. "
     "The group bar stays visible. Click it to open the channels again.\n"
@@ -478,6 +478,14 @@ inline constexpr const char* kShortcutNotes =
     "A scroll holds the view until the cursor leaves it.\n"
     "The plain wheel scrolls lanes. Shift plus the wheel, or a sideways trackpad swipe, scrolls time. "
     "The bars on the right and along the bottom do the same. Drag the timeline's bottom edge to change its height.\n"
+    "The HOST channel list has a fixed header: CH, MODE, NAME, DELAY COMP, PLUGINS, and GAIN. "
+    "It is drawn once and stays put while the channels scroll.\n"
+    "On the HOST page, right-click a channel and choose Stereo link with ch N+1, or click LINK on the odd channel. "
+    "Pairs are 1-2, 3-4, and so on. The even channel's plugin slots are hidden and the odd channel shows the one plugin row. "
+    "A stereo plugin on that row processes left and right together. Unlink keeps the plugins on the odd channel and leaves the even channel empty. "
+    "REC, INPUT, and OFF stay independent per channel. Each channel still records its own mono WAV of the raw input. "
+    "The link does not change the recorder or the REC page.\n"
+    "The plugin list marks each plugin M, ST, or M/ST from the scanned bus layouts.\n"
     "On HOST, the dB box after the plugins is output gain, -9 to +9. Drag for 0.5 dB steps, double-click to type, "
     "Option-click resets to 0. The wheel does not change it. Amber means it is not 0 dB. It is not written to the WAV.\n"
     "Option-drag copies a plugin and its settings. A plain drag moves the same plugin. "

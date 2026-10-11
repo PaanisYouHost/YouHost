@@ -1,4 +1,5 @@
 #include "ChannelMenu.h"
+#include "engine/StereoLink.h"
 #include "engine/WindowCatalog.h"
 #include "Theme.h"
 #include "X32Look.h"
@@ -387,7 +388,8 @@ int sharedGroup(const AudioEngine& engine, const std::vector<int>& channels)
 void showChannelMenu(AudioEngine& engine,
                      juce::Component& target,
                      int channel,
-                     std::function<void(int)> beginRename)
+                     std::function<void(int)> beginRename,
+                     bool hostPage)
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
@@ -414,8 +416,12 @@ void showChannelMenu(AudioEngine& engine,
         groups.addItem(20 + group, engine.groupName(group), true, oneGroup == group);
     menu.addSubMenu("Group", groups);
 
+    const bool offerLink = hostPage && canStereoLink(channel, engine.visibleChannels());
+    if (offerLink)
+        menu.addItem(510, stereoLinkMenuLabel(channel), true, engine.stereoLinked(channel));
+
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&target),
-                       [&engine, channels, beginRename = std::move(beginRename)](int result)
+                       [&engine, channels, channel, offerLink, beginRename = std::move(beginRename)](int result)
                        {
                            if (result == 300 && channels.size() == 1)
                            {
@@ -445,6 +451,10 @@ void showChannelMenu(AudioEngine& engine,
                                const int color = result - 200;
                                for (int chosen : channels)
                                    engine.setChannelColor(chosen, color);
+                           }
+                           else if (result == 510 && offerLink)
+                           {
+                               engine.toggleStereoLink(channel);
                            }
                        });
 }

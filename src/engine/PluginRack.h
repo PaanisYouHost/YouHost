@@ -116,6 +116,10 @@ public:
                     bool openWhenReady = false,
                     int stereoFold = 0);
     void setStereoFold(int channel, int slot, int fold);
+    void setStereoLink(int leftChannel, bool linked);
+    bool stereoLink(int leftChannel) const noexcept;
+    void requestChannelReset(int channel) noexcept;
+    bool takeNaNFault(int& channel, int& slot) noexcept;
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
@@ -198,7 +202,9 @@ private:
     bool pauseGate(PluginGate& gate);
     void resumeGate(PluginGate& gate) noexcept;
     void processJob(int index);
-    void processOneChannel(LiveGraph& graph, int channel, float* output, int numSamples);
+    void processOneChannel(LiveGraph& graph, int channel, float* output, float* partner, int numSamples);
+    void clearChannelMemory(LiveGraph& graph, int channel) noexcept;
+    void noteNaN(int channel, int slot) noexcept;
     void rememberActiveNames();
     void addCoreNs(int core, std::uint64_t ns) noexcept;
     bool waitUntilOutsideCallback();
@@ -251,6 +257,11 @@ private:
     std::array<std::array<SlotModel, kSlotsPerChannel>, kMaxChannels> model_ {};
     std::array<bool, kMaxChannels> excluded_ {};
     std::array<bool, kMaxChannels> audible_ {};
+    std::array<std::atomic<std::uint8_t>, kMaxChannels> stereoLink_ {};
+    std::array<std::atomic<std::uint8_t>, kMaxChannels> channelReset_ {};
+    std::atomic<int> nanFaultChannel_ { -1 };
+    std::atomic<int> nanFaultSlot_ { -1 };
+    std::atomic<int> nanFaultPending_ { 0 };
     std::array<int, kMaxChannels> groups_ {};
     int alignGroup_ = 0;
     std::atomic<int> activeChannels_ { kMaxChannels };
@@ -319,6 +330,7 @@ private:
     bool audioJoined_ = false;
     int jobChannels_[kMaxChannels] {};
     float* jobOutputs_[kMaxChannels] {};
+    float* jobPartners_[kMaxChannels] {};
     LiveGraph* jobGraph_ = nullptr;
     int jobSamples_ = 0;
     int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};

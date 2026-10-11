@@ -9,7 +9,10 @@
 #include "engine/ChannelListen.h"
 #include "engine/SignalPath.h"
 #include "engine/DisplayLayout.h"
+#include "engine/HostColumns.h"
 #include "engine/InsertMenu.h"
+#include "engine/PluginBuses.h"
+#include "engine/StereoLink.h"
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
 #include "engine/Shortcuts.h"
@@ -219,9 +222,14 @@ private:
         catalog.reserve(static_cast<std::size_t>(types_.size()));
         for (const auto& type : types_)
         {
+            const auto described = type.descriptiveName.toStdString();
+            const auto buses = isPluginBusMark(described)
+                                   ? described
+                                   : pluginBusMarkFromCounts(type.numInputChannels, type.numOutputChannels);
             catalog.push_back(CatalogPlugin { type.name.toStdString(),
                                               type.manufacturerName.toStdString(),
-                                              type.pluginFormatName.toStdString() });
+                                              type.pluginFormatName.toStdString(),
+                                              buses });
         }
 
         const auto query = search_.getText().trim().toStdString();
@@ -293,6 +301,23 @@ bool parseSlotDrag(const juce::var& description, int& channel, int& slot, bool& 
     copy = parts[2] == "copy";
     return true;
 }
+
+class LinkButton : public juce::TextButton
+{
+public:
+    LinkButton()
+    {
+        setButtonText("LINK");
+    }
+
+    void paintButton(juce::Graphics& graphics, bool over, bool down) override
+    {
+        getLookAndFeel().drawButtonBackground(graphics, *this, findColour(juce::TextButton::buttonColourId), over, down);
+        graphics.setColour(findColour(juce::TextButton::textColourOffId));
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        graphics.drawFittedText(getButtonText(), getLocalBounds().reduced(2, 0), juce::Justification::centred, 1);
+    }
+};
 
 class SlotButton : public juce::TextButton,
                    public juce::DragAndDropTarget
@@ -770,6 +795,18 @@ public:
             engine_.setChannelExcluded(channel_, ! excluded);
         };
 
+        addAndMakeVisible(link_);
+        link_.setButtonText("LINK");
+        link_.setMouseClickGrabsKeyboardFocus(false);
+        link_.setClickingTogglesState(false);
+        link_.onClick = [this] { engine_.toggleStereoLink(channel_); };
+        addAndMakeVisible(linkedNote_);
+        linkedNote_.setFont(juce::Font(juce::FontOptions(12.0f)));
+        linkedNote_.setColour(juce::Label::textColourId, theme::dim);
+        linkedNote_.setJustificationType(juce::Justification::centredLeft);
+        linkedNote_.setInterceptsMouseClicks(false, false);
+        linkedNote_.setVisible(false);
+
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             auto& button = slots_[static_cast<std::size_t>(slot)];
@@ -857,10 +894,24 @@ public:
         exclude_.setColour(juce::TextButton::buttonColourId, excluded ? theme::buttonOn : theme::button);
 
         const auto snap = engine_.channelSnapshot(channel_);
+        const bool canLink = canStereoLink(channel_, std::max(0, engine_.visibleChannels()));
+        const bool linked = canLink && engine_.stereoLinked(channel_);
+        const bool showSlots = hostPluginSlotsVisible(channel_, linked);
+        link_.setVisible(canLink && (channel_ & 1) == 0);
+        link_.setColour(juce::TextButton::buttonColourId, linked ? theme::buttonOn : theme::button);
+        link_.setColour(juce::TextButton::textColourOffId, theme::text);
+        link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
+                         + ". One plugin row for the pair. Recording stays one mono WAV per channel.");
+        linkedNote_.setVisible(linked && ! showSlots);
+        if (linked && ! showSlots)
+            linkedNote_.setText("Linked to ch " + juce::String(channel_), juce::dontSendNotification);
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
-            const auto& source = snap.slots[static_cast<std::size_t>(slot)];
             auto& button = slots_[static_cast<std::size_t>(slot)];
+            button.setVisible(showSlots);
+            if (! showSlots)
+                continue;
+            const auto& source = snap.slots[static_cast<std::size_t>(slot)];
             const auto text = slotLabel(slot, source);
             if (button.getButtonText() != text)
                 button.setButtonText(text);
@@ -915,20 +966,26 @@ public:
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(4, 2);
-        area.removeFromLeft(8);
-        number_.setBounds(area.removeFromLeft(46));
-        arm_.setBounds(area.removeFromLeft(62).reduced(2, 4));
-        name_.setBounds(area.removeFromLeft(120));
-        meterArea_ = area.removeFromLeft(18).reduced(3, 3);
-        exclude_.setBounds(area.removeFromLeft(34).reduced(2, 4));
-        gain_.setBounds(area.removeFromRight(72).reduced(2, 4));
-        area.removeFromLeft(4);
-        const int slotBudget = std::max(0, area.getWidth() - 150);
-        const int slotWidth = std::min(128, std::max(56, slotBudget / kSlotsPerChannel));
+        const auto columns = layoutHostColumns(getWidth());
+        const auto row = getLocalBounds().reduced(0, 2);
+        number_.setBounds(columns.channel.x, row.getY(), columns.channel.width, row.getHeight());
+        arm_.setBounds(columns.mode.x, row.getY() + 2, std::max(0, columns.mode.width - 4), std::max(0, row.getHeight() - 4));
+        name_.setBounds(columns.name.x, row.getY(), columns.name.width, row.getHeight());
+        meterArea_ = juce::Rectangle<int>(columns.meter.x + 3, row.getY() + 3,
+                                          std::max(0, columns.meter.width - 6), std::max(0, row.getHeight() - 6));
+        exclude_.setBounds(columns.exclude.x, row.getY() + 2, std::max(0, columns.exclude.width - 4), std::max(0, row.getHeight() - 4));
+        gain_.setBounds(columns.gain.x + 2, row.getY() + 2, std::max(0, columns.gain.width - 4), std::max(0, row.getHeight() - 4));
+        const int linkWidth = (channel_ & 1) == 0 ? 50 : 0;
+        pdc_.setBounds(columns.delay.x, row.getY(), std::max(0, columns.delay.width - linkWidth), row.getHeight());
+        link_.setBounds(columns.delay.x + std::max(0, columns.delay.width - 48), row.getY() + 8, 46, 22);
+        link_.toFront(false);
+        linkedNote_.setBounds(columns.plugins.x + 4, row.getY(), std::max(0, columns.plugins.width - 8), row.getHeight());
+        const int slotWidth = kSlotsPerChannel > 0 ? columns.plugins.width / kSlotsPerChannel : 0;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-            slots_[static_cast<std::size_t>(slot)].setBounds(area.removeFromLeft(slotWidth).reduced(2, 2));
-        pdc_.setBounds(area.reduced(4, 4));
+            slots_[static_cast<std::size_t>(slot)].setBounds(columns.plugins.x + slot * slotWidth + 2,
+                                                            row.getY() + 2,
+                                                            std::max(0, slotWidth - 4),
+                                                            std::max(0, row.getHeight() - 4));
     }
 
     void paint(juce::Graphics& graphics) override
@@ -979,7 +1036,7 @@ public:
     {
         if (event.mods.isPopupMenu())
         {
-            showChannelMenu(engine_, *this, channel_);
+            showChannelMenu(engine_, *this, channel_, nullptr, true);
             return;
         }
         const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
@@ -1059,7 +1116,7 @@ private:
         menu.addItem(1, "Open");
         menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
         menu.addItem(3, "Remove");
-        if (snap.outputChannels > 1)
+        if (snap.outputChannels > 1 && ! engine_.stereoLinked(channel_))
         {
             juce::PopupMenu fold;
             fold.addItem(10, "Use L", true, snap.stereoFold == 0);
@@ -1095,6 +1152,8 @@ private:
     TabKeys tabKeys_;
     juce::TextButton arm_;
     juce::TextButton exclude_;
+    LinkButton link_;
+    juce::Label linkedNote_;
     juce::Label pdc_;
     OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
@@ -1102,11 +1161,81 @@ private:
     std::function<void(int)> onListen_;
 };
 
+class HostColumnHeader : public juce::Component
+{
+public:
+    HostColumnHeader()
+    {
+        setInterceptsMouseClicks(false, false);
+    }
+
+    // Row width can be narrower than this bar when the vertical scrollbar is up.
+    // Labels use that width so they stay on the channel columns.
+    void setLayoutWidth(int width)
+    {
+        if (layoutWidth_ == width)
+            return;
+        layoutWidth_ = width;
+        rebuildCache();
+        repaint();
+    }
+
+    void resized() override
+    {
+        rebuildCache();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (cache_.isValid())
+            graphics.drawImageAt(cache_, 0, 0);
+    }
+
+private:
+    void rebuildCache()
+    {
+        const int width = getWidth();
+        const int height = getHeight();
+        if (width < 1 || height < 1)
+            return;
+        const int layoutWidth = layoutWidth_ > 0 ? std::min(layoutWidth_, width) : width;
+        if (cache_.isValid() && cache_.getWidth() == width && cache_.getHeight() == height && cachedLayout_ == layoutWidth)
+            return;
+
+        cache_ = juce::Image(juce::Image::ARGB, width, height, true);
+        juce::Graphics graphics(cache_);
+        graphics.fillAll(theme::panel);
+        graphics.setColour(theme::panelEdge);
+        graphics.fillRect(0, height - 1, width, 1);
+        graphics.setColour(theme::dim);
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        const auto columns = layoutHostColumns(layoutWidth);
+        auto draw = [&graphics, height](const char* text, HostColumnBox box)
+        {
+            graphics.drawFittedText(text, box.x + 2, 0, std::max(0, box.width - 4), height - 1,
+                                    juce::Justification::centredLeft, 1);
+        };
+        draw(kHostColumnChannel, columns.channel);
+        draw(kHostColumnMode, columns.mode);
+        draw(kHostColumnName, columns.name);
+        draw(kHostColumnDelay, columns.delay);
+        draw(kHostColumnPlugins, columns.plugins);
+        draw(kHostColumnGain, columns.gain);
+        cachedLayout_ = layoutWidth;
+    }
+
+    juce::Image cache_;
+    int layoutWidth_ = 0;
+    int cachedLayout_ = -1;
+};
+
 PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
     : engine_(engine),
       settings_(settings)
 {
     pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
+    columnHeader_ = std::make_unique<HostColumnHeader>();
+    addAndMakeVisible(*columnHeader_);
     addAndMakeVisible(nullButton_);
     nullButton_.setMouseClickGrabsKeyboardFocus(false);
     nullButton_.setTooltip("ALL PLUGIN BYPASS. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
@@ -1269,11 +1398,24 @@ void PluginPage::resized()
     auto bounds = getLocalBounds();
     auto bar = bounds.removeFromTop(32);
     nullButton_.setBounds(bar.removeFromLeft(176).reduced(0, 4));
-    viewport_.setBounds(bounds);
+    auto list = bounds;
+    auto headerArea = list.removeFromTop(kHostColumnHeaderHeight);
+    viewport_.setBounds(list);
     int height = 0;
     for (int rowHeight : heights_)
         height += rowHeight;
-    content_.setSize(std::max(1, viewport_.getMaximumVisibleWidth()), std::max(getHeight(), height));
+    const int contentHeight = std::max(viewport_.getHeight(), height);
+    int contentWidth = std::max(1, viewport_.getMaximumVisibleWidth());
+    content_.setSize(contentWidth, contentHeight);
+    contentWidth = std::max(1, viewport_.getMaximumVisibleWidth());
+    if (content_.getWidth() != contentWidth)
+        content_.setSize(contentWidth, contentHeight);
+    if (columnHeader_ != nullptr)
+    {
+        columnHeader_->setLayoutWidth(contentWidth);
+        columnHeader_->setBounds(headerArea);
+        columnHeader_->toFront(false);
+    }
     empty_.setBounds(content_.getLocalBounds().reduced(24));
     auto area = content_.getLocalBounds();
     for (std::size_t index = 0; index < order_.size(); ++index)

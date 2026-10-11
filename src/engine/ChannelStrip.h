@@ -32,6 +32,9 @@ struct MeterSnapshot
     std::atomic<float> peak { 0.0f };
     std::atomic<bool> clipped { false };
     std::atomic<bool> clearRequested { false };
+    // Set on the message thread when this channel's plugin chain changes.
+    // The audio thread zeros the ballistics, including a latched clip.
+    std::atomic<bool> resetRequested { false };
 };
 
 struct ChannelStrip

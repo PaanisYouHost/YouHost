@@ -12,7 +12,8 @@ namespace youhost
 void showChannelMenu(AudioEngine& engine,
                      juce::Component& target,
                      int channel,
-                     std::function<void(int channel)> beginRename = nullptr);
+                     std::function<void(int channel)> beginRename = nullptr,
+                     bool hostPage = false);
 void showGroupMenu(AudioEngine& engine, juce::Component& target, int group);
 void renameGroup(AudioEngine& engine, int group);
 void showMakeGroupDialog(AudioEngine& engine);

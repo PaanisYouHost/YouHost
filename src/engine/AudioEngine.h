@@ -2,6 +2,7 @@
 
 #include "ChannelEnable.h"
 #include "ChannelListen.h"
+#include "StereoLink.h"
 #include "CrashJournal.h"
 #include "DisplayLayout.h"
 #include "DropoutDetect.h"
@@ -106,6 +107,9 @@ public:
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
     void setSlotBypassed(int channel, int slot, bool bypassed);
     void setStereoFold(int channel, int slot, int fold);
+    bool stereoLinked(int channel) const noexcept;
+    void setStereoLinked(int channel, bool linked);
+    void toggleStereoLink(int channel);
     void setChannelExcluded(int channel, bool excluded);
     void openPluginEditor(int channel, int slot);
     void togglePluginEditor(int channel, int slot);
@@ -264,6 +268,8 @@ private:
     void applyDisplay(const SessionData& data);
     void storeChannelOn(int channel, bool on);
     void bumpDisplay();
+    void armChannelReset(int channel);
+    bool stereoRightIsLinked(int channel) const noexcept;
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void handleDeviceDown();
@@ -338,6 +344,7 @@ private:
     std::array<bool, kMaxChannels> channelColorOwn_ {};
     std::array<int, kMaxChannels> channelGroup_ {};
     std::array<ChannelListen, kMaxChannels> listen_ {};
+    std::array<bool, kMaxChannels> stereoLinked_ {};
     std::array<float, kMaxChannels> outputDb_ {};
     std::array<std::atomic<float>, kMaxChannels> outputGain_ {};
     float waveformGain_ = 1.0f;

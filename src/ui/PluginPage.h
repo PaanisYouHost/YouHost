@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/AudioEngine.h"
+#include "engine/HostColumns.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -12,6 +13,7 @@ namespace youhost
 
 class AppSettings;
 class PluginListWindow;
+class HostColumnHeader;
 
 class PluginPage : public juce::Component,
                    public juce::DragAndDropContainer
@@ -37,6 +39,7 @@ private:
     AudioEngine& engine_;
     AppSettings& settings_;
     juce::TextButton nullButton_ { "Null test" };
+    std::unique_ptr<HostColumnHeader> columnHeader_;
     juce::Component content_;
     juce::Label empty_;
     juce::Viewport viewport_;

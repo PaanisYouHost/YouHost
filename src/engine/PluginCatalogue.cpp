@@ -1,4 +1,5 @@
 #include "PluginCatalogue.h"
+#include "PluginBuses.h"
 #include "PluginLoadPace.h"
 #include "AppSettings.h"
 #include "ScanJobs.h"
@@ -65,6 +66,49 @@ struct Outcome
     juce::String reason;
     juce::OwnedArray<juce::PluginDescription> found;
 };
+
+bool layoutSupported(juce::AudioPluginInstance& instance, int inCh, int outCh)
+{
+    juce::AudioProcessor::BusesLayout layout;
+    const int inputs = instance.getBusCount(true);
+    const int outputs = instance.getBusCount(false);
+    layout.inputBuses.resize(inputs);
+    layout.outputBuses.resize(outputs);
+    const auto inSet = inCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    const auto outSet = outCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    for (int bus = 0; bus < inputs; ++bus)
+        layout.inputBuses.getReference(bus) = bus == 0 ? inSet : juce::AudioChannelSet::disabled();
+    for (int bus = 0; bus < outputs; ++bus)
+        layout.outputBuses.getReference(bus) = bus == 0 ? outSet : juce::AudioChannelSet::disabled();
+    return instance.checkBusesLayoutSupported(layout);
+}
+
+void stampBusMark(juce::AudioPluginFormat& format, juce::PluginDescription& description)
+{
+    juce::String error;
+    std::unique_ptr<juce::AudioPluginInstance> instance;
+    try
+    {
+        instance = format.createInstanceFromDescription(description, 48000.0, 512, error);
+    }
+    catch (...)
+    {
+        instance.reset();
+    }
+
+    juce::String mark;
+    if (instance != nullptr)
+    {
+        const bool mono = layoutSupported(*instance, 1, 1);
+        const bool stereo = layoutSupported(*instance, 2, 2);
+        mark = juce::String(pluginBusMark(mono, stereo));
+        instance.reset();
+    }
+    if (mark.isEmpty())
+        mark = juce::String(pluginBusMarkFromCounts(description.numInputChannels, description.numOutputChannels));
+    if (mark.isNotEmpty() && (description.descriptiveName.isEmpty() || description.descriptiveName == description.name))
+        description.descriptiveName = mark;
+}
 
 void lowerScannerPriority()
 {
@@ -219,8 +263,11 @@ void ScanWorker::run()
                 reply.setAttribute("reason", reason);
                 for (auto* description : found)
                     if (description != nullptr)
+                    {
+                        stampBusMark(*format, *description);
                         if (auto xml = description->createXml())
                             reply.addChildElement(xml.release());
+                    }
             }
             else
             {

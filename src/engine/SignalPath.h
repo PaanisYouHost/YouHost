@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -142,6 +143,61 @@ inline bool sameFloatBits(float left, float right) noexcept
     std::memcpy(&a, &left, sizeof(a));
     std::memcpy(&b, &right, sizeof(b));
     return a == b;
+}
+
+// Above full scale, so a real clip still latches, and finite, so a meter can fall.
+inline constexpr float kPluginOutputCeiling = 4.0f;
+
+struct SanitizeReport
+{
+    bool nonFinite = false;
+    bool clamped = false;
+};
+
+// NaN and Inf become silence. Finite values outside the ceiling are clamped.
+// No allocation. The caller logs on the message thread when nonFinite is set.
+inline SanitizeReport sanitizeAudioBlock(float* data, int numSamples) noexcept
+{
+    SanitizeReport report;
+    if (data == nullptr || numSamples <= 0)
+        return report;
+    for (int index = 0; index < numSamples; ++index)
+    {
+        const float sample = data[index];
+        if (! std::isfinite(sample))
+        {
+            data[index] = 0.0f;
+            report.nonFinite = true;
+        }
+        else if (sample > kPluginOutputCeiling)
+        {
+            data[index] = kPluginOutputCeiling;
+            report.clamped = true;
+        }
+        else if (sample < -kPluginOutputCeiling)
+        {
+            data[index] = -kPluginOutputCeiling;
+            report.clamped = true;
+        }
+    }
+    return report;
+}
+
+// Recordings stay bit-exact for finite samples. Only NaN and Inf are silenced.
+inline void silenceNonFinite(float* data, int numSamples) noexcept
+{
+    if (data == nullptr || numSamples <= 0)
+        return;
+    for (int index = 0; index < numSamples; ++index)
+        if (! std::isfinite(data[index]))
+            data[index] = 0.0f;
+}
+
+inline float finiteTrimGain(float linear) noexcept
+{
+    if (! std::isfinite(linear))
+        return 1.0f;
+    return linear;
 }
 
 // Unity gain is the bit pattern of 1 and is not applied. Any other value is a straight multiply.

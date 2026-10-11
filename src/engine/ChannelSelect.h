@@ -76,17 +76,17 @@ inline ChannelSelection selectAllChannels(const int* channels, int count)
     return selection;
 }
 
-// Select-all is the REC page only. A text field keeps the key for typing.
+// Select-all is the REC page and the HOST page. A text field keeps the key.
 inline bool selectAllShortcutApplies(int page, bool textFieldFocused) noexcept
 {
-    return page == 1 && ! textFieldFocused;
+    return (page == 1 || page == 2) && ! textFieldFocused;
 }
 
-// Cmd+G matches the Group button and "Make group from selection". REC page
-// only, and a text field keeps the key.
+// Cmd+G matches the Group button and "Make group from selection" on REC and HOST.
+// A text field keeps the key.
 inline bool makeGroupShortcutApplies(int page, bool textFieldFocused) noexcept
 {
-    return page == 1 && ! textFieldFocused;
+    return (page == 1 || page == 2) && ! textFieldFocused;
 }
 
 } // namespace youhost

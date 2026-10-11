@@ -4,6 +4,7 @@
 #include "ChannelSelect.h"
 #include "OutputGain.h"
 #include "SignalPath.h"
+#include "StereoLink.h"
 #include "WaveformScale.h"
 #include "DeviceWatch.h"
 #include "RecordLock.h"
@@ -780,6 +781,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     // The tap scans every channel. sessionAudioLimit_ is only the plugin CPU
     // limit: using it as the scan length made Play open no files.
     const int sessionChannels = sessionAudioLimit_.load(std::memory_order_relaxed);
+    if (inputChannelData != nullptr && numSamples > 0)
+        for (int index = 0; index < numInputChannels; ++index)
+            if (inputChannelData[index] != nullptr)
+                silenceNonFinite(const_cast<float*>(inputChannelData[index]), numSamples);
     if (recorder_ != nullptr)
         recorder_->processRecord(inputChannelData,
                                  numInputChannels,
@@ -836,15 +841,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         {
             if (! channelIsOn(enabledLow, enabledHigh, channel))
                 continue;
-            const float gain = outputGain_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
-            if (sameFloatBits(gain, 1.0f))
-                continue;
+            const float gain = finiteTrimGain(outputGain_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed));
             const int packed = config.routing.outputPacked[static_cast<std::size_t>(channel)];
             if (packed < 0 || packed >= numOutputChannels)
                 continue;
             float* output = outputChannelData[packed];
-            if (output != nullptr)
+            if (output == nullptr)
+                continue;
+            if (! sameFloatBits(gain, 1.0f))
                 applyOutputTrim(output, numSamples, gain);
+            sanitizeAudioBlock(output, numSamples);
         }
     }
 
@@ -1478,34 +1484,95 @@ ChannelSnapshot AudioEngine::channelSnapshot(int channel) const
     return rack_->snapshot(channel);
 }
 
+void AudioEngine::armChannelReset(int channel)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    strips_[static_cast<std::size_t>(channel)].meter.resetRequested.store(true, std::memory_order_relaxed);
+    if (rack_ != nullptr)
+        rack_->requestChannelReset(channel);
+}
+
+bool AudioEngine::stereoRightIsLinked(int channel) const noexcept
+{
+    return (channel & 1) == 1 && channel > 0 && stereoLinked_[static_cast<std::size_t>(channel - 1)];
+}
+
 void AudioEngine::loadPlugin(int channel, int slot, const juce::PluginDescription& description, bool openEditor)
 {
+    if (stereoRightIsLinked(channel))
+        return;
     if (rack_ != nullptr)
         rack_->loadPlugin(channel, slot, description, {}, false, true, openEditor);
+    armChannelReset(channel);
 }
 
 void AudioEngine::removePlugin(int channel, int slot)
 {
     if (rack_ != nullptr)
         rack_->removePlugin(channel, slot);
+    armChannelReset(channel);
 }
 
 void AudioEngine::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
 {
+    if (stereoRightIsLinked(toChannel))
+        return;
     if (rack_ != nullptr)
         rack_->transferPlugin(fromChannel, fromSlot, toChannel, toSlot, copy);
+    armChannelReset(fromChannel);
+    armChannelReset(toChannel);
 }
 
 void AudioEngine::setStereoFold(int channel, int slot, int fold)
 {
     if (rack_ != nullptr)
         rack_->setStereoFold(channel, slot, fold);
+    armChannelReset(channel);
+}
+
+bool AudioEngine::stereoLinked(int channel) const noexcept
+{
+    const int left = stereoLeftIndex(channel);
+    if (left < 0)
+        return false;
+    return stereoLinked_[static_cast<std::size_t>(left)];
+}
+
+void AudioEngine::toggleStereoLink(int channel)
+{
+    setStereoLinked(channel, ! stereoLinked(channel));
+}
+
+void AudioEngine::setStereoLinked(int channel, bool linked)
+{
+    if (! canStereoLink(channel, kMaxChannels))
+        return;
+    const int left = stereoLeftIndex(channel);
+    const int right = stereoRightIndex(channel);
+    if (left < 0 || right < 0)
+        return;
+    if (stereoLinked_[static_cast<std::size_t>(left)] == linked)
+        return;
+    if (linked && rack_ != nullptr)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            if (rack_->snapshot(right).slots[static_cast<std::size_t>(slot)].occupied)
+                rack_->removePlugin(right, slot);
+    }
+    stereoLinked_[static_cast<std::size_t>(left)] = linked;
+    if (rack_ != nullptr)
+        rack_->setStereoLink(left, linked);
+    armChannelReset(left);
+    armChannelReset(right);
+    bumpDisplay();
 }
 
 void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
 {
     if (rack_ != nullptr)
         rack_->setBypassed(channel, slot, bypassed);
+    armChannelReset(channel);
 }
 
 void AudioEngine::setChannelExcluded(int channel, bool excluded)
@@ -2114,6 +2181,7 @@ void AudioEngine::resetToCleanSession()
         channelColor_[index] = 0;
         channelColorOwn_[index] = false;
         channelGroup_[index] = -1;
+        stereoLinked_[index] = false;
         strips_[index].excludeFromCompensation = false;
         audible[index] = true;
         setChannelOnBit(low, high, channel, true);
@@ -2897,6 +2965,7 @@ void AudioEngine::captureDisplay(SessionData& data) const
         destination.listen = listen_[static_cast<std::size_t>(channel)];
         destination.recordEnabled = destination.listen == ChannelListen::record;
         destination.outputDb = outputDb_[static_cast<std::size_t>(channel)];
+        destination.stereoLink = (channel & 1) == 0 && stereoLinked_[static_cast<std::size_t>(channel)];
     }
     data.groups = groups_;
 }
@@ -2914,6 +2983,7 @@ void AudioEngine::applyDisplay(const SessionData& data)
         const int group = source.group;
         channelGroup_[static_cast<std::size_t>(channel)] = (group >= 0 && group < kMaxDisplayGroups) ? group : -1;
         listen_[static_cast<std::size_t>(channel)] = source.listen;
+        stereoLinked_[static_cast<std::size_t>(channel)] = (channel & 1) == 0 && source.stereoLink;
         if (recorder_ != nullptr)
             recorder_->setArmed(channel, channelListenRecords(source.listen));
         outputDb_[static_cast<std::size_t>(channel)] = snapOutputDb(source.outputDb);
@@ -2929,7 +2999,11 @@ void AudioEngine::applyDisplay(const SessionData& data)
     selection_.clear();
     selectionAnchor_ = 0;
     if (rack_ != nullptr)
+    {
         rack_->setAudibleAll(audible);
+        for (int channel = 0; channel < kMaxChannels; channel += 2)
+            rack_->setStereoLink(channel, stereoLinked_[static_cast<std::size_t>(channel)]);
+    }
     ++displayRevision_;
 }
 

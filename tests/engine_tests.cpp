@@ -32,7 +32,10 @@
 #include "engine/CrashJournal.h"
 #include "engine/DeviceWatch.h"
 #include "engine/HostPath.h"
+#include "engine/HostColumns.h"
 #include "engine/InsertMenu.h"
+#include "engine/PluginBuses.h"
+#include "engine/StereoLink.h"
 #include "engine/PluginLoadPace.h"
 #include "engine/PluginMoves.h"
 #include "engine/StallWatch.h"
@@ -52,6 +55,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <memory>
 #include <new>
@@ -1016,8 +1020,9 @@ void testChannelPick()
     CHECK(folded.channels[1] == 3);
     CHECK(folded.anchor == 0);
     CHECK(youhost::makeGroupShortcutApplies(1, false));
-    CHECK(! youhost::makeGroupShortcutApplies(2, false));
+    CHECK(youhost::makeGroupShortcutApplies(2, false));
     CHECK(! youhost::makeGroupShortcutApplies(1, true));
+    CHECK(! youhost::makeGroupShortcutApplies(2, true));
     const auto grouped = youhost::planNewGroup(! folded.channels.empty(), 0, "All", 2);
     CHECK(grouped.created);
     CHECK(grouped.collapsed);
@@ -1176,7 +1181,8 @@ void testShortcutsMatchTheHelp()
     CHECK(! youhost::matchShortcut(shiftedA).has_value());
     CHECK(youhost::selectAllShortcutApplies(1, false));
     CHECK(! youhost::selectAllShortcutApplies(1, true));
-    CHECK(! youhost::selectAllShortcutApplies(2, false));
+    CHECK(youhost::selectAllShortcutApplies(2, false));
+    CHECK(! youhost::selectAllShortcutApplies(2, true));
 
     CHECK(help.find("5  Open or close SCAN") == std::string::npos);
     CHECK(help.find("5  Open or close LATENCY") != std::string::npos);
@@ -1189,12 +1195,15 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Backup") != std::string::npos);
     CHECK(help.find("Shift+click") != std::string::npos);
     CHECK(help.find("Cmd+click") != std::string::npos);
-    CHECK(help.find("Cmd+A or A  Select every visible channel on the REC page") != std::string::npos);
-    CHECK(help.find("does not select on the HOST page") != std::string::npos);
-    CHECK(help.find("Cmd+G  On the REC page, name a group from the selected channels") != std::string::npos);
+    CHECK(help.find("Cmd+A or A  Select every visible channel on the REC page and the HOST page") != std::string::npos);
+    CHECK(help.find("Click, Shift+click, and Cmd+click select on HOST the same way") != std::string::npos);
+    CHECK(help.find("Cmd+G  On the REC page and the HOST page, name a group from the selected channels") != std::string::npos);
     CHECK(help.find("Make group from selection") != std::string::npos);
     CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
-    CHECK(help.find("Cmd+G does nothing on the HOST page") != std::string::npos);
+    CHECK(help.find("Cmd+G does nothing while a text field has focus") != std::string::npos);
+    CHECK(help.find("Stereo link with ch N+1") != std::string::npos);
+    CHECK(help.find("CH, MODE, NAME, DELAY COMP, PLUGINS, and GAIN") != std::string::npos);
+    CHECK(help.find("M, ST, or M/ST") != std::string::npos);
     CHECK(help.find("makes it tall enough to read") != std::string::npos);
     CHECK(help.find("FIT shows every lane again") != std::string::npos);
     CHECK(help.find("It does the same as F and Option+R") != std::string::npos);
@@ -1498,10 +1507,10 @@ void testInsertMenuAndStall()
     CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
 
     std::vector<youhost::CatalogPlugin> plugins {
-        { "Pro-Q 3", "FabFilter", "AudioUnit" },
-        { "Pro-Q 3", "FabFilter", "VST3" },
-        { "De-Feedback", "Alpha Labs", "AudioUnit" },
-        { "Saturn 2", "FabFilter", "VST3" }
+        { "Pro-Q 3", "FabFilter", "AudioUnit", "" },
+        { "Pro-Q 3", "FabFilter", "VST3", "" },
+        { "De-Feedback", "Alpha Labs", "AudioUnit", "" },
+        { "Saturn 2", "FabFilter", "VST3", "" }
     };
     const auto all = youhost::groupInsertPlugins(plugins, "");
     CHECK(all.size() == 2);
@@ -1521,7 +1530,7 @@ void testInsertMenuAndStall()
     CHECK(proq.size() == 1);
     CHECK(proq[0].plugins.size() == 2);
 
-    std::vector<youhost::CatalogPlugin> unknown { { "Thing", "  ", "VST3" } };
+    std::vector<youhost::CatalogPlugin> unknown { { "Thing", "  ", "VST3", "" } };
     const auto grouped = youhost::groupInsertPlugins(unknown, "");
     CHECK(grouped.size() == 1);
     CHECK(grouped[0].manufacturer == "Unknown");
@@ -3210,15 +3219,18 @@ void testKeyDispatch()
 
     ran(commandA, 1, false, youhost::ShortcutId::selectAll);
     ran(plainA, 1, false, youhost::ShortcutId::selectAll);
+    ran(commandA, 2, false, youhost::ShortcutId::selectAll);
+    ran(plainA, 2, false, youhost::ShortcutId::selectAll);
     ran(commandG, 1, false, youhost::ShortcutId::makeGroup);
+    ran(commandG, 2, false, youhost::ShortcutId::makeGroup);
     ran(plainG, 1, false, youhost::ShortcutId::goToChannel);
     ran(plainG, 2, false, youhost::ShortcutId::goToChannel);
-    CHECK(! youhost::dispatchRawKey(commandA, 2, false).has_value());
     CHECK(! youhost::dispatchRawKey(commandA, 1, true).has_value());
-    CHECK(! youhost::dispatchRawKey(plainA, 2, false).has_value());
+    CHECK(! youhost::dispatchRawKey(commandA, 2, true).has_value());
     CHECK(! youhost::dispatchRawKey(plainA, 1, true).has_value());
-    CHECK(! youhost::dispatchRawKey(commandG, 2, false).has_value());
+    CHECK(! youhost::dispatchRawKey(plainA, 2, true).has_value());
     CHECK(! youhost::dispatchRawKey(commandG, 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(commandG, 2, true).has_value());
     CHECK(! youhost::dispatchRawKey(macLetter('a', true, false, false), 1, false).has_value());
 
     ran(macLetter('1', false, false, false), 1, false, youhost::ShortcutId::recPage);
@@ -3814,10 +3826,12 @@ void testReleaseChecklist()
              && youhost::commandForRawKey(menuG) == youhost::kMakeGroupCommandId
              && menuSelect.has_value() && *menuSelect == youhost::ShortcutId::selectAll
              && menuGroup.has_value() && *menuGroup == youhost::ShortcutId::makeGroup
-             && ! youhost::dispatchRawKey(menuA, 2, false).has_value()
+             && youhost::dispatchRawKey(menuA, 2, false) == youhost::ShortcutId::selectAll
              && ! youhost::dispatchRawKey(menuA, 1, true).has_value()
-             && ! youhost::dispatchRawKey(menuG, 2, false).has_value()
+             && ! youhost::dispatchRawKey(menuA, 2, true).has_value()
+             && youhost::dispatchRawKey(menuG, 2, false) == youhost::ShortcutId::makeGroup
              && ! youhost::dispatchRawKey(menuG, 1, true).has_value()
+             && ! youhost::dispatchRawKey(menuG, 2, true).has_value()
              && mainUi.find("dispatchRawKey") != std::string::npos
              && mainUi.find("\"Edit\"") != std::string::npos
              && mainUi.find("\"Select All\"") != std::string::npos
@@ -3849,7 +3863,7 @@ void testReleaseChecklist()
     const auto menuHandler = menuAt == std::string::npos || menuEnd == std::string::npos
                                  ? std::string()
                                  : mainUi.substr(menuAt, menuEnd - menuAt);
-    const auto popupAt = hostUi.find("showChannelMenu(engine_, *this, channel_)");
+    const auto popupAt = hostUi.find("showChannelMenu(engine_, *this, channel_, nullptr, true)");
     const auto popupHandler = popupAt == std::string::npos ? std::string() : hostUi.substr(popupAt, 80);
     const auto copyStart = engineSrc.find("bool AudioEngine::beginSessionCopy");
     const auto copyEnd = engineSrc.find("AudioEngine::", copyStart + 40);
@@ -3920,6 +3934,54 @@ void testReleaseChecklist()
              && fastBody.find("usleep") == std::string::npos
              && fastBody.find("clonefile") != std::string::npos
              && copyHeader.find("FICLONE") != std::string::npos);
+
+    const auto columns = youhost::layoutHostColumns(1200);
+    item("Cmd+A and Cmd+G work on HOST through the real key dispatch",
+         youhost::dispatchRawKey(macLetter('a', false, true, false), 1, false) == youhost::ShortcutId::selectAll
+             && youhost::dispatchRawKey(macLetter('a', false, true, false), 2, false) == youhost::ShortcutId::selectAll
+             && youhost::dispatchRawKey(macLetter('g', false, true, false), 1, false) == youhost::ShortcutId::makeGroup
+             && youhost::dispatchRawKey(macLetter('g', false, true, false), 2, false) == youhost::ShortcutId::makeGroup
+             && ! youhost::dispatchRawKey(macLetter('a', false, true, false), 2, true).has_value()
+             && ! youhost::dispatchRawKey(macLetter('g', false, true, false), 2, true).has_value()
+             && mainUi.find("dispatchRawKey(raw, page_, false)") != std::string::npos
+             && mainUi.find("showMakeGroupDialog") != std::string::npos);
+    item("HOST header is fixed, cached, and aligned CH MODE NAME DELAY COMP PLUGINS GAIN",
+         columns.channel.x < columns.mode.x
+             && columns.mode.x < columns.name.x
+             && columns.name.x < columns.delay.x
+             && columns.delay.x < columns.plugins.x
+             && columns.plugins.x < columns.gain.x
+             && std::string(youhost::kHostColumnChannel) == "CH"
+             && std::string(youhost::kHostColumnMode) == "MODE"
+             && std::string(youhost::kHostColumnName) == "NAME"
+             && std::string(youhost::kHostColumnDelay) == "DELAY COMP"
+             && std::string(youhost::kHostColumnPlugins) == "PLUGINS"
+             && std::string(youhost::kHostColumnGain) == "GAIN"
+             && hostUi.find("columnHeader_") != std::string::npos
+             && hostUi.find("rebuildCache") != std::string::npos
+             && hostUi.find("drawImageAt") != std::string::npos
+             && hostUi.find("kHostColumnHeaderHeight") != std::string::npos);
+    item("NaN from a plugin is silenced and an empty chain is passthrough",
+         engineSrc.find("sanitizeAudioBlock") != std::string::npos
+             && engineSrc.find("silenceNonFinite") != std::string::npos
+             && engineSrc.find("armChannelReset") != std::string::npos
+             && engineSrc.find("resetRequested") != std::string::npos);
+    item("stereo link is HOST only and does not touch the recorder",
+         youhost::stereoLinkMenuLabel(0) == "Stereo link with ch 2"
+             && youhost::stereoLinkMenuLabel(1) == "Stereo link with ch 2"
+             && ! youhost::hostPluginSlotsVisible(1, true)
+             && youhost::hostPluginSlotsVisible(0, true)
+             && youhost::pluginProcessCallsForPair(true, true) == 1
+             && youhost::pluginProcessCallsForPair(false, true) == 2
+             && hostUi.find("Stereo link with ch") != std::string::npos
+             && hostUi.find("showChannelMenu(engine_, *this, channel_, nullptr, true)") != std::string::npos
+             && recorderSrc.find("stereoLink") == std::string::npos
+             && recorderSrc.find("setStereoLink") == std::string::npos);
+    item("plugin list marks M, ST, and M/ST",
+         youhost::pluginBusMark(true, false) == "M"
+             && youhost::pluginBusMark(false, true) == "ST"
+             && youhost::pluginBusMark(true, true) == "M/ST"
+             && hostUi.find("isPluginBusMark") != std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
@@ -4062,6 +4124,97 @@ void testSaveAsCopySpeed()
     std::filesystem::remove_all(root, error);
 }
 
+void testNaNStereoAndColumns()
+{
+    float dirty[4] = { std::nanf(""), std::numeric_limits<float>::infinity(), 100.0f, 0.25f };
+    const auto report = youhost::sanitizeAudioBlock(dirty, 4);
+    CHECK(report.nonFinite);
+    CHECK(report.clamped);
+    CHECK(dirty[0] == 0.0f);
+    CHECK(dirty[1] == 0.0f);
+    CHECK(dirty[2] == youhost::kPluginOutputCeiling);
+    CHECK(dirty[3] == 0.25f);
+
+    youhost::ChannelStrip strip;
+    strip.meterState.meanSquare = std::nanf("");
+    strip.meterState.heldPeak = std::numeric_limits<float>::infinity();
+    strip.meterState.clipped = true;
+    strip.meter.clipped.store(true);
+    strip.meter.resetRequested.store(true);
+    float silence[8] = {};
+    const auto gains = youhost::blockMeterGains(youhost::meterTimingFor(48000.0), 8);
+    youhost::updateMeter(strip, silence, 8, gains);
+    CHECK(strip.meter.rms.load() == 0.0f);
+    CHECK(strip.meter.peak.load() == 0.0f);
+    CHECK(strip.meter.clipped.load() == false);
+
+    float poisoned[4] = { std::nanf(""), 1.0e20f, std::nanf(""), 3.0f };
+    int write = 2;
+    youhost::resetDelayLine(poisoned, 4, write);
+    CHECK(write == 0);
+    for (float sample : poisoned)
+        CHECK(sample == 0.0f);
+
+    float dry[4] = { 0.1f, -0.2f, 0.3f, -0.4f };
+    float output[4] = { std::nanf(""), std::nanf(""), std::nanf(""), std::nanf("") };
+    youhost::emptyChainPassthrough(output, dry, 4);
+    for (int index = 0; index < 4; ++index)
+        CHECK(output[index] == dry[index]);
+
+    int calls = 0;
+    float left[4] = { 0.2f, 0.2f, 0.2f, 0.2f };
+    float right[4] = { -0.5f, -0.5f, -0.5f, -0.5f };
+    calls = youhost::runLinkedPair(left, right, 4, true, true, [](float* a, float* b, int count)
+    {
+        for (int index = 0; index < count; ++index)
+        {
+            a[index] = std::nanf("");
+            if (b != nullptr)
+                b[index] = 1.0e9f;
+        }
+    });
+    CHECK(calls == 1);
+    youhost::sanitizeAudioBlock(left, 4);
+    youhost::sanitizeAudioBlock(right, 4);
+    CHECK(left[0] == 0.0f);
+    CHECK(right[0] == youhost::kPluginOutputCeiling);
+    CHECK(right[0] != left[1]);
+
+    calls = youhost::runLinkedPair(left, right, 4, false, true, [](float*, float*, int) {});
+    CHECK(calls == 2);
+
+    youhost::SessionChannelRecord linked;
+    linked.index = 0;
+    linked.link = true;
+    linked.listen = "rec";
+    youhost::SessionDocumentModel model;
+    model.channels.push_back(linked);
+    const auto written = youhost::writeSessionModel(model);
+    const auto* channel = findChannel(written, "0");
+    CHECK(channel != nullptr);
+    CHECK(youhost::sessionAttributeBool(*channel, "link", false));
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(written, round));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].link);
+    CHECK(round.channels[0].listen == "rec");
+
+    std::vector<youhost::CatalogPlugin> plugins {
+        { "AUDelay", "Apple", "AudioUnit", "ST" },
+        { "AUGraphicEQ", "Apple", "AudioUnit", "M/ST" },
+        { "MonoGain", "YouHost", "VST3", "M" }
+    };
+    const auto rows = youhost::groupInsertPlugins(plugins, "");
+    CHECK(rows.size() == 2);
+    CHECK(rows[0].plugins[0].label == "AUDelay ST");
+    CHECK(rows[0].plugins[1].label == "AUGraphicEQ M/ST");
+    CHECK(rows[1].plugins[0].label == "MonoGain M");
+
+    const auto header = youhost::layoutHostColumns(960);
+    CHECK(header.delay.x + header.delay.width == header.plugins.x);
+    CHECK(header.plugins.x + header.plugins.width == header.gain.x);
+}
+
 } // namespace
 
 int main()
@@ -4109,6 +4262,7 @@ int main()
     testPluginLoadPace();
     testShortcutsMatchTheHelp();
     testKeyDispatch();
+    testNaNStereoAndColumns();
     testChannelColorRules();
     testSaveAsCopySpeed();
     testGroupsFoldAndPalette();

@@ -150,7 +150,8 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         const bool customGain = std::fabs(source.outputDb) > 0.01f;
         const bool coloured = source.color != 0;
         const bool grouped = source.group >= 0;
-        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! customGain && ! coloured && ! grouped)
+        const bool linked = source.stereoLink;
+        if (! anySlot && ! source.excludeFromCompensation && ! named && ! customArm && ! customGain && ! coloured && ! grouped && ! linked)
             continue;
 
         auto* element = root.createNewChildElement("Channel");
@@ -166,6 +167,8 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
             element->setAttribute("group", source.group);
         if (named)
             element->setAttribute("name", source.name);
+        if (linked)
+            element->setAttribute("link", 1);
 
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
@@ -293,6 +296,7 @@ bool readSessionFile(const juce::File& file, SessionData& data)
         if (destination.group < 0 || destination.group >= kMaxDisplayGroups)
             destination.group = -1;
         destination.name = channel->getStringAttribute("name");
+        destination.stereoLink = channel->getBoolAttribute("link", false);
 
         for (auto* slot = channel->getChildByName("Slot"); slot != nullptr; slot = slot->getNextElementWithTagName("Slot"))
         {

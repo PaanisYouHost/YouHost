@@ -143,7 +143,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return true;
     if (listed("Meters", { "peak", "reference" }))
         return true;
-    if (listed("Channel", { "index", "exclude", "record", "listen", "outputDb", "color", "colorOwn", "group", "name" }))
+    if (listed("Channel", { "index", "exclude", "record", "listen", "outputDb", "color", "colorOwn", "group", "name", "link" }))
         return true;
     if (listed("Slot", { "index", "bypass", "fold" }))
         return true;
@@ -266,6 +266,7 @@ struct SessionChannelRecord
     int color = 0;
     bool colorOwn = false;
     double outputDb = 0.0;
+    bool link = false;
     std::vector<SessionSlotRecord> slots;
 };
 
@@ -381,6 +382,7 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
             record.listen = "off";
         else
             record.listen = "rec";
+        record.link = sessionAttributeBool(channel, "link", false);
 
         for (const auto& slot : channel.children)
         {
@@ -525,6 +527,8 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
             sessionSetAttribute(element, "group", std::to_string(channel.group));
         if (! channel.name.empty())
             sessionSetAttribute(element, "name", channel.name);
+        if (channel.link)
+            sessionSetAttribute(element, "link", "1");
 
         for (const auto& slot : channel.slots)
         {
