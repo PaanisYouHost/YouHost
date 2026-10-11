@@ -48,6 +48,7 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | No virtual autopick | Startup does not open a virtual or aggregate device unless that device was the last one chosen. A saved virtual name falls through to a real card. |
 | Background polling | While a chosen card is up, no timer scans the device list. The 30 Hz timer samples CPU. Audio setup's 4 Hz timer reads the cached list. A scan runs when the device is lost, the inventory is empty, or the user picks another card. |
 | Cmd+A and Cmd+G | Edit menu commands. A macOS Command event (no text character, uppercase key code) selects every visible channel or makes a group on REC. HOST and a focused text field do not. The same dispatch covers 1–5, Space, Cmd+Space, Cmd+S, Cmd+Shift+S, T/R, the arrows, and G. |
+| Group meters | REC and HOST group bars use one thin meter track. On REC it runs down almost the full strip. On HOST it runs across the bar. A level change repaints that track only. The checklist renders `rec_group_meter.ppm` and checks the track covers the bar. |
 
 ## Windows to photograph on a Mac release
 

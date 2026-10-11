@@ -442,7 +442,44 @@ public:
 
     void refresh()
     {
-        repaint();
+        const int channels = std::max(0, engine_.visibleChannels());
+        const int revision = engine_.displayRevision();
+        float level = 0.0f;
+        bool clip = false;
+        int count = 0;
+        bool plugins = false;
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            if (engine_.channelGroup(channel) != group_)
+                continue;
+            ++count;
+            level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
+            clip = clip || engine_.clipFor(channel);
+            if (plugins)
+                continue;
+            const auto snap = engine_.channelSnapshot(channel);
+            for (const auto& slot : snap.slots)
+                plugins = plugins || slot.occupied;
+        }
+
+        const bool chrome = revision != revision_ || count != count_ || plugins != plugins_ || clip != clip_;
+        revision_ = revision;
+        count_ = count;
+        plugins_ = plugins;
+        clip_ = clip;
+        if (chrome)
+        {
+            level_ = level;
+            repaint();
+            return;
+        }
+        if (std::fabs(level - level_) <= 0.00001f)
+            return;
+        level_ = level;
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        repaint(juce::Rectangle<float>(track.x, track.y, track.width, track.height).getSmallestIntegerContainer());
     }
 
     void mouseDown(const juce::MouseEvent& event) override
@@ -483,26 +520,6 @@ public:
         }
         graphics.setColour(ink);
 
-        const int channels = std::max(0, engine_.visibleChannels());
-        float level = 0.0f;
-        bool clip = false;
-        bool plugins = false;
-        int count = 0;
-        for (int channel = 0; channel < channels; ++channel)
-        {
-            if (engine_.channelGroup(channel) != group_)
-                continue;
-            ++count;
-            level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
-            clip = clip || engine_.clipFor(channel);
-            if (! plugins)
-            {
-                const auto snap = engine_.channelSnapshot(channel);
-                for (const auto& slot : snap.slots)
-                    plugins = plugins || slot.occupied;
-            }
-        }
-
         constexpr int nameX = 16;
         constexpr int nameW = 180;
         constexpr int foldX = 204;
@@ -511,7 +528,6 @@ public:
         constexpr int clipW = 48;
         constexpr int fxX = 340;
         constexpr int fxW = 36;
-        constexpr int meterX = 384;
 
         graphics.setColour(ink);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
@@ -524,7 +540,7 @@ public:
                           true);
 
         graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
-        graphics.drawText(juce::String(groupFoldLabel(engine_.groupCollapsed(group_), count)),
+        graphics.drawText(juce::String(groupFoldLabel(engine_.groupCollapsed(group_), count_)),
                           foldX,
                           0,
                           foldW,
@@ -533,20 +549,23 @@ public:
                           true);
 
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        if (clip)
+        if (clip_)
             graphics.drawText("CLIP", clipX, 0, clipW, getHeight(), juce::Justification::centredLeft, true);
-        if (plugins)
+        if (plugins_)
             graphics.drawText("FX", fxX, 0, fxW, getHeight(), juce::Justification::centredLeft, true);
 
-        auto meter = juce::Rectangle<int>(meterX, 6, std::max(0, getWidth() - meterX - 12), std::max(0, getHeight() - 12));
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        const auto meter = juce::Rectangle<float>(track.x, track.y, track.width, track.height);
         graphics.setColour(theme::meterTrack);
-        graphics.fillRoundedRectangle(meter.toFloat(), 2.0f);
-        if (level > 0.0f && meter.getWidth() > 1)
+        graphics.fillRoundedRectangle(meter, 2.0f);
+        if (level_ > 0.0f && meter.getWidth() > 1.0f)
         {
             const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(referenceDb_);
-            const float filled = normaliseDb(gainToDb(level), span) * static_cast<float>(meter.getWidth());
-            graphics.setColour(meterLevelColour(level, referenceDb_));
-            graphics.fillRect(meter.getX(), meter.getY(), static_cast<int>(filled), meter.getHeight());
+            const float filled = normaliseDb(gainToDb(level_), span) * meter.getWidth();
+            graphics.setColour(meterLevelColour(level_, referenceDb_));
+            graphics.fillRect(meter.getX(), meter.getY(), filled, meter.getHeight());
         }
 
         graphics.setColour(juce::Colour(0xff8b95a8));
@@ -555,8 +574,14 @@ public:
 
     void setMeterMode(bool peak, int referenceDb)
     {
+        if (showPeak_ == peak && referenceDb_ == referenceDb)
+            return;
         showPeak_ = peak;
         referenceDb_ = referenceDb;
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        repaint(juce::Rectangle<float>(track.x, track.y, track.width, track.height).getSmallestIntegerContainer());
     }
 
 private:
@@ -564,6 +589,11 @@ private:
     int group_ = 0;
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
+    int revision_ = -1;
+    int count_ = 0;
+    bool plugins_ = false;
+    bool clip_ = false;
+    float level_ = 0.0f;
 };
 
 class OutputTrim : public juce::Component,

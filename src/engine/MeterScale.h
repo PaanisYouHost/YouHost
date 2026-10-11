@@ -133,4 +133,50 @@ inline float meterNormal(float linearGain, bool peak, int referenceDb)
     return normaliseDb(gainToDb(linearGain), span);
 }
 
+// Group meters match on REC and HOST: a thin track along the long side of the
+// bar. HOST rows are short, so the track runs across. REC strips are tall, so
+// the same thickness runs down almost the full height.
+inline constexpr float kGroupMeterInset = 6.0f;
+inline constexpr float kGroupMeterThickness = 14.0f;
+inline constexpr float kHostGroupMeterOrigin = 384.0f;
+inline constexpr float kHostGroupMeterRightInset = 12.0f;
+
+struct GroupMeterTrack
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    bool horizontal = false;
+};
+
+inline GroupMeterTrack recGroupMeterTrack(float barX, float barY, float barW, float barH) noexcept
+{
+    const float room = std::max(0.0f, barW - kGroupMeterInset * 2.0f);
+    const float thickness = std::min(kGroupMeterThickness, room);
+    GroupMeterTrack track;
+    track.horizontal = false;
+    track.width = thickness;
+    track.height = std::max(0.0f, barH - kGroupMeterInset * 2.0f);
+    track.x = barX + barW - kGroupMeterInset - thickness;
+    track.y = barY + kGroupMeterInset;
+    return track;
+}
+
+inline GroupMeterTrack hostGroupMeterTrack(float barW, float barH, float originX) noexcept
+{
+    GroupMeterTrack track;
+    track.horizontal = true;
+    track.x = originX;
+    track.y = kGroupMeterInset;
+    track.width = std::max(0.0f, barW - originX - kHostGroupMeterRightInset);
+    track.height = std::max(0.0f, barH - kGroupMeterInset * 2.0f);
+    return track;
+}
+
+inline float groupMeterLongSpan(const GroupMeterTrack& track) noexcept
+{
+    return track.horizontal ? track.width : track.height;
+}
+
 } // namespace youhost

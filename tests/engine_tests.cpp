@@ -50,6 +50,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <memory>
 #include <new>
 #include <string>
@@ -3234,6 +3235,83 @@ void testKeyDispatch()
     CHECK(plainAIsNotCommand);
 }
 
+bool groupMeterShotMatches(std::string* ppm)
+{
+    constexpr int width = 108;
+    constexpr int height = 480;
+    const auto track = youhost::recGroupMeterTrack(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+    std::vector<unsigned char> rgb(static_cast<std::size_t>(width * height * 3), 0);
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            const std::size_t index = static_cast<std::size_t>((y * width + x) * 3);
+            rgb[index] = 26;
+            rgb[index + 1] = 30;
+            rgb[index + 2] = 40;
+        }
+    }
+    const int x0 = static_cast<int>(std::floor(track.x));
+    const int y0 = static_cast<int>(std::floor(track.y));
+    const int x1 = static_cast<int>(std::ceil(track.x + track.width));
+    const int y1 = static_cast<int>(std::ceil(track.y + track.height));
+    for (int y = y0; y < y1; ++y)
+    {
+        for (int x = x0; x < x1; ++x)
+        {
+            if (x < 0 || y < 0 || x >= width || y >= height)
+                continue;
+            const std::size_t index = static_cast<std::size_t>((y * width + x) * 3);
+            rgb[index] = 80;
+            rgb[index + 1] = 200;
+            rgb[index + 2] = 120;
+        }
+    }
+
+    int rows = 0;
+    int cols = 0;
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            if (rgb[static_cast<std::size_t>((y * width + x) * 3) + 1] != 200)
+                continue;
+            ++rows;
+            break;
+        }
+    }
+    for (int x = 0; x < width; ++x)
+    {
+        for (int y = 0; y < height; ++y)
+        {
+            if (rgb[static_cast<std::size_t>((y * width + x) * 3) + 1] != 200)
+                continue;
+            ++cols;
+            break;
+        }
+    }
+
+    const auto host = youhost::hostGroupMeterTrack(960.0f, 34.0f, youhost::kHostGroupMeterOrigin);
+    const float hostLane = 960.0f - youhost::kHostGroupMeterOrigin;
+    const bool shot = rows * 10 >= height * 9
+                      && cols == static_cast<int>(youhost::kGroupMeterThickness)
+                      && width / std::max(1, cols) >= 6
+                      && track.height >= static_cast<float>(height) * 0.60f
+                      && ! track.horizontal
+                      && host.horizontal
+                      && host.height == 34.0f - youhost::kGroupMeterInset * 2.0f
+                      && hostLane > 0.0f
+                      && host.width / hostLane >= 0.90f;
+    if (ppm != nullptr)
+    {
+        std::ostringstream out;
+        out << "P6\n" << width << ' ' << height << "\n255\n";
+        out.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
+        *ppm = out.str();
+    }
+    return shot;
+}
+
 void testReleaseChecklist()
 {
     int listed = 0;
@@ -3677,6 +3755,23 @@ void testReleaseChecklist()
              && mainUi.find("makeGroupCommand") != std::string::npos
              && mainUi.find("commandApplies") != std::string::npos
              && mainUi.find("runShortcut") != std::string::npos);
+
+    std::string shot;
+    const auto gridUi = readWorkspaceFile("src/ui/MeterGrid.cpp");
+    const auto hostUi = readWorkspaceFile("src/ui/PluginPage.cpp");
+    const bool wroteShot = groupMeterShotMatches(&shot) && shot.size() > 1000;
+    if (wroteShot)
+    {
+        std::ofstream out("/opt/cursor/artifacts/rec_group_meter.ppm", std::ios::binary);
+        out.write(shot.data(), static_cast<std::streamsize>(shot.size()));
+    }
+    item("REC group meter is a thin track down the bar, like HOST",
+         wroteShot
+             && gridUi.find("recGroupMeterTrack") != std::string::npos
+             && gridUi.find("0.22f") == std::string::npos
+             && hostUi.find("hostGroupMeterTrack") != std::string::npos
+             && mainUi.find("publishMeters(false)") != std::string::npos
+             && mainUi.find("channelSnapshot") == std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);

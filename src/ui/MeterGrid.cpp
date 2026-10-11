@@ -198,11 +198,13 @@ bool meterChromeChanged(const BridgeCell& before, const BridgeCell& after)
 
 void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb, bool repaintLevels)
 {
+    const int nextReference = normaliseRmsReferenceDb(rmsReferenceDb);
+    const bool scaleChanged = showPeak_ != showPeak || rmsReferenceDb_ != nextReference;
     showPeak_ = showPeak;
-    rmsReferenceDb_ = normaliseRmsReferenceDb(rmsReferenceDb);
+    rmsReferenceDb_ = nextReference;
     placeNameEditor(false);
 
-    bool sameShape = ! repaintLevels && cells_.size() == cells.size();
+    bool sameShape = ! repaintLevels && ! scaleChanged && cells_.size() == cells.size();
     if (sameShape)
     {
         for (std::size_t index = 0; index < cells.size(); ++index)
@@ -221,14 +223,29 @@ void MeterGrid::setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsRe
     auto metrics = metricsFor(fit);
     if (metrics.contentWidth > static_cast<float>(fit))
         metrics.originX = 0.0f;
+    const float height = static_cast<float>(getHeight());
     float x = metrics.originX;
     std::vector<juce::Rectangle<int>> dirty;
     for (std::size_t index = 0; index < cells.size(); ++index)
     {
         const float width = cells[index].header ? metrics.headerWidth : metrics.channelWidth;
-        if (meterChromeChanged(cells_[index], cells[index]))
+        const auto bounds = juce::Rectangle<float>(x, 0.0f, width, height);
+        const bool chrome = meterChromeChanged(cells_[index], cells[index]);
+        const bool level = std::fabs(cells_[index].reading.rms - cells[index].reading.rms) > 0.00001f
+                           || std::fabs(cells_[index].reading.peak - cells[index].reading.peak) > 0.00001f;
+        if (chrome)
+            dirty.push_back(bounds.getSmallestIntegerContainer());
+        else if (level)
         {
-            dirty.push_back(juce::Rectangle<float>(x, 0.0f, width, static_cast<float>(getHeight())).getSmallestIntegerContainer());
+            if (cells[index].header)
+            {
+                const auto track = recGroupMeterTrack(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight());
+                dirty.push_back(juce::Rectangle<float>(track.x, track.y, track.width, track.height).getSmallestIntegerContainer());
+            }
+            else
+            {
+                dirty.push_back(splitCell(bounds).bar.getSmallestIntegerContainer());
+            }
         }
         x += width;
     }
@@ -564,9 +581,9 @@ void MeterGrid::paint(juce::Graphics& graphics)
                 graphics.setColour(hue);
                 graphics.fillRect(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 7.0f, bounds.getHeight() - 4.0f);
             }
-            auto body = bounds.reduced(8.0f, 10.0f);
             const float level = showPeak_ ? cell.reading.peak : cell.reading.rms;
-            auto meter = body.removeFromBottom(std::min(36.0f, body.getHeight() * 0.22f)).reduced(6.0f, 0.0f);
+            const auto track = recGroupMeterTrack(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight());
+            const auto meter = juce::Rectangle<float>(track.x, track.y, track.width, track.height);
             graphics.setColour(theme::meterTrack);
             graphics.fillRoundedRectangle(meter, 2.0f);
             if (level > 0.0f && meter.getHeight() > 1.0f)
@@ -577,9 +594,11 @@ void MeterGrid::paint(juce::Graphics& graphics)
                 graphics.fillRoundedRectangle(levelArea, 2.0f);
             }
 
+            auto title = bounds.reduced(10.0f, 8.0f);
+            title.setRight(std::max(title.getX(), track.x - 4.0f));
             graphics.setColour(ink);
             graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
-            graphics.drawFittedText(cell.title, body.toNearestInt(), juce::Justification::centred, 4);
+            graphics.drawFittedText(cell.title, title.toNearestInt(), juce::Justification::centred, 4);
             continue;
         }
 

@@ -2458,12 +2458,6 @@ void MainComponent::publishMeters(bool repaintLevels)
                 else
                     cell.reading.rms = std::max(cell.reading.rms, level);
                 cell.reading.clipped = cell.reading.clipped || engine_.clipFor(channel);
-                if (! cell.anyPlugin)
-                {
-                    const auto snap = engine_.channelSnapshot(channel);
-                    for (const auto& slot : snap.slots)
-                        cell.anyPlugin = cell.anyPlugin || slot.occupied;
-                }
             }
         }
         else
@@ -2579,7 +2573,7 @@ void MainComponent::refresh()
     leftScale_.setScale(showPeak_, rmsReferenceDb_, false);
     rightScale_.setScale(showPeak_, rmsReferenceDb_, true);
 
-    publishMeters(true);
+    publishMeters(false);
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
