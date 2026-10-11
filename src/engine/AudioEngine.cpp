@@ -1374,7 +1374,8 @@ juce::String AudioEngine::dspLoadText() const
     return text;
 }
 
-void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const
+void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&,
+                                                              const std::vector<TakeMark>&)>& fn) const
 {
     if (fn == nullptr || recorder_ == nullptr)
         return;
@@ -1441,7 +1442,12 @@ void AudioEngine::visitTimelineLanes(const std::function<void(const std::vector<
             groups[index].color = groups_[index].color;
             groups[index].name = groups_[index].name.toStdString();
         }
-        buildTimelineLanes(sources, count, livePtr, channels.data(), shown, groups.data(), kMaxDisplayGroups, fn);
+        const auto marks = takeMarksFromSources(sources, count, livePtr);
+        buildTimelineLanes(sources, count, livePtr, channels.data(), shown, groups.data(), kMaxDisplayGroups,
+                           [&](const std::vector<TimelineLaneView>& lanes)
+                           {
+                               fn(lanes, marks);
+                           });
     });
 }
 

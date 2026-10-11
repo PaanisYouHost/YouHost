@@ -679,7 +679,8 @@ void testWindowContentFits()
     CHECK(youhost::scannerWindowHeight() >= youhost::scannerControlHeight());
     CHECK(youhost::groupRenameWindowHeight() >= youhost::groupRenameContentHeight());
     CHECK(youhost::pluginListWindowHeight() >= youhost::pluginPickerContentHeight());
-    CHECK(youhost::setupWindowHeight() == 12 + youhost::audioSetupFormHeight() + 12);
+    CHECK(youhost::setupWindowHeight() == 12 + youhost::audioSetupFormHeight() + youhost::setupChannelToggleHeight() + 12);
+    CHECK(youhost::setupChannelToggleHeight() == 8 + 28 + 4 + 22);
     CHECK(youhost::startupWindowHeight() == 12 + youhost::audioSetupFormHeight() + 10 + youhost::startupSessionBlockHeight() + 12);
     CHECK(youhost::startupSessionBlockHeight() == 28 + 6 + 28 + 22 + 6 + 32 + 8 + 20 + youhost::startupRecentListHeight());
     CHECK(youhost::setupWindowHeight() < 280);
@@ -1165,6 +1166,9 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Cmd+G does nothing on the HOST page") != std::string::npos);
     CHECK(help.find("makes it tall enough to read") != std::string::npos);
     CHECK(help.find("FIT shows every lane again") != std::string::npos);
+    CHECK(help.find("even when a lane is only a pixel or two") != std::string::npos);
+    CHECK(help.find("V- zooms out until every lane fits") != std::string::npos);
+    CHECK(help.find("Lanes stay tall enough to read") == std::string::npos);
     CHECK(help.find("takes focus only when you click it or press G") != std::string::npos);
     CHECK(help.find("nothing while a text field has focus") != std::string::npos);
     CHECK(help.find("Option-drag") != std::string::npos);
@@ -1875,10 +1879,53 @@ const youhost::SessionNode* findChannel(const youhost::SessionNode& node, const 
 
 void testTimelineScroll()
 {
-    CHECK(youhost::lanesVisible(40, 0, 70.0f) == 5);
+    CHECK(youhost::lanesVisible(40, 0, 70.0f) == 40);
     CHECK(youhost::lanesVisible(4, 0, 200.0f) == 4);
     CHECK(youhost::lanesVisible(40, 100, 400.0f) == 1);
     CHECK(youhost::lanesShownForVerticalStep(128, 0) == 128);
+
+    const float shortTimeline = 66.0f;
+    for (const int total : { 32, 128 })
+    {
+        const auto enlarged = youhost::focusReadableLane(total, total / 2, shortTimeline);
+        const int enlargedShown = youhost::lanesVisible(total, enlarged.verticalStep, shortTimeline);
+        CHECK(enlarged.verticalStep > 0);
+        CHECK(enlargedShown < total);
+
+        int step = enlarged.verticalStep;
+        int shown = enlargedShown;
+        for (int guard = 0; step > 0 && guard < 40; ++guard)
+        {
+            step = youhost::stepVerticalZoom(step, -1, total);
+            const int next = youhost::lanesVisible(total, step, shortTimeline);
+            CHECK(next >= shown);
+            shown = next;
+        }
+        CHECK(step == 0);
+        CHECK(shown == total);
+
+        const auto fitted = youhost::fitAllLaneFocus();
+        CHECK(fitted.verticalStep == 0);
+        CHECK(fitted.laneScroll == 0);
+        CHECK(youhost::lanesVisible(total, fitted.verticalStep, shortTimeline) == total);
+
+        const int zoomedStep = youhost::stepVerticalZoom(0, 1, total);
+        const int zoomedIn = youhost::lanesVisible(total, zoomedStep, shortTimeline);
+        CHECK(zoomedIn < total);
+        CHECK(zoomedIn > 4);
+        CHECK(youhost::lanesVisible(total, youhost::stepVerticalZoom(zoomedStep, -1, total), shortTimeline) == total);
+
+        const float slot = shortTimeline / static_cast<float>(total);
+        const float row = youhost::laneRowHeight(slot);
+        CHECK(row > 0.0f);
+        CHECK(row <= slot + 0.01f);
+        CHECK(row * static_cast<float>(total) <= shortTimeline + 0.01f);
+        if (slot < 2.0f)
+            CHECK(row == slot);
+    }
+    CHECK(youhost::laneRowHeight(20.0f) == 19.0f);
+    const auto span = youhost::fitSpanSamples(48000 * 30, 48000.0);
+    CHECK(youhost::zoomVisibleSamples(span, 0) == span);
 
     float laneWheel = 0.0f;
     CHECK(youhost::applyLaneWheel(laneWheel, 1.0f, 3, 20, 5) == 2);
@@ -2601,6 +2648,63 @@ void testTimelinePaintDoesNotReenterLock()
                                     CHECK(lanes[1].title == "Two");
                                     CHECK(lanes[1].regions.empty());
                                 });
+
+    std::vector<youhost::WavePeak> recPeaks { { -0.2f, 0.5f } };
+    youhost::TimelineTakeSource live;
+    live.number = 1;
+    live.start = 1000;
+    live.length = 4800;
+    live.recorded[0] = true;
+    live.peaks[0] = &recPeaks;
+    std::array<youhost::TimelineChannelInfo, 2> modes {};
+    modes[0].name = "Rec";
+    modes[1].name = "Input";
+    youhost::buildTimelineLanes(nullptr, 0, &live, modes.data(), 2, nullptr, 0,
+                                [](const std::vector<youhost::TimelineLaneView>& lanes)
+                                {
+                                    CHECK(lanes.size() == 2);
+                                    CHECK(lanes[0].regions.size() == 1);
+                                    CHECK(lanes[0].regions[0].number == 1);
+                                    CHECK(lanes[0].regions[0].start == 1000);
+                                    CHECK(lanes[1].regions.empty());
+                                });
+
+    const auto liveMarks = youhost::takeMarksFromSources(nullptr, 0, &live);
+    CHECK(liveMarks.size() == 1);
+    CHECK(liveMarks[0].number == 1);
+    CHECK(liveMarks[0].start == 1000);
+
+    youhost::TimelineTakeSource inputOnly;
+    inputOnly.number = 3;
+    inputOnly.start = 250;
+    inputOnly.length = 100;
+    const auto inputMarks = youhost::takeMarksFromSources(nullptr, 0, &inputOnly);
+    CHECK(inputMarks.size() == 1);
+    CHECK(inputMarks[0].number == 3);
+    CHECK(inputMarks[0].start == 250);
+    youhost::buildTimelineLanes(nullptr, 0, &inputOnly, modes.data(), 2, nullptr, 0,
+                                [](const std::vector<youhost::TimelineLaneView>& lanes)
+                                {
+                                    CHECK(lanes[0].regions.empty());
+                                    CHECK(lanes[1].regions.empty());
+                                });
+
+    youhost::TimelineTakeSource finished = live;
+    const auto both = youhost::takeMarksFromSources(&finished, 1, &inputOnly);
+    CHECK(both.size() == 2);
+    CHECK(both[0].number == 3);
+    CHECK(both[1].number == 1);
+
+    youhost::TimelineTakeSource unnamed;
+    CHECK(youhost::takeMarksFromSources(&unnamed, 1, nullptr).empty());
+
+    const auto view = readWorkspaceFile("src/ui/TimelineView.cpp");
+    CHECK(view.find("takeMarks = marks") != std::string::npos);
+    CHECK(view.find("rememberTakeMark") == std::string::npos);
+    CHECK(view.find("graphics.drawLine(markX, inner.getY(), markX, inner.getBottom(), 2.0f);") != std::string::npos);
+    CHECK(view.find("takeRulerLabelText") != std::string::npos);
+    const auto engine = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    CHECK(engine.find("takeMarksFromSources") != std::string::npos);
 }
 
 youhost::RecordAttempt readyTake()
@@ -3368,6 +3472,53 @@ void testReleaseChecklist()
     item("clicking a REC channel enlarges that lane",
          mainUi.find("focusChannelLane(channel, page_ == 1)") != std::string::npos
              && readWorkspaceFile("src/engine/TimelineZoom.h").find("kReadableLaneHeightPx") != std::string::npos);
+
+    const auto hiddenLabel = youhost::showHiddenChannelsLabel(16);
+    const bool hiddenSwitch = hiddenLabel == "Show channels not on this card (17-128)"
+                              && std::string(youhost::kShowHiddenChannelsNote) == "They stay in the session and are not recorded or processed."
+                              && mainUi.find("showHiddenChannelsLabel(") != std::string::npos
+                              && mainUi.find("kShowHiddenChannelsNote") != std::string::npos
+                              && mainUi.find("unsupportedChannelLine") == std::string::npos
+                              && mainUi.find("Show on mixer") == std::string::npos
+                              && youhost::shortcutHelpText().find("not on this card") == std::string::npos
+                              && youhost::shortcutHelpText().find(youhost::kShowHiddenChannelsNote) != std::string::npos;
+    item("Audio setup offers Show channels not on this card (17-128)", hiddenSwitch);
+
+    item("REC armed hint is REC ARMED - press PLAY (or Cmd+Space)",
+         std::string(youhost::kRecordArmedHint) == "REC ARMED - press PLAY (or Cmd+Space)"
+             && mainUi.find("kRecordArmedHint") != std::string::npos
+             && mainUi.find("engine_.isRecordReady() && ! recording") != std::string::npos);
+
+    const auto failedStart = youhost::failAttempt("No REC channel has an input on this device. Recording did not start.");
+    item("record start failure is logged and shown",
+         failedStart.log.find("record start failed") != std::string::npos
+             && failedStart.alert.find("Recording did not start.") != std::string::npos
+             && engineSrc.find("logTransport(\"record start failed:") != std::string::npos
+             && mainUi.find("showTransportResult") != std::string::npos);
+
+    const auto recorderSrc = readWorkspaceFile("src/engine/Recorder.cpp");
+    const auto copyUnderLock = recorderSrc.find("Copy under the lock");
+    const auto callVisitor = recorderSrc.find("fn(views.empty()");
+    item("timeline paint releases the recorder lock before drawing",
+         copyUnderLock != std::string::npos && callVisitor != std::string::npos && copyUnderLock < callVisitor);
+
+    const std::vector<youhost::ListedDevice> virtualOnly = { { "Pro Tools Audio Bridge 32", 32, 32 } };
+    const std::vector<youhost::ListedDevice> virtualAndReal = {
+        { "WING 2", 48, 48 },
+        { "Pro Tools Audio Bridge 32", 32, 32 },
+    };
+    item("startup does not auto-pick a virtual device",
+         youhost::chooseStartupDevice("Pro Tools Audio Bridge 32", "", virtualAndReal) == "WING 2"
+             && youhost::chooseStartupDevice("", "", virtualOnly).empty()
+             && youhost::chooseStartupDevice("", "Pro Tools Audio Bridge 32", virtualOnly) == "Pro Tools Audio Bridge 32");
+
+    const auto lockedPath = mainUi.find("if (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost())");
+    const auto sampleCpu = mainUi.find("engine_.sampleLiveCpu()");
+    const auto gateAt = engineSrc.find("if (! deviceInventoryQueryAllowed");
+    const auto scanAfterGate = gateAt == std::string::npos ? std::string::npos : engineSrc.find("type->scanForDevices()", gateAt);
+    item("background timers do not scan a locked card",
+         lockedPath != std::string::npos && sampleCpu != std::string::npos && lockedPath < sampleCpu
+             && gateAt != std::string::npos && scanAfterGate != std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);

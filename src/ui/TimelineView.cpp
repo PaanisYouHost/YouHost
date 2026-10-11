@@ -247,7 +247,7 @@ void TimelineView::focusChannelLane(int channel, bool enlarge)
     if (channel < 0 || laneProvider_ == nullptr)
         return;
     int found = -1;
-    laneProvider_([this, channel, &found](const std::vector<TimelineLaneView>& lanes)
+    laneProvider_([this, channel, &found](const std::vector<TimelineLaneView>& lanes, const std::vector<TakeMark>&)
     {
         rememberLanes(lanes);
         found = laneIndexContaining(laneMembers_, channel);
@@ -315,8 +315,7 @@ void TimelineView::verticalZoomBy(int delta)
     const int oldShown = std::max(1, lanesShown());
     const int oldScroll = laneScroll_;
     const int anchor = zoomAnchorLane();
-    const int maxStep = maxVerticalZoomStep(total);
-    verticalStep_ = std::clamp(verticalStep_ + delta, 0, maxStep);
+    verticalStep_ = stepVerticalZoom(verticalStep_, delta, total);
     const int newShown = std::max(1, lanesShown());
     laneScroll_ = laneScrollKeepingAnchor(total, oldScroll, oldShown, newShown, anchor);
     syncScroll();
@@ -578,8 +577,9 @@ void TimelineView::paint(juce::Graphics& graphics)
     };
     std::vector<CornerTag> cornerTags;
 
-    const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes)
+    const auto paintLanes = [&](const std::vector<TimelineLaneView>& lanes, const std::vector<TakeMark>& marks)
     {
+    takeMarks = marks;
     const int total = static_cast<int>(lanes.size());
     rememberLanes(lanes);
     const int shown = std::max(1, lanesVisible(std::max(1, total), verticalStep_, inner.getHeight()));
@@ -648,13 +648,12 @@ void TimelineView::paint(juce::Graphics& graphics)
             break;
         const auto& lane = lanes[static_cast<std::size_t>(laneIndex)];
         auto row = juce::Rectangle<float>(inner.getX(), inner.getY() + laneHeight * static_cast<float>(index),
-                                          inner.getWidth(), std::max(1.0f, laneHeight - 1.0f));
+                                          inner.getWidth(), laneRowHeight(laneHeight));
         const auto wave = laneWaveColour(lane.color);
         graphics.setColour(theme::background);
         graphics.fillRect(row);
         for (const auto& region : lane.regions)
         {
-            rememberTakeMark(takeMarks, region.number, region.start);
             if (region.length <= 0 && (region.peaks == nullptr || region.peaks->empty()))
                 continue;
             float x1 = 0.0f;
@@ -683,7 +682,7 @@ void TimelineView::paint(juce::Graphics& graphics)
     if (laneProvider_ != nullptr)
         laneProvider_(paintLanes);
     else
-        paintLanes({});
+        paintLanes({}, {});
     syncScroll();
 
     std::sort(takeMarks.begin(), takeMarks.end(), [](const TakeMark& left, const TakeMark& right)

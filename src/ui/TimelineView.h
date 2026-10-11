@@ -25,7 +25,8 @@ public:
     TimelineView();
     ~TimelineView() override;
 
-    using LaneProvider = std::function<void(const std::function<void(const std::vector<TimelineLaneView>&)>&)>;
+    using LanePaint = std::function<void(const std::vector<TimelineLaneView>&, const std::vector<TakeMark>&)>;
+    using LaneProvider = std::function<void(const LanePaint&)>;
 
     void setTransport(const TransportView& view);
     void setLaneProvider(LaneProvider provider);

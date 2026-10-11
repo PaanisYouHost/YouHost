@@ -252,6 +252,21 @@ inline bool cardHidesChannels(const SessionChannelView& view) noexcept
     return view.deviceOpen && view.cardInputs < kMaxChannels;
 }
 
+// One line under the Audio setup switch. There is no per-channel list.
+inline constexpr const char* kShowHiddenChannelsNote =
+    "They stay in the session and are not recorded or processed.";
+
+// A 16-input card reads "Show channels not on this card (17-128)".
+inline std::string showHiddenChannelsLabel(int cardInputs)
+{
+    int first = cardInputs + 1;
+    if (first < 1)
+        first = 1;
+    if (first > kMaxChannels)
+        first = kMaxChannels;
+    return "Show channels not on this card (" + std::to_string(first) + "-" + std::to_string(kMaxChannels) + ")";
+}
+
 inline std::string unsupportedChannelLine(int channel, std::string_view name)
 {
     std::string text = std::to_string(channel + 1);

@@ -225,7 +225,8 @@ public:
     juce::String uncleanPluginMessage() const;
     void acceptCrashChoice(bool leaveOff);
     void prepareForQuit();
-    void visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&)>& fn) const;
+    void visitTimelineLanes(const std::function<void(const std::vector<TimelineLaneView>&,
+                                                    const std::vector<TakeMark>&)>& fn) const;
     juce::String dspLoadText() const;
 
 private:

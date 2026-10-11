@@ -141,9 +141,14 @@ inline int setupWindowWidth() noexcept
     return 720;
 }
 
+inline int setupChannelToggleHeight() noexcept
+{
+    return 8 + 28 + 4 + 22;
+}
+
 inline int setupWindowHeight() noexcept
 {
-    return 12 + audioSetupFormHeight() + 12;
+    return 12 + audioSetupFormHeight() + setupChannelToggleHeight() + 12;
 }
 
 inline int startupWindowWidth() noexcept

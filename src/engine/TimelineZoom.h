@@ -181,19 +181,46 @@ inline std::int64_t anchorPlayhead(std::int64_t span, std::int64_t visible, std:
 }
 
 // During playback, scroll only when the playhead leaves the comfortable middle of the view.
-// Step 0 wants every lane, but a lane never draws shorter than this, so a long
-// session scrolls instead of collapsing into hairlines.
-inline constexpr float kMinLaneHeightPx = 14.0f;
+// Step 0 fits every lane into the timeline, even when a lane is only a pixel or two.
+// A zoomed-in step still keeps each lane at least a pixel tall.
+inline constexpr float kMinLaneHeightPx = 1.0f;
 
 inline int lanesVisible(int totalLanes, int verticalStep, float areaHeightPx) noexcept
 {
     if (totalLanes < 1)
         totalLanes = 1;
     const int wanted = lanesShownForVerticalStep(totalLanes, verticalStep);
+    if (verticalStep <= 0)
+        return wanted;
     if (! (areaHeightPx >= kMinLaneHeightPx))
         return wanted;
     const int fitted = std::max(1, static_cast<int>(areaHeightPx / kMinLaneHeightPx));
     return std::max(1, std::min(wanted, fitted));
+}
+
+// One V- / V+ click. V- reaches step 0, which shows every lane.
+inline int stepVerticalZoom(int step, int delta, int totalLanes) noexcept
+{
+    if (totalLanes < 1)
+        totalLanes = 1;
+    const int maxStep = maxVerticalZoomStep(totalLanes);
+    int next = step + delta;
+    if (next < 0)
+        next = 0;
+    if (next > maxStep)
+        next = maxStep;
+    return next;
+}
+
+// Hairlines keep their whole slot so a fitted session stays inside the timeline.
+// Taller lanes keep a one-pixel gap.
+inline float laneRowHeight(float slotHeight) noexcept
+{
+    if (! (slotHeight > 0.0f))
+        return 0.0f;
+    if (slotHeight >= 2.0f)
+        return slotHeight - 1.0f;
+    return slotHeight;
 }
 
 inline int clampLaneIndex(int scroll, int totalLanes, int shown) noexcept

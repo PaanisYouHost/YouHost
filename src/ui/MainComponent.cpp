@@ -373,21 +373,75 @@ public:
     }
 
 private:
-    class Content : public juce::Component
+    class Content : public juce::Component,
+                    private juce::Timer
     {
     public:
         explicit Content(AudioEngine& engine)
-            : audioSetup_(engine)
+            : engine_(engine),
+              audioSetup_(engine)
         {
             addAndMakeVisible(audioSetup_);
+            addAndMakeVisible(showHidden_);
+            addAndMakeVisible(note_);
+            showHidden_.setComponentID("youhost-show-hidden-channels");
+            showHidden_.setClickingTogglesState(true);
+            quiet(showHidden_);
+            note_.setJustificationType(juce::Justification::centredLeft);
+            note_.setColour(juce::Label::textColourId, theme::dim);
+            note_.setText(kShowHiddenChannelsNote, juce::dontSendNotification);
+            showHidden_.onClick = [this]
+            {
+                engine_.setRevealUnsupportedChannels(showHidden_.getToggleState());
+            };
+            syncHiddenSwitch();
+            startTimerHz(4);
+        }
+
+        ~Content() override
+        {
+            stopTimer();
         }
 
         void resized() override
         {
-            audioSetup_.setBounds(getLocalBounds().reduced(16, 12));
+            auto area = getLocalBounds().reduced(16, 12);
+            auto extra = area.removeFromBottom(setupChannelToggleHeight());
+            audioSetup_.setBounds(area);
+            extra.removeFromTop(8);
+            showHidden_.setBounds(extra.removeFromTop(28));
+            extra.removeFromTop(4);
+            note_.setBounds(extra.removeFromTop(22));
         }
 
+    private:
+        void timerCallback() override
+        {
+            syncHiddenSwitch();
+        }
+
+        void syncHiddenSwitch()
+        {
+            const auto view = engine_.channelView();
+            const bool offered = cardHidesChannels(view);
+            showHidden_.setVisible(offered);
+            showHidden_.setEnabled(offered);
+            if (! offered)
+            {
+                showHidden_.setToggleState(false, juce::dontSendNotification);
+                note_.setText("Every channel on this card is already shown.", juce::dontSendNotification);
+                return;
+            }
+            showHidden_.setButtonText(juce::String(showHiddenChannelsLabel(view.cardInputs)));
+            note_.setText(kShowHiddenChannelsNote, juce::dontSendNotification);
+            if (! showHidden_.isMouseButtonDown())
+                showHidden_.setToggleState(view.revealed, juce::dontSendNotification);
+        }
+
+        AudioEngine& engine_;
         AudioSetupForm audioSetup_;
+        juce::ToggleButton showHidden_;
+        juce::Label note_;
     };
 
     AppSettings& settings_;
@@ -1422,7 +1476,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     timeline_.setSelectedChannel([this] { return engine_.selectedChannel(); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
-    timeline_.setLaneProvider([this](const std::function<void(const std::vector<TimelineLaneView>&)>& paint)
+    timeline_.setLaneProvider([this](const TimelineView::LanePaint& paint)
     {
         engine_.visitTimelineLanes(paint);
     });

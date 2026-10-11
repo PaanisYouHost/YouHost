@@ -139,6 +139,31 @@ struct TimelineTakeSource
     std::array<bool, kMaxChannels> recorded {};
 };
 
+// Every take, including the one recording now, marks the ruler. Channel mode
+// does not matter: an INPUT lane still shows that a take is recording.
+inline std::vector<TakeMark> takeMarksFromSources(const TimelineTakeSource* takes,
+                                                  int count,
+                                                  const TimelineTakeSource* live)
+{
+    std::vector<TakeMark> marks;
+    if (count < 0)
+        count = 0;
+    if (takes != nullptr)
+    {
+        for (int index = 0; index < count; ++index)
+            rememberTakeMark(marks, takes[index].number, takes[index].start);
+    }
+    if (live != nullptr)
+        rememberTakeMark(marks, live->number, live->start);
+    std::sort(marks.begin(), marks.end(), [](const TakeMark& left, const TakeMark& right)
+    {
+        if (left.start != right.start)
+            return left.start < right.start;
+        return left.number < right.number;
+    });
+    return marks;
+}
+
 struct TimelineChannelInfo
 {
     std::string name;

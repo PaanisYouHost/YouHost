@@ -41,6 +41,12 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | Device menu flicker | The audio card menu is rebuilt when the device list changes, not on every timer tick. |
 | Show Backups | There is no Show Backups control. Backups still run on their own. |
 | REC lane click | Clicking a channel on the REC page scrolls to that lane and makes it tall enough to read. |
+| Show hidden channels | Audio setup offers `Show channels not on this card (17-128)` for a 16-input card, with one line: they stay in the session and are not recorded or processed. There is no per-channel "not on this card" list. |
+| REC armed hint | While REC is armed and the take has not started, the transport shows `REC ARMED - press PLAY (or Cmd+Space)`. |
+| Record start failure | A start that does not run writes `record start failed` to `youhost.log` and shows that reason in an alert. |
+| Timeline paint lock | Timeline paint copies the takes under the recorder lock and builds the lanes after that lock is released. |
+| No virtual autopick | Startup does not open a virtual or aggregate device unless that device was the last one chosen. A saved virtual name falls through to a real card. |
+| Background polling | While a chosen card is up, no timer scans the device list. The 30 Hz timer samples CPU. Audio setup's 4 Hz timer reads the cached list. A scan runs when the device is lost, the inventory is empty, or the user picks another card. |
 
 ## Windows to photograph on a Mac release
 
