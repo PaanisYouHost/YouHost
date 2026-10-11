@@ -1498,22 +1498,6 @@ bool AudioEngine::stereoRightIsLinked(int channel) const noexcept
     return (channel & 1) == 1 && channel > 0 && stereoLinked_[static_cast<std::size_t>(channel - 1)];
 }
 
-int AudioEngine::stereoMirror(int channel) const noexcept
-{
-    return linkedEditPartner(channel, stereoLinked(channel));
-}
-
-void AudioEngine::writeChannelListen(int channel, ChannelListen mode)
-{
-    if (channel < 0 || channel >= kMaxChannels)
-        return;
-    if (listen_[static_cast<std::size_t>(channel)] == mode)
-        return;
-    listen_[static_cast<std::size_t>(channel)] = mode;
-    storeChannelOn(channel, channelListenAudible(mode));
-    listenFlush_ = true;
-}
-
 void AudioEngine::loadPlugin(int channel, int slot, const juce::PluginDescription& description, bool openEditor)
 {
     if (stereoRightIsLinked(channel))
@@ -1579,20 +1563,6 @@ void AudioEngine::setStereoLinked(int channel, bool linked)
     stereoLinked_[static_cast<std::size_t>(left)] = linked;
     if (rack_ != nullptr)
         rack_->setStereoLink(left, linked);
-    if (linked)
-    {
-        writeChannelListen(right, listen_[static_cast<std::size_t>(left)]);
-        channelColor_[static_cast<std::size_t>(right)] = channelColor_[static_cast<std::size_t>(left)];
-        channelColorOwn_[static_cast<std::size_t>(right)] = channelColorOwn_[static_cast<std::size_t>(left)];
-        channelGroup_[static_cast<std::size_t>(right)] = channelGroup_[static_cast<std::size_t>(left)];
-        if (recorder_ != nullptr)
-            recorder_->setChannelName(right, channelName(left));
-        const bool excluded = strips_[static_cast<std::size_t>(left)].excludeFromCompensation;
-        strips_[static_cast<std::size_t>(right)].excludeFromCompensation = excluded;
-        if (rack_ != nullptr)
-            rack_->setExcluded(right, excluded);
-        syncCompensation();
-    }
     armChannelReset(left);
     armChannelReset(right);
     bumpDisplay();
@@ -1607,16 +1577,10 @@ void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
 
 void AudioEngine::setChannelExcluded(int channel, bool excluded)
 {
-    auto apply = [this](int index, bool value)
-    {
-        if (index < 0 || index >= kMaxChannels)
-            return;
-        strips_[static_cast<std::size_t>(index)].excludeFromCompensation = value;
-        if (rack_ != nullptr)
-            rack_->setExcluded(index, value);
-    };
-    apply(channel, excluded);
-    apply(stereoMirror(channel), excluded);
+    if (channel >= 0 && channel < kMaxChannels)
+        strips_[static_cast<std::size_t>(channel)].excludeFromCompensation = excluded;
+    if (rack_ != nullptr)
+        rack_->setExcluded(channel, excluded);
 }
 
 void AudioEngine::openPluginEditor(int channel, int slot)
@@ -1654,18 +1618,11 @@ void AudioEngine::setChannelListen(int channel, ChannelListen mode)
         return;
     if (channel < 0 || channel >= kMaxChannels)
         return;
-    auto write = [this](int index, ChannelListen value)
-    {
-        if (index < 0 || index >= kMaxChannels)
-            return;
-        if (listen_[static_cast<std::size_t>(index)] == value)
-            return;
-        listen_[static_cast<std::size_t>(index)] = value;
-        storeChannelOn(index, channelListenAudible(value));
-        listenFlush_ = true;
-    };
-    write(channel, mode);
-    write(stereoMirror(channel), mode);
+    if (listen_[static_cast<std::size_t>(channel)] == mode)
+        return;
+    listen_[static_cast<std::size_t>(channel)] = mode;
+    storeChannelOn(channel, channelListenAudible(mode));
+    listenFlush_ = true;
 }
 
 void AudioEngine::flushListenEdits()
@@ -1801,12 +1758,8 @@ bool AudioEngine::isRecordArmed(int channel) const
 
 void AudioEngine::setChannelName(int channel, const juce::String& name)
 {
-    if (recorder_ == nullptr)
-        return;
-    recorder_->setChannelName(channel, name);
-    const int partner = stereoMirror(channel);
-    if (partner >= 0 && channelName(partner) != channelName(channel))
-        recorder_->setChannelName(partner, channelName(channel));
+    if (recorder_ != nullptr)
+        recorder_->setChannelName(channel, name);
 }
 
 juce::String AudioEngine::channelName(int channel) const
@@ -3074,12 +3027,6 @@ void AudioEngine::setChannelColor(int channel, int color)
     chooseChannelColor(paint, color, groupHue, group >= 0);
     channelColor_[index] = paint.color;
     channelColorOwn_[index] = paint.own;
-    const int partner = stereoMirror(channel);
-    if (partner >= 0)
-    {
-        channelColor_[static_cast<std::size_t>(partner)] = paint.color;
-        channelColorOwn_[static_cast<std::size_t>(partner)] = paint.own;
-    }
     bumpDisplay();
 }
 
@@ -3094,8 +3041,6 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
 {
     if (group >= kMaxDisplayGroups)
         return;
-    std::vector<int> members = channels;
-    includeStereoPartners(members, [this](int index) { return stereoLinked(index); });
     if (group >= 0)
     {
         auto& stored = groups_[static_cast<std::size_t>(group)];
@@ -3108,7 +3053,7 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
     const int groupHue = (group >= 0 && group < kMaxDisplayGroups)
                              ? groups_[static_cast<std::size_t>(group)].color
                              : 0;
-    for (int channel : members)
+    for (int channel : channels)
     {
         if (channel < 0 || channel >= kMaxChannels)
             continue;

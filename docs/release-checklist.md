@@ -57,7 +57,7 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | Save As speed | Save As writes session.youhost once, copies WAV files on the background disk thread with a fast copy (clonefile when the volume allows), skips Backups, and shows the progress bar. The original folder is not saved first. |
 | HOST column header | The HOST channel list has a fixed header, drawn once into a cache: CH, MODE, NAME, DELAY COMP, PLUGINS, GAIN. It stays put while the channels scroll. |
 | Plugin NaN | A plugin that emits NaN or a huge value is replaced with silence or a hard ceiling before it reaches the USB output. Removing the plugin clears that channel's delay line, scratch, and meter, including a latched clip. An empty chain is the dry input. |
-| Stereo link | Right-click Stereo link on REC and on HOST, or LINK on HOST, joins 1-2, 3-4, and so on. The even channel's slots are hidden. One stereo plugin processes the pair. Unlink keeps the chain on the odd channel and leaves the even channel empty. REC, INPUT, OFF, colour, group, and name apply to both channels. ALL REC, ALL INPUT, ALL OFF, and latency compensation include the pair. The recorder still writes one mono WAV per channel. |
+| Stereo link | HOST only. Right-click Stereo link with ch N+1, or LINK, joins 1-2, 3-4, and so on. The even channel's slots are hidden. One stereo plugin processes the pair. Unlink keeps the chain on the odd channel. REC, INPUT, OFF, name, colour, and group stay per channel. The REC page menu has no Stereo link. The recorder still writes one mono WAV per channel. |
 | Plugin list M/ST | Each plugin row shows M, ST, or M/ST from the scanned bus layouts. |
 
 ## Windows to photograph on a Mac release

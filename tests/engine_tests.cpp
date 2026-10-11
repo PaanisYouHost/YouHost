@@ -1201,8 +1201,9 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("Make group from selection") != std::string::npos);
     CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
     CHECK(help.find("Cmd+G does nothing while a text field has focus") != std::string::npos);
-    CHECK(help.find("choose Stereo link") != std::string::npos);
-    CHECK(help.find("two mono WAV files") != std::string::npos);
+    CHECK(help.find("Stereo link with ch N+1") != std::string::npos);
+    CHECK(help.find("does not change the recorder or the REC page") != std::string::npos);
+    CHECK(help.find("stay per channel") != std::string::npos);
     CHECK(help.find("CH, MODE, NAME, DELAY COMP, PLUGINS, and GAIN") != std::string::npos);
     CHECK(help.find("M, ST, or M/ST") != std::string::npos);
     CHECK(help.find("makes it tall enough to read") != std::string::npos);
@@ -3968,31 +3969,29 @@ void testReleaseChecklist()
              && engineSrc.find("armChannelReset") != std::string::npos
              && engineSrc.find("resetRequested") != std::string::npos);
     const auto menuSrc = readWorkspaceFile("src/ui/ChannelMenu.cpp");
-    const auto allChannels = youhost::channelsForGlobalListen(nullptr, 0, 4);
-    std::vector<int> groupMembers { 0 };
-    youhost::includeStereoPartners(groupMembers, [](int channel) { return channel == 0 || channel == 1; });
-    item("stereo link joins a pair on REC and HOST",
-         youhost::stereoLinkMenuLabel(0) == "Stereo link"
-             && youhost::stereoLinkMenuLabel(1) == "Stereo link"
-             && youhost::linkedEditPartner(1, true) == 0
-             && youhost::linkedEditPartner(0, false) == -1
+    const auto linkAt = engineSrc.find("void AudioEngine::setStereoLinked");
+    const auto afterLink = engineSrc.find("void AudioEngine::setSlotBypassed");
+    const auto linkBody = linkAt == std::string::npos || afterLink == std::string::npos || afterLink < linkAt
+                              ? std::string()
+                              : engineSrc.substr(linkAt, afterLink - linkAt);
+    item("stereo link is HOST only and does not change channel settings",
+         youhost::stereoLinkMenuLabel(0) == "Stereo link with ch 2"
+             && youhost::stereoLinkMenuLabel(1) == "Stereo link with ch 2"
              && youhost::pairChainSamples(true, 0, 128) == 128
-             && youhost::pairChainSamples(false, 64, 128) == 64
              && youhost::pairProcessCost(true, true, 256) < youhost::pairProcessCost(false, true, 256)
              && youhost::pluginProcessCallsForPair(true, true) == 1
              && youhost::pluginProcessCallsForPair(false, true) == 2
              && ! youhost::hostPluginSlotsVisible(1, true)
              && youhost::hostPluginSlotsVisible(0, true)
-             && groupMembers.size() == 2
-             && groupMembers[1] == 1
-             && allChannels.size() == 4
-             && allChannels[0] == 0
-             && allChannels[1] == 1
-             && menuSrc.find("hostPage &&") == std::string::npos
-             && menuSrc.find("stereoLinkMenuLabel") != std::string::npos
+             && menuSrc.find("hostPage && canStereoLink") != std::string::npos
              && mainUi.find("showChannelMenu(engine_, meterGrid_") != std::string::npos
              && hostUi.find("showChannelMenu(engine_, *this, channel_, nullptr, true)") != std::string::npos
-             && engineSrc.find("stereoMirror") != std::string::npos
+             && hostUi.find("Stereo link with ch") != std::string::npos
+             && linkBody.find("channelColor_") == std::string::npos
+             && linkBody.find("setChannelName") == std::string::npos
+             && linkBody.find("listen_") == std::string::npos
+             && linkBody.find("channelGroup_") == std::string::npos
+             && engineSrc.find("stereoMirror") == std::string::npos
              && readWorkspaceFile("src/engine/PluginRack.cpp").find("pairChainSamples") != std::string::npos
              && recorderSrc.find("stereoLink") == std::string::npos
              && recorderSrc.find("setStereoLink") == std::string::npos);

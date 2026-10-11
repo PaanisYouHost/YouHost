@@ -416,8 +416,7 @@ void showChannelMenu(AudioEngine& engine,
         groups.addItem(20 + group, engine.groupName(group), true, oneGroup == group);
     menu.addSubMenu("Group", groups);
 
-    juce::ignoreUnused(hostPage);
-    const bool offerLink = canStereoLink(channel, engine.visibleChannels());
+    const bool offerLink = hostPage && canStereoLink(channel, engine.visibleChannels());
     if (offerLink)
         menu.addItem(510, stereoLinkMenuLabel(channel), true, engine.stereoLinked(channel));
 
