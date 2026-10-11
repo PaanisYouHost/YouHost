@@ -1126,11 +1126,19 @@ public:
 
     juce::StringArray getMenuBarNames() override
     {
-        return { "File" };
+        return { "File", "Edit" };
     }
 
-    juce::PopupMenu getMenuForIndex(int, const juce::String&) override
+    juce::PopupMenu getMenuForIndex(int menuIndex, const juce::String&) override
     {
+        if (menuIndex == 1)
+        {
+            juce::PopupMenu edit;
+            edit.addCommandItem(&owner.commandManager_, MainComponent::selectAllCommand);
+            edit.addCommandItem(&owner.commandManager_, MainComponent::makeGroupCommand);
+            return edit;
+        }
+
         const bool recording = owner.engine_.isRecording();
         const bool armed = owner.engine_.recordLockArmed();
         const bool fileOk = recordActionAllowed(RecordDisrupt::newSession, recording, armed);
@@ -1154,7 +1162,8 @@ public:
 
     void menuItemSelected(int id, int) override
     {
-        if (id == MainComponent::saveCommand || id == MainComponent::saveAsCommand)
+        if (id == MainComponent::saveCommand || id == MainComponent::saveAsCommand
+            || id == MainComponent::selectAllCommand || id == MainComponent::makeGroupCommand)
             return;
         if (id == 1)
             owner.newSession();
@@ -1601,32 +1610,28 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     if (shortcutBlocked(originating))
         return false;
 
-    KeyQuery query;
-    query.shift = key.getModifiers().isShiftDown();
-    query.command = key.getModifiers().isCommandDown();
-    query.alt = key.getModifiers().isAltDown();
-    query.character = static_cast<char>(juce::CharacterFunctions::toLowerCase(key.getTextCharacter()));
-    const auto code = key.getKeyCode();
+    RawKey raw;
+    raw.shift = key.getModifiers().isShiftDown();
+    raw.command = key.getModifiers().isCommandDown();
+    raw.alt = key.getModifiers().isAltDown();
+    raw.textCharacter = key.getTextCharacter();
+    raw.keyCode = key.getKeyCode();
     if (key.isKeyCode(juce::KeyPress::spaceKey))
-        query.kind = KeyKind::space;
+        raw.token = RawToken::space;
     else if (key.isKeyCode(juce::KeyPress::leftKey))
-        query.kind = KeyKind::left;
+        raw.token = RawToken::left;
     else if (key.isKeyCode(juce::KeyPress::rightKey))
-        query.kind = KeyKind::right;
-    else if (code == static_cast<int>('['))
-        query.kind = KeyKind::bracketLeft;
-    else if (code == static_cast<int>(']'))
-        query.kind = KeyKind::bracketRight;
-    else if (code == static_cast<int>('R') || code == static_cast<int>('r') || query.character == 'r')
-        query.kind = KeyKind::letterR;
-    else
-        query.kind = KeyKind::character;
+        raw.token = RawToken::right;
 
-    const auto matched = matchShortcut(query);
+    const auto matched = dispatchRawKey(raw, page_, false);
     if (! matched.has_value())
         return false;
+    return runShortcut(*matched);
+}
 
-    switch (*matched)
+bool MainComponent::runShortcut(ShortcutId id)
+{
+    switch (id)
     {
         case ShortcutId::recPage:
             showPage(1);
@@ -1659,14 +1664,10 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
             timeline_.focusChannelJump();
             return true;
         case ShortcutId::selectAll:
-            if (! selectAllShortcutApplies(page_, shortcutBlocked(originating)))
-                return false;
             engine_.selectAllVisibleChannels();
             refresh();
             return true;
         case ShortcutId::makeGroup:
-            if (! makeGroupShortcutApplies(page_, shortcutBlocked(originating)))
-                return false;
             showMakeGroupDialog(engine_);
             refresh();
             return true;
@@ -1724,10 +1725,16 @@ void MainComponent::getAllCommands(juce::Array<juce::CommandID>& commands)
 {
     commands.add(saveCommand);
     commands.add(saveAsCommand);
+    commands.add(selectAllCommand);
+    commands.add(makeGroupCommand);
 }
 
 void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationCommandInfo& result)
 {
+    const auto shortcut = shortcutIdForCommand(static_cast<int>(commandID));
+    if (! shortcut.has_value())
+        return;
+
     const auto addKeys = [&result](ShortcutId id)
     {
         for (const auto& binding : kBindings)
@@ -1745,16 +1752,24 @@ void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationC
         }
     };
 
-    if (commandID == saveCommand)
+    const char* name = "Command";
+    const char* category = "File";
+    if (*shortcut == ShortcutId::save)
+        name = "Save";
+    else if (*shortcut == ShortcutId::saveAs)
+        name = "Save As...";
+    else if (*shortcut == ShortcutId::selectAll)
     {
-        result.setInfo("Save", shortcutMeaning(ShortcutId::save), "File", 0);
-        addKeys(ShortcutId::save);
+        name = "Select All";
+        category = "Edit";
     }
-    else if (commandID == saveAsCommand)
+    else if (*shortcut == ShortcutId::makeGroup)
     {
-        result.setInfo("Save As...", shortcutMeaning(ShortcutId::saveAs), "File", 0);
-        addKeys(ShortcutId::saveAs);
+        name = "Make Group";
+        category = "Edit";
     }
+    result.setInfo(name, shortcutMeaning(*shortcut), category, 0);
+    addKeys(*shortcut);
 }
 
 bool MainComponent::perform(const juce::ApplicationCommandTarget::InvocationInfo& info)
@@ -1762,17 +1777,12 @@ bool MainComponent::perform(const juce::ApplicationCommandTarget::InvocationInfo
     if (startupWindow_ != nullptr || placeWindow_ != nullptr)
         return true;
 
-    if (info.commandID == saveCommand)
-    {
-        saveSession();
+    const auto shortcut = shortcutIdForCommand(static_cast<int>(info.commandID));
+    if (! shortcut.has_value())
+        return false;
+    if (! commandApplies(*shortcut, page_, shortcutBlocked(info.originatingComponent)))
         return true;
-    }
-    if (info.commandID == saveAsCommand)
-    {
-        saveSessionAs();
-        return true;
-    }
-    return false;
+    return runShortcut(*shortcut);
 }
 
 void MainComponent::openStartup()

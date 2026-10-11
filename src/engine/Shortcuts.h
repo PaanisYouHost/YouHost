@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ChannelSelect.h"
+
 #include <optional>
 #include <string>
 
@@ -73,11 +75,11 @@ struct Binding
 
 inline constexpr Binding kBindings[] = {
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
-      "Select every visible channel on the REC page", false, 0 },
+      "Select every visible channel on the REC page", true, 'a' },
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 0, 0, "A",
       "Select every visible channel on the REC page", false, 0 },
     { ShortcutId::makeGroup, KeyKind::character, 'g', 0, 1, 0, "Cmd+G",
-      "On the REC page, name a group from the selected channels, pick a colour, and fold it", false, 0 },
+      "On the REC page, name a group from the selected channels, pick a colour, and fold it", true, 'g' },
     { ShortcutId::goToChannel, KeyKind::character, 'g', 0, 0, 0, "G",
       "Go to channel. Type the number and press Return.", false, 0 },
     { ShortcutId::saveAs, KeyKind::character, 's', 1, 1, 0, "Cmd+Shift+S",
@@ -169,6 +171,136 @@ inline bool bindingModsMatch(const Binding& binding, const KeyQuery& query)
     return ok(binding.shift, query.shift) && ok(binding.command, query.command) && ok(binding.alt, query.alt);
 }
 
+// Menu command ids. Save and Save As were already commands. Select All and
+// Make Group use the same path so the macOS menu and the command manager
+// see Cmd+A and Cmd+G.
+inline constexpr int kSaveCommandId = 0x2101;
+inline constexpr int kSaveAsCommandId = 0x2102;
+inline constexpr int kSelectAllCommandId = 0x2103;
+inline constexpr int kMakeGroupCommandId = 0x2104;
+
+inline int commandIdFor(ShortcutId id) noexcept
+{
+    if (id == ShortcutId::save)
+        return kSaveCommandId;
+    if (id == ShortcutId::saveAs)
+        return kSaveAsCommandId;
+    if (id == ShortcutId::selectAll)
+        return kSelectAllCommandId;
+    if (id == ShortcutId::makeGroup)
+        return kMakeGroupCommandId;
+    return 0;
+}
+
+inline std::optional<ShortcutId> shortcutIdForCommand(int commandId) noexcept
+{
+    if (commandId == kSaveCommandId)
+        return ShortcutId::save;
+    if (commandId == kSaveAsCommandId)
+        return ShortcutId::saveAs;
+    if (commandId == kSelectAllCommandId)
+        return ShortcutId::selectAll;
+    if (commandId == kMakeGroupCommandId)
+        return ShortcutId::makeGroup;
+    return std::nullopt;
+}
+
+// A key as the platform delivers it. On macOS, Command forces the text
+// character to 0 and the key code is the uppercase letter.
+enum class RawToken
+{
+    none,
+    space,
+    left,
+    right
+};
+
+struct RawKey
+{
+    RawToken token = RawToken::none;
+    int keyCode = 0;
+    int textCharacter = 0;
+    bool shift = false;
+    bool command = false;
+    bool alt = false;
+};
+
+inline char lowerAscii(int value) noexcept
+{
+    if (value >= 'A' && value <= 'Z')
+        return static_cast<char>(value - 'A' + 'a');
+    if (value > 0 && value < 128)
+        return static_cast<char>(value);
+    return 0;
+}
+
+inline KeyQuery keyQueryFromRaw(const RawKey& key) noexcept
+{
+    KeyQuery query;
+    query.shift = key.shift;
+    query.command = key.command;
+    query.alt = key.alt;
+    const char codeLetter = lowerAscii(key.keyCode);
+    const char textLetter = lowerAscii(key.textCharacter);
+    query.character = key.textCharacter != 0 ? textLetter : codeLetter;
+    if (key.token == RawToken::space || codeLetter == ' ' || textLetter == ' ')
+        query.kind = KeyKind::space;
+    else if (key.token == RawToken::left)
+        query.kind = KeyKind::left;
+    else if (key.token == RawToken::right)
+        query.kind = KeyKind::right;
+    else if (key.keyCode == '[' || textLetter == '[')
+        query.kind = KeyKind::bracketLeft;
+    else if (key.keyCode == ']' || textLetter == ']')
+        query.kind = KeyKind::bracketRight;
+    else if (codeLetter == 'r' || textLetter == 'r')
+        query.kind = KeyKind::letterR;
+    else
+        query.kind = KeyKind::character;
+    return query;
+}
+
+// Same comparison the command manager uses: the registered key has no text
+// character, and letter case does not matter.
+inline bool commandKeyCodeMatches(int registered, int eventCode) noexcept
+{
+    if (registered == eventCode)
+        return true;
+    if (registered > 0 && registered < 256 && eventCode > 0 && eventCode < 256)
+        return lowerAscii(registered) == lowerAscii(eventCode);
+    return false;
+}
+
+inline int commandForRawKey(const RawKey& key) noexcept
+{
+    KeyQuery mods;
+    mods.shift = key.shift;
+    mods.command = key.command;
+    mods.alt = key.alt;
+    for (const auto& binding : kBindings)
+    {
+        if (! binding.commandBinding || binding.commandCharacter == 0)
+            continue;
+        if (! bindingModsMatch(binding, mods))
+            continue;
+        if (! commandKeyCodeMatches(binding.commandCharacter, key.keyCode))
+            continue;
+        return commandIdFor(binding.id);
+    }
+    return 0;
+}
+
+// Select All and Make Group stay on the REC page, and a text field keeps the key.
+// Save stays available: the command manager already ran it while a field was focused.
+inline bool commandApplies(ShortcutId id, int page, bool textFieldFocused) noexcept
+{
+    if (id == ShortcutId::selectAll)
+        return selectAllShortcutApplies(page, textFieldFocused);
+    if (id == ShortcutId::makeGroup)
+        return makeGroupShortcutApplies(page, textFieldFocused);
+    return true;
+}
+
 inline std::optional<ShortcutId> matchShortcut(const KeyQuery& query)
 {
     for (const auto& binding : kBindings)
@@ -182,6 +314,26 @@ inline std::optional<ShortcutId> matchShortcut(const KeyQuery& query)
         return binding.id;
     }
     return std::nullopt;
+}
+
+// Command manager first, then the key table. This is the path both the menu
+// command and the key listener use. A macOS Command event has no text character.
+inline std::optional<ShortcutId> dispatchRawKey(const RawKey& key, int page, bool textFieldFocused)
+{
+    const int command = commandForRawKey(key);
+    if (command != 0)
+    {
+        const auto id = shortcutIdForCommand(command);
+        if (! id.has_value() || ! commandApplies(*id, page, textFieldFocused))
+            return std::nullopt;
+        return id;
+    }
+    if (textFieldFocused)
+        return std::nullopt;
+    const auto matched = matchShortcut(keyQueryFromRaw(key));
+    if (! matched.has_value() || ! commandApplies(*matched, page, false))
+        return std::nullopt;
+    return matched;
 }
 
 inline std::string shortcutChord(ShortcutId id)

@@ -9,6 +9,7 @@
 #include "ui/PluginPage.h"
 #include "ui/ScannerWindow.h"
 #include "ui/TimelineView.h"
+#include "engine/Shortcuts.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -39,6 +40,7 @@ public:
 private:
     void timerCallback() override;
     bool handleKey(const juce::KeyPress& key, juce::Component* originating);
+    bool runShortcut(ShortcutId id);
     void refresh();
     void publishMeters(bool repaintLevels);
     void onPluginSlot(int channel);
@@ -77,8 +79,10 @@ private:
 
     enum CommandIDs
     {
-        saveCommand = 0x2101,
-        saveAsCommand = 0x2102
+        saveCommand = kSaveCommandId,
+        saveAsCommand = kSaveAsCommandId,
+        selectAllCommand = kSelectAllCommandId,
+        makeGroupCommand = kMakeGroupCommandId
     };
 
     AudioEngine& engine_;

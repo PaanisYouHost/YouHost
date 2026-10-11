@@ -3102,6 +3102,138 @@ void testRaiseUnit()
     CHECK(youhost::raiseUnit(0.0f, 3) == 0.0f);
 }
 
+youhost::RawKey macLetter(char lower, bool shift, bool command, bool alt)
+{
+    youhost::RawKey key;
+    if (lower >= 'a' && lower <= 'z')
+        key.keyCode = lower - 'a' + 'A';
+    else
+        key.keyCode = static_cast<unsigned char>(lower);
+    key.shift = shift;
+    key.command = command;
+    key.alt = alt;
+    if (command)
+        key.textCharacter = 0;
+    else if (shift && lower >= 'a' && lower <= 'z')
+        key.textCharacter = key.keyCode;
+    else
+        key.textCharacter = static_cast<unsigned char>(lower);
+    if (lower == ' ')
+        key.token = youhost::RawToken::space;
+    return key;
+}
+
+void testKeyDispatch()
+{
+    const auto ran = [](const youhost::RawKey& key, int page, bool textField, youhost::ShortcutId id)
+    {
+        const auto got = youhost::dispatchRawKey(key, page, textField);
+        CHECK(got.has_value());
+        if (got.has_value())
+            CHECK(*got == id);
+    };
+
+    const auto commandA = macLetter('a', false, true, false);
+    const auto commandG = macLetter('g', false, true, false);
+    const auto plainA = macLetter('a', false, false, false);
+    const auto plainG = macLetter('g', false, false, false);
+    CHECK(youhost::commandForRawKey(commandA) == youhost::kSelectAllCommandId);
+    CHECK(youhost::commandForRawKey(commandG) == youhost::kMakeGroupCommandId);
+    CHECK(youhost::commandForRawKey(macLetter('s', false, true, false)) == youhost::kSaveCommandId);
+    CHECK(youhost::commandForRawKey(macLetter('s', true, true, false)) == youhost::kSaveAsCommandId);
+    CHECK(youhost::commandForRawKey(plainA) == 0);
+    CHECK(youhost::commandForRawKey(plainG) == 0);
+    CHECK(youhost::commandForRawKey(macLetter('1', false, false, false)) == 0);
+
+    ran(commandA, 1, false, youhost::ShortcutId::selectAll);
+    ran(plainA, 1, false, youhost::ShortcutId::selectAll);
+    ran(commandG, 1, false, youhost::ShortcutId::makeGroup);
+    ran(plainG, 1, false, youhost::ShortcutId::goToChannel);
+    ran(plainG, 2, false, youhost::ShortcutId::goToChannel);
+    CHECK(! youhost::dispatchRawKey(commandA, 2, false).has_value());
+    CHECK(! youhost::dispatchRawKey(commandA, 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(plainA, 2, false).has_value());
+    CHECK(! youhost::dispatchRawKey(plainA, 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(commandG, 2, false).has_value());
+    CHECK(! youhost::dispatchRawKey(commandG, 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter('a', true, false, false), 1, false).has_value());
+
+    ran(macLetter('1', false, false, false), 1, false, youhost::ShortcutId::recPage);
+    ran(macLetter('2', false, false, false), 1, false, youhost::ShortcutId::hostPage);
+    ran(macLetter('3', false, false, false), 1, false, youhost::ShortcutId::dropouts);
+    ran(macLetter('d', false, false, false), 1, false, youhost::ShortcutId::dropouts);
+    ran(macLetter('4', false, false, false), 1, false, youhost::ShortcutId::cpu);
+    ran(macLetter('5', false, false, false), 1, false, youhost::ShortcutId::latency);
+    ran(macLetter('s', false, false, false), 1, false, youhost::ShortcutId::scanner);
+    ran(macLetter('t', false, false, false), 1, false, youhost::ShortcutId::zoomIn);
+    ran(macLetter('r', false, false, false), 1, false, youhost::ShortcutId::zoomOut);
+    ran(macLetter('r', false, false, true), 1, false, youhost::ShortcutId::fit);
+    ran(macLetter(' ', false, false, false), 1, false, youhost::ShortcutId::playOrStop);
+    ran(macLetter(' ', false, true, false), 1, false, youhost::ShortcutId::recordNow);
+    ran(macLetter('s', false, true, false), 1, false, youhost::ShortcutId::save);
+    ran(macLetter('s', true, true, false), 1, false, youhost::ShortcutId::saveAs);
+    ran(macLetter('s', false, true, false), 1, true, youhost::ShortcutId::save);
+
+    youhost::RawKey left;
+    left.token = youhost::RawToken::left;
+    left.textCharacter = 0;
+    ran(left, 1, false, youhost::ShortcutId::previousTake);
+    left.shift = true;
+    ran(left, 1, false, youhost::ShortcutId::nudgeBack);
+    youhost::RawKey right;
+    right.token = youhost::RawToken::right;
+    right.textCharacter = 0;
+    ran(right, 1, false, youhost::ShortcutId::nextTake);
+    right.shift = true;
+    ran(right, 1, false, youhost::ShortcutId::nudgeForward);
+
+    youhost::RawKey taller;
+    taller.keyCode = '[';
+    taller.textCharacter = 0;
+    taller.command = true;
+    ran(taller, 1, false, youhost::ShortcutId::lanesTaller);
+    youhost::RawKey shorter;
+    shorter.keyCode = ']';
+    shorter.textCharacter = 0;
+    shorter.command = true;
+    ran(shorter, 1, false, youhost::ShortcutId::lanesShorter);
+
+    youhost::RawKey optionR;
+    optionR.keyCode = 'R';
+    optionR.textCharacter = 0x00AE;
+    optionR.alt = true;
+    ran(optionR, 1, false, youhost::ShortcutId::fit);
+
+    CHECK(! youhost::dispatchRawKey(macLetter('1', false, false, false), 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(macLetter(' ', false, false, false), 1, true).has_value());
+    CHECK(! youhost::dispatchRawKey(plainG, 1, true).has_value());
+
+    const auto ui = readWorkspaceFile("src/ui/MainComponent.cpp");
+    const auto header = readWorkspaceFile("src/ui/MainComponent.h");
+    CHECK(ui.find("dispatchRawKey(raw, page_, false)") != std::string::npos);
+    CHECK(ui.find("shortcutIdForCommand(static_cast<int>(info.commandID))") != std::string::npos);
+    CHECK(ui.find("commandApplies(*shortcut, page_, shortcutBlocked(info.originatingComponent))") != std::string::npos);
+    CHECK(ui.find("return runShortcut(*shortcut)") != std::string::npos);
+    CHECK(ui.find("edit.addCommandItem") != std::string::npos);
+    CHECK(header.find("selectAllCommand = kSelectAllCommandId") != std::string::npos);
+    CHECK(header.find("makeGroupCommand = kMakeGroupCommandId") != std::string::npos);
+    bool selectAllIsCommand = false;
+    bool makeGroupIsCommand = false;
+    bool plainAIsNotCommand = false;
+    for (const auto& binding : youhost::kBindings)
+    {
+        if (binding.id == youhost::ShortcutId::selectAll && binding.command == 1)
+            selectAllIsCommand = binding.commandBinding && binding.commandCharacter == 'a';
+        if (binding.id == youhost::ShortcutId::makeGroup && binding.command == 1)
+            makeGroupIsCommand = binding.commandBinding && binding.commandCharacter == 'g';
+        if (binding.id == youhost::ShortcutId::selectAll && binding.command == 0)
+            plainAIsNotCommand = ! binding.commandBinding;
+    }
+    CHECK(selectAllIsCommand);
+    CHECK(makeGroupIsCommand);
+    CHECK(plainAIsNotCommand);
+}
+
 void testReleaseChecklist()
 {
     int listed = 0;
@@ -3520,6 +3652,32 @@ void testReleaseChecklist()
          lockedPath != std::string::npos && sampleCpu != std::string::npos && lockedPath < sampleCpu
              && gateAt != std::string::npos && scanAfterGate != std::string::npos);
 
+    youhost::RawKey menuA;
+    menuA.keyCode = 'A';
+    menuA.textCharacter = 0;
+    menuA.command = true;
+    youhost::RawKey menuG = menuA;
+    menuG.keyCode = 'G';
+    const auto menuSelect = youhost::dispatchRawKey(menuA, 1, false);
+    const auto menuGroup = youhost::dispatchRawKey(menuG, 1, false);
+    item("Cmd+A and Cmd+G go through the command dispatch",
+         youhost::commandForRawKey(menuA) == youhost::kSelectAllCommandId
+             && youhost::commandForRawKey(menuG) == youhost::kMakeGroupCommandId
+             && menuSelect.has_value() && *menuSelect == youhost::ShortcutId::selectAll
+             && menuGroup.has_value() && *menuGroup == youhost::ShortcutId::makeGroup
+             && ! youhost::dispatchRawKey(menuA, 2, false).has_value()
+             && ! youhost::dispatchRawKey(menuA, 1, true).has_value()
+             && ! youhost::dispatchRawKey(menuG, 2, false).has_value()
+             && ! youhost::dispatchRawKey(menuG, 1, true).has_value()
+             && mainUi.find("dispatchRawKey") != std::string::npos
+             && mainUi.find("\"Edit\"") != std::string::npos
+             && mainUi.find("\"Select All\"") != std::string::npos
+             && mainUi.find("\"Make Group\"") != std::string::npos
+             && mainUi.find("selectAllCommand") != std::string::npos
+             && mainUi.find("makeGroupCommand") != std::string::npos
+             && mainUi.find("commandApplies") != std::string::npos
+             && mainUi.find("runShortcut") != std::string::npos);
+
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
 }
@@ -3570,6 +3728,7 @@ int main()
     testSessionNames();
     testPluginLoadPace();
     testShortcutsMatchTheHelp();
+    testKeyDispatch();
     testGroupsFoldAndPalette();
     testSessionChannelsRateLockAndClose();
     testTimelinePaintDoesNotReenterLock();
