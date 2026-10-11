@@ -3777,9 +3777,14 @@ void testReleaseChecklist()
              && appSrc.find("systemRequestedQuit") != std::string::npos
              && quitAsks);
 
+    const auto recBounds = mainUi.find("recButton_.setBounds");
+    const auto lockBounds = mainUi.find("recordLock_->setBounds");
     item("record lock arms only from the padlock",
          engineSrc.find("recordLockArmed_ = true") == std::string::npos
-             && mainUi.find("setRecordLockArmed(! engine_.recordLockArmed())") != std::string::npos);
+             && mainUi.find("setRecordLockArmed(! engine_.recordLockArmed())") != std::string::npos
+             && recBounds != std::string::npos && lockBounds != std::string::npos && recBounds < lockBounds
+             && mainUi.find("transport.removeFromLeft(kRecordLockButtonWidth)") == std::string::npos
+             && mainUi.find("cluster.removeFromLeft(kRecordLockButtonWidth)") != std::string::npos);
 
     item("device menu is not rebuilt on every timer tick",
          mainUi.find("if (signature != cardSignature_)") != std::string::npos

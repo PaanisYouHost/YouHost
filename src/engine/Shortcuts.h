@@ -444,7 +444,7 @@ inline constexpr const char* kShortcutNotes =
     "When not recording there is no dialog. The record lock still blocks them. "
     "If the card rate is higher than the session, YouHost shows Session moves to 48 kHz. A lower rate changes with no prompt. "
     "Plugins are prepared again off the audio thread. Takes keep the rate in their WAV files.\n"
-    "The padlock beside the transport is the record lock. Click it to arm the lock, including before the take starts. "
+    "The padlock beside Record is the record lock. Click it to arm the lock, including before the take starts. "
     "While recording and locked, Stop, Space, Cmd+Space, Record, New, Open, Open Recent, Import, "
     "device, sample rate, buffer, Offline, and REC, INPUT, and OFF are blocked. "
     "Quit asks you to unlock first. Only another click on the padlock unlocks it. There is no keyboard shortcut. "

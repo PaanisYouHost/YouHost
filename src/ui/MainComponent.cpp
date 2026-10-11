@@ -2931,16 +2931,15 @@ void MainComponent::resized()
     auto fileGap = area.removeFromTop(4);
     fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
     auto transport = area.removeFromTop(kRecordLockRowHeight);
-    if (recordLock_ != nullptr)
-        recordLock_->setBounds(transport.removeFromLeft(kRecordLockButtonWidth).reduced(2, 0));
-    transport.removeFromLeft(6);
-    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + 8 + 148 + 96;
+    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + kRecordLockButtonWidth + 8 + 148 + 96;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
     prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
     nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
     stopButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
     playButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
     recButton_.setBounds(cluster.removeFromLeft(84).reduced(2, kTransportControlInsetY));
+    if (recordLock_ != nullptr)
+        recordLock_->setBounds(cluster.removeFromLeft(kRecordLockButtonWidth).reduced(2, 0));
     cluster.removeFromLeft(8);
     timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
     modeLabel_.setBounds(cluster.reduced(4, 8));
