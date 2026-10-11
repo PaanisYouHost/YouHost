@@ -41,9 +41,10 @@ jobs:
         run: |
           set -euo pipefail
           cmake --build build --config Release --target YouHostTests
-          TEST=$(find build -type f -name YouHostTests -perm -111 | head -n 1)
-          if [ -z "${TEST}" ]; then
+          TEST=build/YouHostTests
+          if [ ! -x "${TEST}" ]; then
             echo "YouHostTests was not produced"
+            find build -name 'YouHostTests*' -print
             exit 1
           fi
           "${TEST}"
@@ -52,9 +53,10 @@ jobs:
         run: |
           set -euo pipefail
           cmake --build build --config Release --target YouHostAuDelayTest
-          TEST=$(find build -type f -name YouHostAuDelayTest -perm -111 | head -n 1)
-          if [ -z "${TEST}" ]; then
+          TEST=build/YouHostAuDelayTest
+          if [ ! -x "${TEST}" ]; then
             echo "YouHostAuDelayTest was not produced"
+            find build -name 'YouHostAuDelayTest*' -print
             exit 1
           fi
           "${TEST}"

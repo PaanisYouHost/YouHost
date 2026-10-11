@@ -6,7 +6,7 @@ Every release runs the engine tests. They print one line per rule. The run passe
 g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/YouHostTests && /tmp/YouHostTests
 ```
 
-The macOS workflow builds this same `YouHostTests` target and an Apple AUDelay silent-input load. The job fails if either one fails.
+The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so the lock-reentry checks stay on, and an Apple AUDelay silent-input load. The job fails if either one fails.
 
 `testReleaseChecklist` is the report for this file. The other tests in that binary stay part of the same gate. A Mac build of the app still has to open every window below, once with no saved size and once with an old small saved size, and the text must be on screen. This test checks that open size instead of a screenshot: there is no display in the unit-test run.
 

@@ -85,6 +85,9 @@ target_compile_features(YouHostTests PRIVATE cxx_std_20)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(YouHostTests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+# Release adds -DNDEBUG, which compiles out the lock-reentry checks. The
+# checklist builds this file without NDEBUG. -UNDEBUG has to follow -DNDEBUG.
+target_compile_options(YouHostTests PRIVATE -UNDEBUG)
 
 enable_testing()
 add_test(NAME YouHostTests COMMAND YouHostTests)
