@@ -6,20 +6,44 @@ namespace youhost
 {
 
 // Fixed character columns. A changing digit stays inside its column.
-inline constexpr int kStatusDeviceChars = 28;
+// The last two characters of every column are a gap, so a full field cannot
+// run into the next one. The device column fits
+// "Offline (no audio) - 128 channels" (33) plus that gap.
+inline constexpr int kStatusColumnGap = 2;
+inline constexpr int kStatusDeviceChars = 35;
 inline constexpr int kStatusIoChars = 18;
-inline constexpr int kStatusRateChars = 10;
-inline constexpr int kStatusBitsChars = 13;
-inline constexpr int kStatusCpuChars = 8;
+inline constexpr int kStatusRateChars = 11;
+inline constexpr int kStatusBitsChars = 14;
+inline constexpr int kStatusCpuChars = 10;
 inline constexpr int kStatusSessionChars = 24;
 
+inline int statusLineChars() noexcept
+{
+    return kStatusDeviceChars + kStatusIoChars + kStatusRateChars + kStatusBitsChars
+         + kStatusCpuChars + kStatusSessionChars;
+}
+
+// Fit text into the column and keep a trailing gap. A value that still does
+// not fit ends with "..." inside the content area, never against the next field.
 inline std::string fitStatusColumn(std::string text, int width)
 {
     if (width < 0)
         width = 0;
-    if (static_cast<int>(text.size()) > width)
-        text.resize(static_cast<std::size_t>(width));
-    else if (static_cast<int>(text.size()) < width)
+    const int gap = width < kStatusColumnGap ? width : kStatusColumnGap;
+    const int content = width - gap;
+    if (static_cast<int>(text.size()) > content)
+    {
+        if (content <= 0)
+            text.clear();
+        else if (content < 4)
+            text.resize(static_cast<std::size_t>(content));
+        else
+        {
+            text.resize(static_cast<std::size_t>(content - 3));
+            text += "...";
+        }
+    }
+    if (static_cast<int>(text.size()) < width)
         text.append(static_cast<std::size_t>(width - static_cast<int>(text.size())), ' ');
     return text;
 }

@@ -37,6 +37,28 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Engine tests
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostTests
+          TEST=$(find build -type f -name YouHostTests -perm -111 | head -n 1)
+          if [ -z "${TEST}" ]; then
+            echo "YouHostTests was not produced"
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: AUDelay silent input
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostAuDelayTest
+          TEST=$(find build -type f -name YouHostAuDelayTest -perm -111 | head -n 1)
+          if [ -z "${TEST}" ]; then
+            echo "YouHostAuDelayTest was not produced"
+            exit 1
+          fi
+          "${TEST}"
+
       - name: Ad-hoc sign
         run: |
           set -euo pipefail

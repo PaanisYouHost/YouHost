@@ -88,3 +88,27 @@ endif()
 
 enable_testing()
 add_test(NAME YouHostTests COMMAND YouHostTests)
+
+# Loads Apple AUDelay on macOS, feeds silence into both inputs, and fails if the
+# output is non-finite or nowhere near silence. The GitHub macOS job runs it.
+if(APPLE)
+    add_executable(YouHostAuDelayTest tests/audelay_silent.cpp)
+    target_compile_features(YouHostAuDelayTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostAuDelayTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostAuDelayTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostAuDelayTest COMMAND YouHostAuDelayTest)
+endif()

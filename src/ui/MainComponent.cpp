@@ -19,7 +19,9 @@
 #include "engine/Shortcuts.h"
 #include "engine/StatusLine.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <map>
 #include <vector>
 
@@ -2769,7 +2771,7 @@ void MainComponent::paint(juce::Graphics& graphics)
                                        session);
 
     graphics.setColour(theme::dim);
-    graphics.setFont(juce::Font(juce::FontOptions(13.0f).withName(juce::Font::getDefaultMonospacedFontName())));
+    graphics.setFont(statusFont_);
     graphics.drawText(juce::String(line), statusArea_, juce::Justification::centredLeft, false);
 
     if (! engine_.microphoneGranted())
@@ -2860,15 +2862,41 @@ void MainComponent::ensureLogo()
     }
 }
 
+void MainComponent::layoutStatusLine()
+{
+    auto font = juce::Font(juce::FontOptions(13.0f).withName(juce::Font::getDefaultMonospacedFontName()));
+    const int chars = statusLineChars();
+    const int available = std::max(0, statusArea_.getWidth());
+    if (chars > 0 && available > 0)
+    {
+        const float natural = juce::GlyphArrangement::getStringWidth(font, juce::String::repeatedString("0", chars));
+        if (natural > static_cast<float>(available))
+            font = font.withHeight(std::max(8.0f, font.getHeight() * static_cast<float>(available) / natural));
+    }
+    statusFont_ = font;
+
+    float advance = 8.0f;
+    if (chars > 0)
+    {
+        const float measured = juce::GlyphArrangement::getStringWidth(statusFont_, juce::String::repeatedString("0", chars));
+        if (measured > 0.0f)
+            advance = measured / static_cast<float>(chars);
+    }
+    const int cpuIndex = statusCpuColumnIndex();
+    const int cpuX = static_cast<int>(std::floor(advance * static_cast<float>(cpuIndex)));
+    const int cpuRight = static_cast<int>(std::ceil(advance * static_cast<float>(cpuIndex + kStatusCpuChars)));
+    const int cpuWidth = std::max(1, cpuRight - cpuX);
+    const int room = std::max(0, statusArea_.getWidth() - cpuX);
+    cpuStatusArea_ = statusArea_.withTrimmedLeft(cpuX).withWidth(std::min(cpuWidth, room));
+}
+
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(12);
     auto title = area.removeFromTop(22);
     titleArea_ = title.removeFromLeft(90);
     statusArea_ = title;
-    const int cpuChars = kStatusCpuChars;
-    const int cpuWidth = cpuChars * 8;
-    cpuStatusArea_ = statusArea_.withTrimmedLeft(statusCpuColumnIndex() * 8).withWidth(cpuWidth);
+    layoutStatusLine();
     area.removeFromTop(6);
 
     auto views = area.removeFromTop(34);

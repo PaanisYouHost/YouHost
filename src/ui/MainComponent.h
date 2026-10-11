@@ -154,6 +154,7 @@ private:
     double copyProgressValue_ = 0.0;
     void chooseSaveAsDestination(std::function<void(bool saved)> then = {});
     void syncCopyProgress();
+    void layoutStatusLine();
 
     bool heavyPaintSuspended_ = false;
     bool heavyPaintHeld_ = false;
@@ -172,6 +173,7 @@ private:
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;
     juce::Rectangle<int> cpuStatusArea_;
+    juce::Font statusFont_ { juce::FontOptions(13.0f) };
     int lastCpuPercent_ = -1;
     std::string lastStatusWithoutCpu_;
     juce::Rectangle<int> bannerArea_;

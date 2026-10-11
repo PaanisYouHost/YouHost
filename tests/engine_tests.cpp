@@ -3731,12 +3731,36 @@ void testReleaseChecklist()
              && mainUi.find("Browse...") != std::string::npos
              && mainUi.find("No recent sessions") != std::string::npos);
 
+    const auto shortLine = youhost::formatStatusLine("A", "1 in / 2 out", "48.0 kHz", "24-bit", 7, "Song");
+    const auto longLine = youhost::formatStatusLine("B", "48 in / 48 out", "192.0 kHz", "32-bit float", 100, "Other");
+    const auto offlineLine = youhost::formatStatusLine("Offline (no audio) - 128 channels",
+                                                       "128 ch",
+                                                       "",
+                                                       "24-bit",
+                                                       0,
+                                                       "10.10.2026_1 disk");
+    const auto cutLine = youhost::formatStatusLine(std::string(80, 'A'), "1 in / 2 out", "48.0 kHz", "24-bit", 7, "Song");
+    const auto cpuAt = static_cast<std::size_t>(youhost::statusCpuColumnIndex());
+    const bool offlineSeparated = offlineLine.size() == static_cast<std::size_t>(youhost::statusLineChars())
+                                  && offlineLine.find("Offline (no audio) - 128 channels") == 0
+                                  && offlineLine.find("cha128") == std::string::npos
+                                  && offlineLine.find("0%10.") == std::string::npos
+                                  && offlineLine.compare(cpuAt, 8, "CPU   0%") == 0
+                                  && offlineLine[cpuAt + 8] == ' '
+                                  && offlineLine.find("10.10.2026_1 disk") != std::string::npos
+                                  && offlineLine.compare(static_cast<std::size_t>(youhost::kStatusDeviceChars), 6, "128 ch") == 0;
+    const bool cutKeepsGap = cutLine.size() == offlineLine.size()
+                             && cutLine.compare(0, 3, "...") != 0
+                             && cutLine.find("...") == static_cast<std::size_t>(youhost::kStatusDeviceChars - youhost::kStatusColumnGap - 3)
+                             && cutLine[static_cast<std::size_t>(youhost::kStatusDeviceChars - 1)] == ' '
+                             && cutLine.compare(static_cast<std::size_t>(youhost::kStatusDeviceChars), 12, "1 in / 2 out") == 0;
     item("status line keeps fixed columns and pads CPU",
          youhost::formatCpuField(7) == "CPU   7%" && youhost::formatCpuField(42) == "CPU  42%"
              && youhost::formatCpuField(100) == "CPU 100%" && youhost::formatCpuField(-4) == "CPU   0%"
              && youhost::formatCpuField(140) == "CPU 100%"
-             && youhost::formatStatusLine("A", "1 in / 2 out", "48.0 kHz", "24-bit", 7, "Song").size()
-                    == static_cast<std::size_t>(youhost::formatStatusLine("B", "48 in / 48 out", "192.0 kHz", "32-bit float", 100, "Other").size()));
+             && shortLine.size() == longLine.size()
+             && shortLine.size() == static_cast<std::size_t>(youhost::statusLineChars())
+             && offlineSeparated && cutKeepsGap);
 
     const auto install = readWorkspaceFile("INSTALL.md");
     item("install guide is the Mac steps after the app is on the Mac",

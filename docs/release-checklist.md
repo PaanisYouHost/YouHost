@@ -6,6 +6,8 @@ Every release runs the engine tests. They print one line per rule. The run passe
 g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/YouHostTests && /tmp/YouHostTests
 ```
 
+The macOS workflow builds this same `YouHostTests` target and an Apple AUDelay silent-input load. The job fails if either one fails.
+
 `testReleaseChecklist` is the report for this file. The other tests in that binary stay part of the same gate. A Mac build of the app still has to open every window below, once with no saved size and once with an old small saved size, and the text must be on screen. This test checks that open size instead of a screenshot: there is no display in the unit-test run.
 
 ## Rules
@@ -33,7 +35,7 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 | Missing card | A missing saved card goes Offline, keeps that card's channel count, and the status is `Saved card X not found - Offline`. Explicit Offline still shows 128. |
 | Go field focus | The Go field does not take focus until it is clicked or G is pressed. Return and Esc leave it. |
 | File and Clear | The File button and Clear Timeline are gone. Open lists recent sessions and Browse. |
-| Status line | CPU is padded to three digits. Every status column has a fixed width. |
+| Status line | CPU is padded to three digits. Every status column has a fixed width and a gap, so the card name, CPU, and session do not run together. The offline card name fits in full. |
 | Install guide | The install note is the Mac steps after YouHost.app is already on the Mac. |
 | Session required | The main window stays closed until a session exists. |
 | Cmd+Q hook | Quit goes through the unsaved-changes prompt. |
