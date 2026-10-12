@@ -759,6 +759,8 @@ public:
         number_.setColour(juce::Label::textColourId, theme::text);
         number_.setMinimumHorizontalScale(1.0f);
         number_.setJustificationType(juce::Justification::centred);
+        name_.setOpaque(false);
+        name_.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         name_.setEditable(false, true, false);
         name_.setFont(juce::Font(juce::FontOptions(13.0f)));
         name_.setMinimumHorizontalScale(0.6f);
@@ -1011,7 +1013,7 @@ public:
         const auto row = getLocalBounds().reduced(0, 2);
         number_.setBounds(columns.channel.x, row.getY(), columns.channel.width, row.getHeight());
         arm_.setBounds(columns.mode.x, row.getY() + 2, std::max(0, columns.mode.width - 4), std::max(0, row.getHeight() - 4));
-        name_.setBounds(columns.name.x, row.getY(), columns.name.width, row.getHeight());
+        name_.setBounds(columns.name.x + 3, row.getY() + 3, std::max(0, columns.name.width - 6), std::max(0, row.getHeight() - 6));
         meterArea_ = juce::Rectangle<int>(columns.meter.x + 3, row.getY() + 3,
                                           std::max(0, columns.meter.width - 6), std::max(0, row.getHeight() - 6));
         exclude_.setBounds(columns.exclude.x, row.getY() + 2, std::max(0, columns.exclude.width - 4), std::max(0, row.getHeight() - 4));
@@ -1076,8 +1078,9 @@ public:
 
         if (! name_.isBeingEdited())
         {
+            // Outside the label. A stroke inside its bounds is covered when the label paints.
             graphics.setColour(juce::Colours::white);
-            graphics.drawRoundedRectangle(name_.getBounds().toFloat().reduced(1.0f), 3.0f, 1.0f);
+            graphics.drawRoundedRectangle(name_.getBounds().toFloat().expanded(1.5f), 3.0f, 1.0f);
         }
 
         graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));

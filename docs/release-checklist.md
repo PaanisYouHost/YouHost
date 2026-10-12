@@ -86,6 +86,7 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Version label | The window title, Help, and About say YouHost Beta 0.9.0. A saved session stores that in savedWith. The Mac zip is YouHost-Beta-0.9.0-macOS.zip. |
 | Markers | The MARKER button sits at the right of the transport. M and that button drop a marker at the playhead and do not start, stop, or move the take, including while the record lock is on. 6 opens the marker list. Markers live in the session file only. |
 | Mono fold stays 2/2 | A stereo plugin on a linked pair stays one 2-in/2-out process. Fold L remains the mono fold. Mono 1/1 is not switched on in this build. |
+| WAV names | A new recording is channel_name_take.wav, for example 1_BD_1.wav, 1_BD_2.wav, and 2_Sn_1.wav. A channel with no name is channel_take.wav, for example 1_1.wav and 1_2.wav. The name is made safe for the filesystem. Files already stored in a session keep the names they have, including the older channel_take_name.wav layout, and those sessions still open. |
 
 ## Windows to photograph on a Mac release
 

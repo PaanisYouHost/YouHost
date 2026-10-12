@@ -80,7 +80,8 @@ inline bool prefixAt(std::string_view text, std::size_t index, std::string_view 
     return true;
 }
 
-// channel_take[_name].wav, with no zero padding. The rest of the name is ignored.
+// Older recordings: channel_take.wav and channel_take_name.wav.
+// The second field is the take, so "1_1_BD.wav" stays channel 1, take 1.
 inline bool parseChannelFirstName(std::string_view base, int& channel, int& take)
 {
     channel = 0;
@@ -120,15 +121,63 @@ inline bool parseChannelFirstName(std::string_view base, int& channel, int& take
     return true;
 }
 
-// Understands current names (1_1.wav, 3_1_BD.wav), older names (Take01_Ch03_Kick.wav),
-// and loose "track 4" / "ch3" names.
+// New recordings: channel_name_take.wav, for example 1_BD_1.wav and 2_Sn_1.wav.
+// The name may contain underscores. The take is the trailing number.
+// A second field that is only digits is the older layout and is left alone.
+inline bool parseChannelNameTake(std::string_view base, int& channel, int& take)
+{
+    channel = 0;
+    take = 0;
+    if (base.empty() || std::isdigit(static_cast<unsigned char>(base.front())) == 0)
+        return false;
+
+    std::size_t index = 0;
+    int value = 0;
+    int digits = 0;
+    while (index < base.size() && std::isdigit(static_cast<unsigned char>(base[index])) != 0 && digits < 6)
+    {
+        value = value * 10 + (base[index] - '0');
+        ++index;
+        ++digits;
+    }
+    if (digits == 0 || value <= 0 || index >= base.size() || base[index] != '_')
+        return false;
+    ++index;
+    if (index >= base.size() || std::isdigit(static_cast<unsigned char>(base[index])) != 0)
+        return false;
+
+    const auto last = base.rfind('_');
+    if (last == std::string_view::npos || last < index || last + 1 >= base.size())
+        return false;
+
+    int takeValue = 0;
+    int takeDigits = 0;
+    for (std::size_t cursor = last + 1; cursor < base.size(); ++cursor)
+    {
+        if (std::isdigit(static_cast<unsigned char>(base[cursor])) == 0 || takeDigits >= 6)
+            return false;
+        takeValue = takeValue * 10 + (base[cursor] - '0');
+        ++takeDigits;
+    }
+    if (takeDigits == 0 || takeValue <= 0)
+        return false;
+
+    channel = value;
+    take = takeValue;
+    return true;
+}
+
+// Understands new names (1_BD_1.wav, 2_Sn_1.wav), the previous layout
+// (1_1.wav, 3_1_BD.wav), older names (Take01_Ch03_Kick.wav), and loose
+// "track 4" / "ch3" names.
 inline ParsedRecordingName parseRecordingName(std::string_view path)
 {
     const auto base = stripExtension(fileNameOnly(path));
     ParsedRecordingName parsed;
     int channelFirst = 0;
     int takeFirst = 0;
-    if (parseChannelFirstName(base, channelFirst, takeFirst))
+    if (parseChannelFirstName(base, channelFirst, takeFirst)
+        || parseChannelNameTake(base, channelFirst, takeFirst))
     {
         parsed.channelNumber = channelFirst;
         parsed.takeNumber = takeFirst;

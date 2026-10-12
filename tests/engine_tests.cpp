@@ -732,11 +732,30 @@ void testTakePlan()
     CHECK(code.hours == 1);
     CHECK(code.minutes == 1);
     CHECK(code.seconds == 1);
-    CHECK(youhost::takeWaveName(1, 3, "Kick Drum") == "3_1_Kick_Drum.wav");
-    CHECK(youhost::takeWaveName(12, 1, "Kick/Snare") == "1_12_KickSnare.wav");
+    CHECK(youhost::takeWaveName(1, 1, "BD") == "1_BD_1.wav");
+    CHECK(youhost::takeWaveName(2, 1, "BD") == "1_BD_2.wav");
+    CHECK(youhost::takeWaveName(1, 2, "Sn") == "2_Sn_1.wav");
+    CHECK(youhost::takeWaveName(1, 3, "Kick Drum") == "3_Kick_Drum_1.wav");
+    CHECK(youhost::takeWaveName(12, 1, "Kick/Snare") == "1_KickSnare_12.wav");
     CHECK(youhost::takeWaveName(1, 1, "") == "1_1.wav");
-    CHECK(youhost::takeWaveName(2, 2, "BD") == "2_2_BD.wav");
+    CHECK(youhost::takeWaveName(1, 2, "") == "2_1.wav");
+    CHECK(youhost::takeWaveName(2, 1, "") == "1_2.wav");
+    CHECK(youhost::takeWaveName(2, 2, "BD") == "2_BD_2.wav");
     CHECK(youhost::takeWaveName(1, 1, "  ") == "1_1.wav");
+    CHECK(youhost::takeWaveName(1, 1, "a/b:c*?\"<>|") == "1_abc_1.wav");
+    youhost::SessionDocumentModel keptNames;
+    youhost::SessionTakeRecord oldTake;
+    oldTake.start = 0;
+    oldTake.length = 48000;
+    oldTake.files.push_back({ 0, "1_1_BD.wav" });
+    oldTake.files.push_back({ 1, "2_1.wav" });
+    keptNames.takes.push_back(oldTake);
+    youhost::SessionDocumentModel loadedNames;
+    CHECK(youhost::readSessionModel(youhost::writeSessionModel(keptNames), loadedNames));
+    CHECK(loadedNames.takes.size() == 1);
+    CHECK(loadedNames.takes[0].files.size() == 2);
+    CHECK(loadedNames.takes[0].files[0].name == "1_1_BD.wav");
+    CHECK(loadedNames.takes[0].files[1].name == "2_1.wav");
     CHECK(youhost::sanitiseChannelName("  ") == "");
     CHECK(youhost::meterColourForDb(-21.0f, -20) == youhost::MeterColour::green);
     CHECK(youhost::meterColourForDb(-20.0f, -20) == youhost::MeterColour::yellow);
@@ -1423,6 +1442,18 @@ void testTakeImportGroups()
     const auto current = youhost::parseRecordingName("1_1_BD.wav");
     CHECK(current.takeNumber == 1);
     CHECK(current.channelNumber == 1);
+    const auto named = youhost::parseRecordingName("1_BD_1.wav");
+    CHECK(named.takeNumber == 1);
+    CHECK(named.channelNumber == 1);
+    const auto secondTake = youhost::parseRecordingName("1_BD_2.wav");
+    CHECK(secondTake.takeNumber == 2);
+    CHECK(secondTake.channelNumber == 1);
+    const auto snare = youhost::parseRecordingName("2_Sn_1.wav");
+    CHECK(snare.takeNumber == 1);
+    CHECK(snare.channelNumber == 2);
+    const auto drum = youhost::parseRecordingName("3_Kick_Drum_1.wav");
+    CHECK(drum.takeNumber == 1);
+    CHECK(drum.channelNumber == 3);
     const auto plain = youhost::parseRecordingName("3_2.wav");
     CHECK(plain.takeNumber == 2);
     CHECK(plain.channelNumber == 3);
@@ -4424,6 +4455,7 @@ void testReleaseChecklist()
     item("Channel name outline",
          readWorkspaceFile("src/ui/MeterGrid.cpp").find("editingChannel_ != cell.channel") != std::string::npos
              && hostUi.find("! name_.isBeingEdited()") != std::string::npos
+             && hostUi.find("expanded(1.5f)") != std::string::npos
              && checklistDoc.find("Channel name outline") != std::string::npos);
     item("LINK greyed when the group is not a pair",
          youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, 0, -1 }.data(), 4)
@@ -4447,8 +4479,22 @@ void testReleaseChecklist()
              && youhost::dispatchRawKey(macLetter('m', false, false, false), 1, false) == youhost::ShortcutId::marker
              && ! youhost::shortcutAsksTransport(youhost::ShortcutId::marker)
              && markerBody.find("stop(") == std::string::npos
-             && mainUi.find("markerButton_") != std::string::npos
+             && mainUi.find("addAndMakeVisible(markerButton_)") != std::string::npos
+             && mainUi.find("addAndMakeVisible(markersButton_)") != std::string::npos
+             && mainUi.find("addAndMakeVisible(syncOk_)") != std::string::npos
+             && mainUi.find("markerButton_.setBounds(transport.removeFromRight") != std::string::npos
              && checklistDoc.find("| Markers |") != std::string::npos);
+    item("WAV names",
+         youhost::takeWaveName(1, 1, "BD") == "1_BD_1.wav"
+             && youhost::takeWaveName(2, 1, "BD") == "1_BD_2.wav"
+             && youhost::takeWaveName(1, 2, "Sn") == "2_Sn_1.wav"
+             && youhost::takeWaveName(1, 1, "") == "1_1.wav"
+             && youhost::takeWaveName(2, 1, "  ") == "1_2.wav"
+             && youhost::parseRecordingName("1_BD_2.wav").takeNumber == 2
+             && youhost::parseRecordingName("1_1_BD.wav").channelNumber == 1
+             && youhost::parseRecordingName("1_1_BD.wav").takeNumber == 1
+             && youhost::parseRecordingName("Take01_Ch03_Kick.wav").channelNumber == 3
+             && checklistDoc.find("WAV names") != std::string::npos);
     item("Mono fold stays 2/2",
          youhost::pluginProcessCallsForPair(true, true) == 1
              && std::string(youhost::stereoFoldToken(youhost::StereoFold::left)) == "L"

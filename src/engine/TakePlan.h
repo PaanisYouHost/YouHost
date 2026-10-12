@@ -164,21 +164,22 @@ inline std::string sanitiseChannelName(std::string_view name)
     return out;
 }
 
-// channel_take[_name].wav with no zero padding. An empty name is left off,
-// so a channel the user has not renamed is just "1_1.wav".
+// <channel>_<name>_<take>.wav. An empty name is left off, so an unnamed
+// channel is <channel>_<take>.wav. No zero padding. Only new recordings
+// use this. A session keeps the file name it already stored.
 inline std::string takeWaveName(int takeNumber, int channelNumber, std::string_view name)
 {
     const int take = takeNumber < 1 ? 1 : takeNumber;
     const int channel = channelNumber < 1 ? 1 : channelNumber;
     std::string file = std::to_string(channel);
-    file.push_back('_');
-    file += std::to_string(take);
     const std::string clean = sanitiseChannelName(name);
     if (! clean.empty())
     {
         file.push_back('_');
         file += clean;
     }
+    file.push_back('_');
+    file += std::to_string(take);
     file += ".wav";
     return file;
 }

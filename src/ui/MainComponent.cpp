@@ -1292,6 +1292,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(saveButton_);
     addAndMakeVisible(saveAsButton_);
     addAndMakeVisible(dropoutsButton_);
+    addAndMakeVisible(markersButton_);
+    addAndMakeVisible(markerButton_);
+    addAndMakeVisible(syncOk_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
     addAndMakeVisible(retryButton_);
@@ -3202,7 +3205,7 @@ void MainComponent::resized()
     fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
     auto transport = area.removeFromTop(kRecordLockRowHeight);
     markerButton_.setBounds(transport.removeFromRight(96).reduced(2, kTransportControlInsetY));
-    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + kRecordLockButtonWidth + 8 + 148 + 96;
+    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + kRecordLockButtonWidth + 8 + 148;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
     prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
     nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
