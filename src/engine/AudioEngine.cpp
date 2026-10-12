@@ -196,6 +196,30 @@ AudioObjectPropertyAddress deviceListAddress()
              kAudioObjectPropertyElementMain };
 }
 
+OSStatus clockPropertyListener(AudioObjectID,
+                             UInt32,
+                             const AudioObjectPropertyAddress*,
+                             void* client)
+{
+    auto* engine = static_cast<AudioEngine*>(client);
+    if (engine != nullptr)
+        engine->noteClockProperty();
+    return noErr;
+}
+
+AudioObjectPropertyAddress clockPropertyAddress(AudioObjectPropertySelector selector)
+{
+    return { selector, kAudioObjectPropertyScopeWildcard, kAudioObjectPropertyElementWildcard };
+}
+
+template <typename Value>
+bool readClockProperty(AudioDeviceID id, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope, Value& value)
+{
+    const AudioObjectPropertyAddress address { selector, scope, kAudioObjectPropertyElementMain };
+    UInt32 size = sizeof(Value);
+    return AudioObjectGetPropertyData(id, &address, 0, nullptr, &size, &value) == noErr && size >= sizeof(Value);
+}
+
 OSStatus deviceListListener(AudioObjectID,
                             UInt32,
                             const AudioObjectPropertyAddress*,
@@ -694,8 +718,6 @@ void AudioEngine::silenceLiveState()
 {
     for (auto& strip : strips_)
         clearMeterBallistics(strip);
-    for (auto& peak : outputPeak_)
-        peak.store(0.0f, std::memory_order_relaxed);
     if (playbackScratch_.size() > 0
         && (recorder_ == nullptr || recorder_->view().mode != TransportMode::playing))
         std::fill(playbackScratch_.begin(), playbackScratch_.end(), 0.0f);
@@ -841,6 +863,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     // A late wake-up is a gap. The clock read is a vDSO call, not a lock or an allocation.
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
+    callbackSerial_.fetch_add(1, std::memory_order_relaxed);
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
     noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap));
 
@@ -926,34 +949,32 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     if (outputChannelData != nullptr && numSamples > 0)
     {
+        const auto meterGains = blockMeterGains(config.meterTiming, numSamples);
         for (int channel = 0; channel < sessionChannels; ++channel)
         {
+            auto& strip = strips_[static_cast<std::size_t>(channel)];
             if (! channelIsOn(enabledLow, enabledHigh, channel))
             {
-                outputPeak_[static_cast<std::size_t>(channel)].store(0.0f, std::memory_order_relaxed);
+                parkMeter(strip.outputMeterState, strip.outputMeter);
                 continue;
             }
             const float gain = finiteTrimGain(outputGain_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed));
             const int packed = config.routing.outputPacked[static_cast<std::size_t>(channel)];
             if (packed < 0 || packed >= numOutputChannels)
+            {
+                parkMeter(strip.outputMeterState, strip.outputMeter);
                 continue;
+            }
             float* output = outputChannelData[packed];
             if (output == nullptr)
+            {
+                parkMeter(strip.outputMeterState, strip.outputMeter);
                 continue;
+            }
             if (! sameFloatBits(gain, 1.0f))
                 applyOutputTrim(output, numSamples, gain);
             sanitizeAudioBlock(output, numSamples);
-            float peak = 0.0f;
-            for (int index = 0; index < numSamples; ++index)
-            {
-                const float sample = output[index];
-                const float absolute = sample < 0.0f ? -sample : sample;
-                if (absolute > peak)
-                    peak = absolute;
-            }
-            const float previous = outputPeak_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
-            const float held = previous * 0.9f;
-            outputPeak_[static_cast<std::size_t>(channel)].store(peak > held ? peak : held, std::memory_order_relaxed);
+            updateMeter(strip.outputMeterState, strip.outputMeter, output, numSamples, meterGains);
         }
     }
 
@@ -979,6 +1000,10 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
         strip.meter.rms.store(0.0f, std::memory_order_relaxed);
         strip.meter.peak.store(0.0f, std::memory_order_relaxed);
         strip.meter.clipped.store(false, std::memory_order_relaxed);
+        strip.outputMeterState = {};
+        strip.outputMeter.rms.store(0.0f, std::memory_order_relaxed);
+        strip.outputMeter.peak.store(0.0f, std::memory_order_relaxed);
+        strip.outputMeter.clipped.store(false, std::memory_order_relaxed);
     }
 
     // The device thread only raises flags. Sample rate, plugin prepare, and the
@@ -1127,6 +1152,7 @@ void AudioEngine::installOverloadListener(const juce::String& deviceName)
     const AudioObjectPropertyAddress address = overloadAddress();
     if (AudioObjectAddPropertyListener(id, &address, &overloadListener, this) == noErr)
         overloadDeviceId_ = static_cast<std::uint32_t>(id);
+    installClockListeners(static_cast<std::uint32_t>(id));
    #else
     juce::ignoreUnused(deviceName);
    #endif
@@ -1135,6 +1161,7 @@ void AudioEngine::installOverloadListener(const juce::String& deviceName)
 void AudioEngine::removeOverloadListener()
 {
    #if JUCE_MAC
+    removeClockListeners();
     if (overloadDeviceId_ == 0)
         return;
 
@@ -1145,6 +1172,185 @@ void AudioEngine::removeOverloadListener()
                                       this);
     overloadDeviceId_ = 0;
    #endif
+}
+
+void AudioEngine::noteClockProperty() noexcept
+{
+    clockPropertyDirty_.store(true, std::memory_order_relaxed);
+}
+
+void AudioEngine::installClockListeners(std::uint32_t deviceId)
+{
+   #if JUCE_MAC
+    removeClockListeners();
+    if (deviceId == 0)
+        return;
+    const AudioDeviceID id = static_cast<AudioDeviceID>(deviceId);
+    const AudioObjectPropertySelector selectors[] = {
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioDevicePropertyDeviceIsRunning,
+        kAudioDevicePropertyClockSource,
+        kAudioDevicePropertyNominalSampleRate,
+    };
+    for (const auto selector : selectors)
+    {
+        const AudioObjectPropertyAddress address = clockPropertyAddress(selector);
+        AudioObjectAddPropertyListener(id, &address, &clockPropertyListener, this);
+    }
+    clockDeviceId_ = deviceId;
+    UInt32 source = 0;
+    Float64 rate = 0.0;
+    clockSourceKnown_ = readClockProperty(id, kAudioDevicePropertyClockSource, kAudioObjectPropertyScopeGlobal, source)
+                        || readClockProperty(id, kAudioDevicePropertyClockSource, kAudioObjectPropertyScopeOutput, source);
+    if (clockSourceKnown_)
+        clockSourceSnapshot_ = source;
+    nominalRateKnown_ = readClockProperty(id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, rate)
+                        || readClockProperty(id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeOutput, rate);
+    if (nominalRateKnown_)
+        nominalRateSnapshot_ = rate;
+    clockPropertyDirty_.store(false, std::memory_order_relaxed);
+   #else
+    juce::ignoreUnused(deviceId);
+   #endif
+}
+
+void AudioEngine::removeClockListeners() noexcept
+{
+   #if JUCE_MAC
+    if (clockDeviceId_ == 0)
+        return;
+    const AudioDeviceID id = static_cast<AudioDeviceID>(clockDeviceId_);
+    const AudioObjectPropertySelector selectors[] = {
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioDevicePropertyDeviceIsRunning,
+        kAudioDevicePropertyClockSource,
+        kAudioDevicePropertyNominalSampleRate,
+    };
+    for (const auto selector : selectors)
+    {
+        const AudioObjectPropertyAddress address = clockPropertyAddress(selector);
+        AudioObjectRemovePropertyListener(id, &address, &clockPropertyListener, this);
+    }
+    clockDeviceId_ = 0;
+    clockSourceKnown_ = false;
+    nominalRateKnown_ = false;
+    clockPropertyDirty_.store(false, std::memory_order_relaxed);
+   #endif
+}
+
+void AudioEngine::sampleClockProperties(bool& aliveDown, bool& runningDown, bool& sourceChanged, bool& rateChanged)
+{
+    aliveDown = false;
+    runningDown = false;
+    sourceChanged = false;
+    rateChanged = false;
+   #if JUCE_MAC
+    if (clockDeviceId_ == 0 || ! clockPropertyDirty_.exchange(false, std::memory_order_relaxed))
+        return;
+    const AudioDeviceID id = static_cast<AudioDeviceID>(clockDeviceId_);
+    UInt32 alive = 1;
+    if (readClockProperty(id, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, alive))
+        aliveDown = alive == 0;
+    UInt32 running = 1;
+    if (readClockProperty(id, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal, running)
+        || readClockProperty(id, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeOutput, running))
+        runningDown = running == 0;
+    UInt32 source = 0;
+    if (readClockProperty(id, kAudioDevicePropertyClockSource, kAudioObjectPropertyScopeGlobal, source)
+        || readClockProperty(id, kAudioDevicePropertyClockSource, kAudioObjectPropertyScopeOutput, source))
+    {
+        if (clockSourceKnown_ && source != clockSourceSnapshot_)
+            sourceChanged = true;
+        clockSourceSnapshot_ = source;
+        clockSourceKnown_ = true;
+    }
+    Float64 rate = 0.0;
+    if (readClockProperty(id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, rate)
+        || readClockProperty(id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeOutput, rate))
+    {
+        if (nominalRateKnown_ && std::abs(rate - nominalRateSnapshot_) > 0.5)
+            rateChanged = true;
+        nominalRateSnapshot_ = rate;
+        nominalRateKnown_ = true;
+    }
+   #endif
+}
+
+void AudioEngine::resetClockWatch() noexcept
+{
+    clockMemory_.reset();
+    clockSyncMissing_ = false;
+    clockLostSinceMs_ = 0;
+    clockPropertyDirty_.store(false, std::memory_order_relaxed);
+}
+
+void AudioEngine::noteClockLost()
+{
+    if (openingChosenDevice_)
+        return;
+    if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
+        return;
+    if (syncLost_.isMissing())
+        return;
+    clockSyncMissing_ = true;
+    clockLostSinceMs_ = juce::Time::getMillisecondCounter();
+    const auto now = juce::Time::getCurrentTime();
+    syncLost_.deviceLost(now.getHours(), now.getMinutes(), now.getSeconds());
+    appendHostLog(settings_, "sync lost");
+}
+
+void AudioEngine::noteClockRestored()
+{
+    if (! clockSyncMissing_ || ! syncLost_.isMissing())
+        return;
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    const auto gap = clockLostSinceMs_ == 0 ? std::int64_t { 0 }
+                                             : static_cast<std::int64_t>(nowMs - clockLostSinceMs_);
+    clockSyncMissing_ = false;
+    clockLostSinceMs_ = 0;
+    syncLost_.deviceReturned(gap);
+    appendHostLog(settings_, "sync restored");
+}
+
+void AudioEngine::watchClockSync()
+{
+    if (offlineTemplate_ || openingChosenDevice_
+        || ! deviceOpen_.load(std::memory_order_relaxed)
+        || ! hostWasRunning_.load(std::memory_order_acquire))
+    {
+        if (offlineTemplate_ || ! hostWasRunning_.load(std::memory_order_acquire))
+            resetClockWatch();
+        return;
+    }
+
+    bool aliveDown = false;
+    bool runningDown = false;
+    bool sourceChanged = false;
+    bool rateChanged = false;
+    sampleClockProperties(aliveDown, runningDown, sourceChanged, rateChanged);
+
+    ClockSyncInput input;
+    input.nowNs = steadyNowNs();
+    input.lastCallbackNs = lastCallbackNs_.load(std::memory_order_relaxed);
+    input.callbackCount = callbackSerial_.load(std::memory_order_relaxed);
+    input.dropoutCount = dropoutCount_.load(std::memory_order_relaxed);
+    input.dspPercent = blockCpuPercent(callbackElapsedNs_.load(std::memory_order_relaxed),
+                                       bufferSamples_.load(std::memory_order_relaxed),
+                                       sampleRate_.load(std::memory_order_relaxed));
+    input.offline = false;
+    input.deviceOpen = true;
+    input.hostWasRunning = true;
+    input.openingDevice = false;
+    input.aliveDown = aliveDown;
+    input.runningDown = runningDown;
+    input.clockSourceChanged = sourceChanged;
+    input.nominalRateChanged = rateChanged;
+
+    const auto action = decideClockSync(clockMemory_, input);
+    if (action == ClockSyncAction::lost)
+        noteClockLost();
+    else if (action == ClockSyncAction::restored)
+        noteClockRestored();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -1296,7 +1502,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const bool resumeTake = cameBack && resumeRecordingOnReturn_;
     if (remember && sameCard)
     {
-        if (syncLost_.isMissing())
+        if (syncLost_.isMissing() && (deviceLostBanner_ || lossFinalized_))
             syncLost_.deviceReturned(gapMs);
         deviceLostBanner_ = false;
         lossFinalized_ = false;
@@ -1341,6 +1547,7 @@ void AudioEngine::clearSyncLost() noexcept
     downSinceMs_ = 0;
     resumeRecordingOnReturn_ = false;
     deviceDown_.store(false, std::memory_order_release);
+    resetClockWatch();
 }
 
 void AudioEngine::parkOfflineAfterFailedOpen(const juce::String& name)
@@ -1385,6 +1592,8 @@ void AudioEngine::clearDisplayedCpu() noexcept
 void AudioEngine::handleDeviceDown()
 {
     deviceOpen_.store(false, std::memory_order_relaxed);
+    clockSyncMissing_ = false;
+    clockMemory_.reset();
     clearDisplayedCpu();
     deviceName_ = "No device";
     publishSessionChannelLimit();
@@ -3786,7 +3995,14 @@ float AudioEngine::outputPeakFor(int channel) const noexcept
 {
     if (channel < 0 || channel >= kMaxChannels)
         return 0.0f;
-    return outputPeak_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
+    return strips_[static_cast<std::size_t>(channel)].outputMeter.peak.load(std::memory_order_relaxed);
+}
+
+float AudioEngine::outputRmsFor(int channel) const noexcept
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return 0.0f;
+    return strips_[static_cast<std::size_t>(channel)].outputMeter.rms.load(std::memory_order_relaxed);
 }
 
 void AudioEngine::dropMarker()

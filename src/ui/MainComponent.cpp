@@ -2855,6 +2855,7 @@ void MainComponent::timerCallback()
     // only heartbeat. An idle message thread was then logged as a stall that
     // grew for as long as the card stayed up.
     engine_.beatMessageThread();
+    engine_.watchClockSync();
     if (++pollDivider_ >= 6)
     {
         pollDivider_ = 0;

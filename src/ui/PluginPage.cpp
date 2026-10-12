@@ -993,7 +993,8 @@ public:
             if (! meterArea_.isEmpty())
                 repaint(meterArea_);
         }
-        const int outputMilli = static_cast<int>(engine_.outputPeakFor(channel_) * 1000.0f);
+        const float outputShown = showPeak_ ? engine_.outputPeakFor(channel_) : engine_.outputRmsFor(channel_);
+        const int outputMilli = static_cast<int>(outputShown * 1000.0f);
         if (outputMilli != outputMilli_)
         {
             outputMilli_ = outputMilli;
@@ -1085,7 +1086,7 @@ public:
 
         graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
         graphics.fillRoundedRectangle(outputMeterArea_.toFloat(), 2.0f);
-        const float outputLevel = engine_.outputPeakFor(channel_);
+        const float outputLevel = showPeak_ ? engine_.outputPeakFor(channel_) : engine_.outputRmsFor(channel_);
         if (on && outputLevel > 0.0f && outputMeterArea_.getHeight() > 1)
         {
             const float filled = normaliseDb(gainToDb(outputLevel), span) * static_cast<float>(outputMeterArea_.getHeight());

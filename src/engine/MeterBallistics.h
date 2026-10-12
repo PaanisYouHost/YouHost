@@ -82,14 +82,20 @@ inline void healMeterState(MeterState& state) noexcept
         state.peakHoldSamples = 0;
 }
 
+inline void clearMeterBallistics(MeterState& state, MeterSnapshot& meter) noexcept
+{
+    state = {};
+    meter.rms.store(0.0f, std::memory_order_relaxed);
+    meter.peak.store(0.0f, std::memory_order_relaxed);
+    meter.clipped.store(false, std::memory_order_relaxed);
+    meter.clearRequested.store(false, std::memory_order_relaxed);
+    meter.resetRequested.store(false, std::memory_order_relaxed);
+}
+
 inline void clearMeterBallistics(ChannelStrip& strip) noexcept
 {
-    strip.meterState = {};
-    strip.meter.rms.store(0.0f, std::memory_order_relaxed);
-    strip.meter.peak.store(0.0f, std::memory_order_relaxed);
-    strip.meter.clipped.store(false, std::memory_order_relaxed);
-    strip.meter.clearRequested.store(false, std::memory_order_relaxed);
-    strip.meter.resetRequested.store(false, std::memory_order_relaxed);
+    clearMeterBallistics(strip.meterState, strip.meter);
+    clearMeterBallistics(strip.outputMeterState, strip.outputMeter);
 }
 
 // A non-finite sample cannot enter the ballistics. Huge finite values are
@@ -106,21 +112,21 @@ inline float meterSample(float sample) noexcept
 }
 
 // Audio thread only. `samples` is non-null and numSamples > 0.
-inline void updateMeter(ChannelStrip& strip, const float* samples, int numSamples, const BlockMeterGains& gains)
+inline void updateMeter(MeterState& state, MeterSnapshot& meter, const float* samples, int numSamples, const BlockMeterGains& gains)
 {
     // A plugin-chain change drops the level and the clip immediately.
-    if (strip.meter.resetRequested.exchange(false, std::memory_order_relaxed))
+    if (meter.resetRequested.exchange(false, std::memory_order_relaxed))
     {
-        strip.meterState = {};
-        strip.meter.clearRequested.store(false, std::memory_order_relaxed);
+        state = {};
+        meter.clearRequested.store(false, std::memory_order_relaxed);
     }
-    else if (strip.meter.clearRequested.exchange(false, std::memory_order_relaxed))
+    else if (meter.clearRequested.exchange(false, std::memory_order_relaxed))
     {
         // The clip mark stays on until the UI asks for it to be cleared.
-        strip.meterState.clipped = false;
+        state.clipped = false;
     }
 
-    healMeterState(strip.meterState);
+    healMeterState(state);
 
     float peak = 0.0f;
     double sumSquares = 0.0;
@@ -138,51 +144,60 @@ inline void updateMeter(ChannelStrip& strip, const float* samples, int numSample
     }
 
     const float meanSquare = static_cast<float>(sumSquares / static_cast<double>(numSamples));
-    strip.meterState.meanSquare = strip.meterState.meanSquare * gains.rmsKeep
-                                 + meanSquare * (1.0f - gains.rmsKeep);
+    state.meanSquare = state.meanSquare * gains.rmsKeep + meanSquare * (1.0f - gains.rmsKeep);
 
-    if (peak >= strip.meterState.heldPeak)
+    if (peak >= state.heldPeak)
     {
-        strip.meterState.heldPeak = peak;
-        strip.meterState.peakHoldSamples = gains.peakHoldSamples;
+        state.heldPeak = peak;
+        state.peakHoldSamples = gains.peakHoldSamples;
     }
-    else if (strip.meterState.peakHoldSamples > numSamples)
+    else if (state.peakHoldSamples > numSamples)
     {
-        strip.meterState.peakHoldSamples -= numSamples;
+        state.peakHoldSamples -= numSamples;
     }
     else
     {
-        strip.meterState.peakHoldSamples = 0;
-        strip.meterState.heldPeak *= gains.peakKeep;
+        state.peakHoldSamples = 0;
+        state.heldPeak *= gains.peakKeep;
     }
 
-    healMeterState(strip.meterState);
+    healMeterState(state);
 
     if (clipped)
-        strip.meterState.clipped = true;
+        state.clipped = true;
 
-    strip.meter.rms.store(std::sqrt(strip.meterState.meanSquare), std::memory_order_relaxed);
-    strip.meter.peak.store(strip.meterState.heldPeak, std::memory_order_relaxed);
-    strip.meter.clipped.store(strip.meterState.clipped, std::memory_order_relaxed);
+    meter.rms.store(std::sqrt(state.meanSquare), std::memory_order_relaxed);
+    meter.peak.store(state.heldPeak, std::memory_order_relaxed);
+    meter.clipped.store(state.clipped, std::memory_order_relaxed);
+}
+
+inline void updateMeter(ChannelStrip& strip, const float* samples, int numSamples, const BlockMeterGains& gains)
+{
+    updateMeter(strip.meterState, strip.meter, samples, numSamples, gains);
 }
 
 // Audio thread only. A channel that is off holds a dark meter instead of coasting.
+inline void parkMeter(MeterState& state, MeterSnapshot& meter) noexcept
+{
+    if (meter.resetRequested.exchange(false, std::memory_order_relaxed))
+    {
+        state.clipped = false;
+        meter.clearRequested.store(false, std::memory_order_relaxed);
+    }
+    else if (meter.clearRequested.exchange(false, std::memory_order_relaxed))
+        state.clipped = false;
+
+    state.meanSquare = 0.0f;
+    state.heldPeak = 0.0f;
+    state.peakHoldSamples = 0;
+    meter.rms.store(0.0f, std::memory_order_relaxed);
+    meter.peak.store(0.0f, std::memory_order_relaxed);
+    meter.clipped.store(state.clipped, std::memory_order_relaxed);
+}
+
 inline void parkMeter(ChannelStrip& strip) noexcept
 {
-    if (strip.meter.resetRequested.exchange(false, std::memory_order_relaxed))
-    {
-        strip.meterState.clipped = false;
-        strip.meter.clearRequested.store(false, std::memory_order_relaxed);
-    }
-    else if (strip.meter.clearRequested.exchange(false, std::memory_order_relaxed))
-        strip.meterState.clipped = false;
-
-    strip.meterState.meanSquare = 0.0f;
-    strip.meterState.heldPeak = 0.0f;
-    strip.meterState.peakHoldSamples = 0;
-    strip.meter.rms.store(0.0f, std::memory_order_relaxed);
-    strip.meter.peak.store(0.0f, std::memory_order_relaxed);
-    strip.meter.clipped.store(strip.meterState.clipped, std::memory_order_relaxed);
+    parkMeter(strip.meterState, strip.meter);
 }
 
 } // namespace youhost

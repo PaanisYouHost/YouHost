@@ -20,6 +20,7 @@
 #include "engine/CpuMeter.h"
 #include "engine/PlaybackRoute.h"
 #include "engine/DeviceLoss.h"
+#include "engine/ClockSync.h"
 #include "engine/SyncLost.h"
 #include "engine/Markers.h"
 #include "engine/GroupEdit.h"
@@ -4657,6 +4658,140 @@ void testReleaseChecklist()
              && checklistDoc.find("not from a timer scan") != std::string::npos
              && checklistDoc.find("bottom-left") != std::string::npos
              && checklistDoc.find("repaints only that box") != std::string::npos);
+    auto liveClock = []
+    {
+        youhost::ClockSyncInput input;
+        input.deviceOpen = true;
+        input.hostWasRunning = true;
+        input.dspPercent = 4;
+        input.nowNs = 1000000000;
+        input.lastCallbackNs = 1000000000;
+        input.callbackCount = 10;
+        return input;
+    };
+    youhost::ClockSyncMemory clock;
+    auto clockIn = liveClock();
+    const bool clockQuiet = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::hold && ! clock.missing;
+    clockIn.lastCallbackNs = 0;
+    clockIn.nowNs = 2000000000;
+    const bool clockBeforeFirst = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::hold && ! clock.missing;
+    clockIn = liveClock();
+    clockIn.nowNs = clockIn.lastCallbackNs + 250000000;
+    const auto lostAt = clockIn.nowNs;
+    const bool clockFrozen = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::lost && clock.missing
+                             && clock.lostAtNs == lostAt;
+    clockIn.nowNs += 250000000;
+    const bool clockNotRestamped = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::hold
+                                   && clock.missing && clock.lostAtNs == lostAt;
+    clockIn.lastCallbackNs = clockIn.nowNs;
+    clockIn.callbackCount = 11;
+    const auto resumedAt = clockIn.nowNs;
+    const bool clockHalfRestore = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::hold && clock.missing;
+    clockIn.nowNs = resumedAt + 500000000;
+    clockIn.lastCallbackNs = clockIn.nowNs;
+    clockIn.callbackCount = 12;
+    const bool clockNotYet = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::hold && clock.missing;
+    clockIn.nowNs = resumedAt + 1000000000;
+    clockIn.lastCallbackNs = clockIn.nowNs;
+    clockIn.callbackCount = 13;
+    const bool clockRestored = youhost::decideClockSync(clock, clockIn) == youhost::ClockSyncAction::restored && ! clock.missing;
+    youhost::ClockSyncMemory hole;
+    auto holeIn = liveClock();
+    holeIn.nowNs = holeIn.lastCallbackNs + 250000000;
+    youhost::decideClockSync(hole, holeIn);
+    holeIn.lastCallbackNs = holeIn.nowNs;
+    holeIn.callbackCount = 11;
+    youhost::decideClockSync(hole, holeIn);
+    const auto holeMark = hole.regularSinceNs;
+    holeIn.nowNs += 250000000;
+    const bool holeReset = youhost::decideClockSync(hole, holeIn) == youhost::ClockSyncAction::hold
+                           && hole.missing && hole.regularSinceNs == 0 && hole.lostAtNs != 0 && holeMark != 0;
+    youhost::ClockSyncMemory offlineClock;
+    auto offlineIn = liveClock();
+    offlineIn.offline = true;
+    offlineIn.nowNs = offlineIn.lastCallbackNs + 250000000;
+    const bool offlineHolds = youhost::decideClockSync(offlineClock, offlineIn) == youhost::ClockSyncAction::hold
+                              && ! offlineClock.missing;
+    youhost::ClockSyncMemory idleClock;
+    auto idleIn = liveClock();
+    idleIn.hostWasRunning = false;
+    idleIn.nowNs = idleIn.lastCallbackNs + 1000000000;
+    const bool idleHolds = youhost::decideClockSync(idleClock, idleIn) == youhost::ClockSyncAction::hold && ! idleClock.missing;
+    youhost::ClockSyncMemory oneDrop;
+    auto dropIn = liveClock();
+    dropIn.dspPercent = 0;
+    dropIn.dropoutCount = 0;
+    dropIn.nowNs = 0;
+    dropIn.lastCallbackNs = 0;
+    youhost::decideClockSync(oneDrop, dropIn);
+    dropIn.nowNs = 10000000;
+    dropIn.lastCallbackNs = 10000000;
+    dropIn.dropoutCount = 1;
+    dropIn.callbackCount = 2;
+    const bool oneDropoutHolds = youhost::decideClockSync(oneDrop, dropIn) == youhost::ClockSyncAction::hold && ! oneDrop.missing;
+    dropIn.nowNs = 500000000;
+    dropIn.lastCallbackNs = 500000000;
+    const bool oneDropoutStays = youhost::decideClockSync(oneDrop, dropIn) == youhost::ClockSyncAction::hold && ! oneDrop.missing;
+    youhost::ClockSyncMemory burst;
+    auto burstIn = liveClock();
+    burstIn.dspPercent = 0;
+    burstIn.dropoutCount = 0;
+    burstIn.nowNs = 0;
+    burstIn.lastCallbackNs = 0;
+    youhost::decideClockSync(burst, burstIn);
+    burstIn.nowNs = 10000000;
+    burstIn.lastCallbackNs = 10000000;
+    burstIn.dropoutCount = 1;
+    burstIn.callbackCount = 2;
+    youhost::decideClockSync(burst, burstIn);
+    burstIn.nowNs = 260000000;
+    burstIn.lastCallbackNs = 260000000;
+    burstIn.dropoutCount = 2;
+    burstIn.callbackCount = 3;
+    const bool burstLost = youhost::decideClockSync(burst, burstIn) == youhost::ClockSyncAction::lost && burst.missing;
+    youhost::ClockSyncMemory history;
+    auto historyIn = liveClock();
+    historyIn.dspPercent = 0;
+    historyIn.dropoutCount = 50;
+    historyIn.nowNs = 0;
+    historyIn.lastCallbackNs = 0;
+    const bool historyStamp = youhost::decideClockSync(history, historyIn) == youhost::ClockSyncAction::hold && ! history.missing;
+    historyIn.nowNs = 300000000;
+    historyIn.lastCallbackNs = 300000000;
+    const bool historyHolds = youhost::decideClockSync(history, historyIn) == youhost::ClockSyncAction::hold && ! history.missing;
+    youhost::ClockSyncMemory hot;
+    auto hotIn = liveClock();
+    hotIn.dspPercent = 40;
+    hotIn.dropoutCount = 1;
+    hotIn.nowNs = 0;
+    youhost::decideClockSync(hot, hotIn);
+    hotIn.nowNs = 300000000;
+    hotIn.lastCallbackNs = 300000000;
+    hotIn.dropoutCount = 8;
+    const bool hotHolds = youhost::decideClockSync(hot, hotIn) == youhost::ClockSyncAction::hold && ! hot.missing;
+    youhost::ClockSyncMemory alive;
+    auto aliveIn = liveClock();
+    aliveIn.aliveDown = true;
+    const bool aliveLost = youhost::decideClockSync(alive, aliveIn) == youhost::ClockSyncAction::lost && alive.missing;
+    const auto watchAt = mainUi.find("engine_.watchClockSync();");
+    const auto lockedCard = mainUi.find("if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))");
+    item("Network clock",
+         clockQuiet && clockBeforeFirst && clockFrozen && clockNotRestamped && clockHalfRestore && clockNotYet && clockRestored
+             && holeReset && offlineHolds && idleHolds && oneDropoutHolds && oneDropoutStays && burstLost
+             && historyStamp && historyHolds && hotHolds && aliveLost
+             && youhost::kClockSilenceNs == 200000000 && youhost::kClockRestoredNs == 1000000000
+             && watchAt != std::string::npos && lockedCard != std::string::npos && watchAt < lockedCard
+             && callbackSlice.find("callbackSerial_.fetch_add") != std::string::npos
+             && engineSrc.find("kAudioDevicePropertyDeviceIsAlive") != std::string::npos
+             && engineSrc.find("kAudioDevicePropertyDeviceIsRunning") != std::string::npos
+             && engineSrc.find("kAudioDevicePropertyClockSource") != std::string::npos
+             && engineSrc.find("kAudioDevicePropertyNominalSampleRate") != std::string::npos
+             && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
+             && engineSrc.find("deviceLostBanner_ || lossFinalized_") != std::string::npos
+             && helpText.find("3.6 ms") != std::string::npos
+             && helpText.find("SoundGrid driver buffer") != std::string::npos
+             && helpText.find("LV1") != std::string::npos
+             && checklistDoc.find("SoundGrid, Dante, and AVB") != std::string::npos);
     const auto lossBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
     const auto listBody = sliceBetween(engineSrc, "void AudioEngine::noteHardwareDeviceList()", "void AudioEngine::rejectForeignDevice()");
     const auto reopenBody = sliceBetween(engineSrc, "void AudioEngine::tryReopenWanted()", "bool AudioEngine::deviceNameListed");
@@ -4684,12 +4819,50 @@ void testReleaseChecklist()
              && engineSrc.find("kAudioHardwarePropertyDevices") != std::string::npos
              && engineSrc.find("noteHardwareDevicesChanged") != std::string::npos
              && checklistDoc.find("not from a timer scan") != std::string::npos);
+    youhost::ChannelStrip hostMeter;
+    const auto meterTiming = youhost::meterTimingFor(48000.0);
+    const auto meterGains = youhost::blockMeterGains(meterTiming, 64);
+    float tone[64];
+    for (int index = 0; index < 64; ++index)
+        tone[index] = 0.112f * static_cast<float>(std::sin((2.0 * 3.141592653589793 * index) / 64.0));
+    for (int block = 0; block < 400; ++block)
+    {
+        youhost::updateMeter(hostMeter, tone, 64, meterGains);
+        youhost::updateMeter(hostMeter.outputMeterState, hostMeter.outputMeter, tone, 64, meterGains);
+    }
+    const float inputDb = youhost::gainToDb(hostMeter.meter.rms.load(std::memory_order_relaxed));
+    const float outputDb = youhost::gainToDb(hostMeter.outputMeter.rms.load(std::memory_order_relaxed));
+    const float meterDeltaDb = std::fabs(inputDb - outputDb);
+    const float truePeakDb = youhost::gainToDb(0.112f);
+    std::cout << "HOST OUT rms " << inputDb << " dB output " << outputDb << " dB delta " << meterDeltaDb
+              << " dB true peak " << truePeakDb << " dB\n";
+    float monoFold[8];
+    for (int index = 0; index < 8; ++index)
+        monoFold[index] = 0.25f;
+    float foldScratch[8] = {};
+    youhost::renderFoldedMono(monoFold, 8, 1, 1, youhost::StereoFold::left, foldScratch, nullptr,
+                              [](float**, int, int) {});
+    bool foldUnity = true;
+    for (int index = 0; index < 8; ++index)
+        foldUnity = foldUnity && monoFold[index] == 0.25f;
     item("HOST OUT meter",
          outColumns.gain.x + outColumns.gain.width == outColumns.output.x
              && delayHeader.x == outColumns.exclude.x
+             && meterDeltaDb <= 0.1f
+             && hostMeter.meter.peak.load(std::memory_order_relaxed)
+                    == hostMeter.outputMeter.peak.load(std::memory_order_relaxed)
+             && youhost::meterColourForDb(inputDb, -20) == youhost::MeterColour::green
+             && youhost::meterColourForDb(outputDb, -20) == youhost::MeterColour::green
+             && youhost::meterColourForDb(truePeakDb, -20) == youhost::MeterColour::yellow
+             && youhost::outputDbToLinear(0.0f) == 1.0f
+             && foldUnity
              && hostUi.find("outputPeakFor") != std::string::npos
+             && hostUi.find("outputRmsFor") != std::string::npos
              && hostUi.find("kHostColumnOutput") != std::string::npos
-             && callbackSlice.find("outputPeak_") != std::string::npos
+             && callbackSlice.find("updateMeter(strip.outputMeterState") != std::string::npos
+             && callbackSlice.find("outputPeak_") == std::string::npos
+             && callbackSlice.find("previous * 0.9f") == std::string::npos
+             && checklistDoc.find("within 0.1 dB") != std::string::npos
              && checklistDoc.find("HOST OUT meter") != std::string::npos);
     item("Bigger CLIP",
          youhost::clipBandHeight(200.0f) == 22.0f

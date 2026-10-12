@@ -20,6 +20,7 @@
 #include "EditHistory.h"
 #include "EditSnapshot.h"
 #include "Markers.h"
+#include "ClockSync.h"
 #include "CpuMeter.h"
 #include "DeviceLoss.h"
 #include "SyncLost.h"
@@ -109,6 +110,8 @@ public:
     void silenceLiveState();
     void resetDropouts();
     void noteDropout(int events);
+    void watchClockSync();
+    void noteClockProperty() noexcept;
     void drainDropoutLog();
     DropoutSnapshot dropoutSnapshot() const;
     float cpuUsage() const noexcept { return cpuUsage_.load(std::memory_order_relaxed); }
@@ -123,6 +126,7 @@ public:
         return coreDisplayPercent_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed);
     }
     float outputPeakFor(int channel) const noexcept;
+    float outputRmsFor(int channel) const noexcept;
 
     PluginCatalogue& pluginCatalogue() noexcept { return *catalogue_; }
     ChannelSnapshot channelSnapshot(int channel) const;
@@ -313,6 +317,12 @@ private:
     Routing routingFromDevice(const juce::AudioIODevice& device) const;
     void installOverloadListener(const juce::String& deviceName);
     void removeOverloadListener();
+    void installClockListeners(std::uint32_t deviceId);
+    void removeClockListeners() noexcept;
+    void sampleClockProperties(bool& aliveDown, bool& runningDown, bool& sourceChanged, bool& rateChanged);
+    void noteClockLost();
+    void noteClockRestored();
+    void resetClockWatch() noexcept;
     const AudioThreadConfig& currentConfig() const;
     void captureDisplay(SessionData& data) const;
     SessionData captureSessionData();
@@ -362,6 +372,8 @@ private:
     bool dropoutHeaderWritten_ = false;
     std::atomic<std::int64_t> lastCallbackNs_ { 0 };
     std::atomic<std::uint64_t> callbackElapsedNs_ { 0 };
+    std::atomic<std::uint64_t> callbackSerial_ { 0 };
+    std::atomic<bool> clockPropertyDirty_ { false };
     std::atomic<bool> skipNextGap_ { true };
     std::uint32_t overloadDeviceId_ = 0;
     std::atomic<int> formulaValue_ { static_cast<int>(RoundTripFormula::driverSum) };
@@ -377,7 +389,14 @@ private:
     CpuDisplayMeter dspDisplay_;
     CpuDisplayMeter pluginDisplay_;
     std::array<CpuDisplayMeter, 8> coreDisplay_ {};
-    std::array<std::atomic<float>, kMaxChannels> outputPeak_ {};
+    std::uint32_t clockDeviceId_ = 0;
+    std::uint32_t clockSourceSnapshot_ = 0;
+    double nominalRateSnapshot_ = 0.0;
+    bool clockSourceKnown_ = false;
+    bool nominalRateKnown_ = false;
+    bool clockSyncMissing_ = false;
+    std::uint32_t clockLostSinceMs_ = 0;
+    ClockSyncMemory clockMemory_ {};
 
     std::unique_ptr<PluginCatalogue> catalogue_;
     std::unique_ptr<PluginRack> rack_;

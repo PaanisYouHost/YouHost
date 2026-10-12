@@ -52,6 +52,9 @@ struct ChannelStrip
     std::array<PluginSlot, kSlotsPerChannel> slots {};
     MeterState meterState {};
     MeterSnapshot meter {};
+    // Same ballistics as the input meter, measured after plugins and output trim.
+    MeterState outputMeterState {};
+    MeterSnapshot outputMeter {};
 };
 
 } // namespace youhost
