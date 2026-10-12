@@ -30,6 +30,7 @@
 namespace youhost
 {
 
+
 void showSessionRateNotice(AudioEngine& engine)
 {
     const auto notice = engine.takeSessionRateNotice();
@@ -1294,7 +1295,6 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(dropoutsButton_);
     addAndMakeVisible(markersButton_);
     addAndMakeVisible(markerButton_);
-    addAndMakeVisible(syncOk_);
     addAndMakeVisible(setupButton_);
     addAndMakeVisible(latencyButton_);
     addAndMakeVisible(retryButton_);
@@ -1342,7 +1342,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_,
                           &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &markersButton_, &markerButton_,
-                          &syncOk_, &retryButton_, &groupButton_,
+                          &retryButton_, &groupButton_,
                           &allButton_, &hideButton_, &globalRecButton_, &globalInputButton_, &globalOffButton_ })
         quiet(*button);
 
@@ -1402,8 +1402,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
     markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
     markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
-    syncOk_.onClick = [this] { engine_.acknowledgeSyncLost(); refresh(); };
-    syncOk_.setTooltip("Hide the SYNC LOST alarm. YouHost keeps reopening the card.");
+    syncOverlay_.onAcknowledge = [this]
+    {
+        engine_.acknowledgeSyncLost();
+        refresh();
+    };
+    addChildComponent(syncOverlay_);
 
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
@@ -2980,8 +2984,14 @@ void MainComponent::refresh()
         repaint(hintArea_);
         if (! bannerArea_.isEmpty())
             repaint(bannerArea_);
-        if (! deviceLostArea_.isEmpty())
-            repaint(deviceLostArea_);
+    }
+    if (syncOverlay_.sync(engine_.syncLostState()))
+    {
+        syncOverlay_.setBounds(getLocalBounds());
+        if (syncOverlay_.isVisible())
+            syncOverlay_.toFront(false);
+        else
+            repaint();
     }
     if (loading)
         heavyPaintHeld_ = true;
@@ -3047,25 +3057,6 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 bannerArea_.reduced(12, 4).withTrimmedRight(96),
                                 juce::Justification::centredLeft,
                                 2);
-    }
-
-    if (engine_.deviceLost())
-    {
-        graphics.setColour(juce::Colour(0xff5a1e28));
-        graphics.fillRoundedRectangle(deviceLostArea_.toFloat(), 8.0f);
-        graphics.setColour(theme::red);
-        graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
-        graphics.drawFittedText(kDeviceLostBanner,
-                                deviceLostArea_.reduced(12, 4),
-                                juce::Justification::centredLeft,
-                                2);
-        if (engine_.syncLostVisible() && syncLostBlink(juce::Time::getMillisecondCounter()))
-        {
-            graphics.setFont(juce::Font(juce::FontOptions(42.0f).withStyle("Bold")));
-            graphics.drawText("SYNC LOST", getLocalBounds(), juce::Justification::centred, false);
-            graphics.setFont(juce::Font(juce::FontOptions(16.0f).withStyle("Bold")));
-            graphics.drawText("SYNC LOST", 16, getHeight() - 36, 160, 24, juce::Justification::centredLeft, false);
-        }
     }
 
     if (! recordLockArea_.isEmpty())
@@ -3253,19 +3244,6 @@ void MainComponent::resized()
         bannerArea_ = {};
     }
 
-    syncOk_.setVisible(engine_.syncLostVisible());
-    if (engine_.deviceLost())
-    {
-        area.removeFromTop(8);
-        deviceLostArea_ = area.removeFromTop(44);
-        if (engine_.syncLostVisible())
-            syncOk_.setBounds(deviceLostArea_.removeFromRight(72).reduced(8, 8));
-    }
-    else
-    {
-        deviceLostArea_ = {};
-    }
-
     if (engine_.recordingLocked())
     {
         area.removeFromTop(6);
@@ -3315,6 +3293,9 @@ void MainComponent::resized()
         bridgeArea_ = {};
         pluginPage_.setBounds(area);
     }
+    syncOverlay_.setBounds(getLocalBounds());
+    if (syncOverlay_.isVisible())
+        syncOverlay_.toFront(false);
     repaint();
 }
 

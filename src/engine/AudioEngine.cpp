@@ -401,7 +401,7 @@ void AudioEngine::pollDeviceStats()
     if (userChoseThis)
     {
         deviceLostBanner_ = false;
-        syncLost_.deviceReturned();
+        syncLost_.dismiss();
         lossFinalized_ = false;
         downSinceMs_ = 0;
         deviceDown_.store(false, std::memory_order_relaxed);
@@ -417,10 +417,9 @@ void AudioEngine::pollDeviceStats()
     {
         if (! awaitingSavedDevice_)
         {
-            deviceLostBanner_ = true;
-            syncLost_.deviceLost();
             if (downSinceMs_ == 0)
                 downSinceMs_ = juce::Time::getMillisecondCounter();
+            noteSyncLost();
         }
         rejectForeignDevice();
         return;
@@ -1219,11 +1218,14 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const bool cameBack = remember && sameCard && live->getName() == wantedName_
                           && (deviceLostBanner_ || lossFinalized_);
     const auto lostMs = downSinceMs_;
+    const auto gapMs = lostMs == 0 ? std::int64_t { 0 }
+                                   : static_cast<std::int64_t>(juce::Time::getMillisecondCounter() - lostMs);
     const bool resumeTake = cameBack && resumeRecordingOnReturn_;
     if (remember && sameCard)
     {
+        if (syncLost_.isMissing())
+            syncLost_.deviceReturned(gapMs);
         deviceLostBanner_ = false;
-        syncLost_.deviceReturned();
         lossFinalized_ = false;
         awaitingSavedDevice_ = false;
         startupDeviceNote_.clear();
@@ -1236,7 +1238,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     }
     if (cameBack)
     {
-        const auto duration = static_cast<std::int64_t>(juce::Time::getMillisecondCounter() - lostMs);
+        const auto duration = gapMs;
         if (resumeTake && recorder_ != nullptr)
             pressTransport(TransportPress::commandSpace);
         const bool resumed = resumeTake && recorder_ != nullptr && recorder_->isRecording();
@@ -1255,6 +1257,13 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
             saveSetupIfAllowed();
         }
     }
+}
+
+void AudioEngine::noteSyncLost()
+{
+    const auto now = juce::Time::getCurrentTime();
+    syncLost_.deviceLost(now.getHours(), now.getMinutes(), now.getSeconds());
+    deviceLostBanner_ = true;
 }
 
 void AudioEngine::handleDeviceDown()
@@ -1278,8 +1287,7 @@ void AudioEngine::handleDeviceDown()
     if (deviceDown_.load(std::memory_order_acquire) && elapsed >= 400 && ! lossFinalized_)
     {
         lossFinalized_ = true;
-        deviceLostBanner_ = true;
-        syncLost_.deviceLost();
+        noteSyncLost();
         removeOverloadListener();
         const bool recording = recorder_ != nullptr && recorder_->isRecording();
         resumeRecordingOnReturn_ = recording;

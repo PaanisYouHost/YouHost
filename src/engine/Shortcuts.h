@@ -496,6 +496,8 @@ inline constexpr const char* kShortcutNotes =
     "The session always keeps 128 channels. A stored channels count is ignored. "
     "Opening a session restores the saved audio card, sample rate, bit depth, and buffer. "
     "If that card is not connected, YouHost goes Offline and the status line says the saved card was not found. "
+    "If the session card disappears while YouHost is open, a large overlay reads SYNC LOST / Äänikortti kadonnut. "
+    "When that same card returns, audio resumes and the overlay stays, reading SYNC WAS LOST at the clock time for the gap, until you click it. The click does not stop audio. "
     "Choosing Offline in the menu still shows all 128 channels. "
     "Session channel N is device channel N. Channels past the card stay hidden on REC, HOST, and the timeline. "
     "They stay in the session and are not processed. A card with enough channels shows them again. "

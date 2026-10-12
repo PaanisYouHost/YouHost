@@ -8,6 +8,7 @@
 #include "ui/MeterGrid.h"
 #include "ui/PluginPage.h"
 #include "ui/ScannerWindow.h"
+#include "ui/SyncLostOverlay.h"
 #include "ui/TimelineView.h"
 #include "engine/Shortcuts.h"
 
@@ -137,7 +138,7 @@ private:
     juce::TextButton latencyButton_ { "5 LATENCY" };
     juce::TextButton markersButton_ { "6 MARKERS" };
     juce::TextButton markerButton_ { "MARKER" };
-    juce::TextButton syncOk_ { "OK" };
+    SyncLostOverlay syncOverlay_;
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
@@ -193,7 +194,6 @@ private:
     int lastCpuPercent_ = -1;
     std::string lastStatusWithoutCpu_;
     juce::Rectangle<int> bannerArea_;
-    juce::Rectangle<int> deviceLostArea_;
     juce::Rectangle<int> recordLockArea_;
     juce::Rectangle<int> recordArmArea_;
     bool armHintVisible_ = false;

@@ -253,6 +253,7 @@ public:
 
     bool deviceLost() const noexcept { return deviceLostBanner_; }
     bool syncLostVisible() const noexcept { return syncLost_.showAlarm(); }
+    const SyncLostState& syncLostState() const noexcept { return syncLost_; }
     void noteHardwareDevicesChanged();
     void acknowledgeSyncLost() noexcept { syncLost_.acknowledge(); }
     juce::String rateWarning() const { return rateWarning_; }
@@ -309,6 +310,7 @@ private:
     void restorePluginSnapshot(const SessionData& saved);
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
+    void noteSyncLost();
     void handleDeviceDown();
     void noteHardwareDeviceList();
     void tryReopenWanted();
