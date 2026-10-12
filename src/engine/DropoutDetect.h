@@ -99,12 +99,32 @@ inline int callbackOverrunStreak(const int64_t* cpuNs, int count, int64_t period
     return longest;
 }
 
-// Four buffers is about 2.7 ms at 48 kHz / 32. A single hitch stays under this.
-inline constexpr int kDeadlineStreakLimit = 4;
+// A quiet macOS CI baseline already produces a run of a few late callbacks
+// (measured longest: 4, about 2.7 ms at 48 kHz / 32) at the same rate as the
+// edit window. The Remove-group failure keeps every callback late for the
+// rest of the session. 48 buffers is about 32 ms: above that hitch. A stuck
+// meter still fails the median and the return-to-baseline checks.
+inline constexpr int kDeadlineStreakLimit = 48;
 
 inline bool callbackDeadlinesHeld(int longestStreak) noexcept
 {
     return longestStreak < kDeadlineStreakLimit;
+}
+
+// Group edits may add at most two percentage points of late callbacks on top
+// of the quiet baseline. A rebuilt graph puts essentially every callback over
+// the period, in the edit window and after it.
+inline bool editOverrunsNearBaseline(int baselineOver, int baselineCount,
+                                     int editOver, int editCount) noexcept
+{
+    if (baselineCount <= 0 || editCount <= 0 || baselineOver < 0 || editOver < 0)
+        return false;
+    const int64_t baseCount = baselineCount;
+    const int64_t editCount64 = editCount;
+    const int64_t left = static_cast<int64_t>(editOver) * baseCount;
+    const int64_t right = static_cast<int64_t>(baselineOver) * editCount64
+                        + (baseCount * editCount64) / 50;
+    return left <= right;
 }
 
 } // namespace youhost
