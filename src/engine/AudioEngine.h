@@ -20,6 +20,7 @@
 #include "EditHistory.h"
 #include "EditSnapshot.h"
 #include "Markers.h"
+#include "DeviceLoss.h"
 #include "SyncLost.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -252,6 +253,7 @@ public:
 
     bool deviceLost() const noexcept { return deviceLostBanner_; }
     bool syncLostVisible() const noexcept { return syncLost_.showAlarm(); }
+    void noteHardwareDevicesChanged();
     void acknowledgeSyncLost() noexcept { syncLost_.acknowledge(); }
     juce::String rateWarning() const { return rateWarning_; }
     juce::String startupDeviceNote() const { return startupDeviceNote_; }
@@ -308,7 +310,11 @@ private:
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void handleDeviceDown();
+    void noteHardwareDeviceList();
     void tryReopenWanted();
+    void rejectForeignDevice();
+    void installDeviceListListener();
+    void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
     void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
     void rememberSavedSetup(const juce::XmlElement* saved);
@@ -429,6 +435,9 @@ private:
     std::int64_t dropoutCoalesceTake_ = -1;
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
+    bool resumeRecordingOnReturn_ = false;
+    bool deviceListListenerInstalled_ = false;
+    bool foreignCloseQueued_ = false;
     bool awaitingSavedDevice_ = false;
     bool forcingChannels_ = false;
     juce::String lastFullOpenName_;
@@ -437,7 +446,6 @@ private:
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;
-    std::uint32_t lastDeviceScanMs_ = 0;
     double preparedRate_ = 0.0;
     int preparedBuffer_ = 0;
     juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;

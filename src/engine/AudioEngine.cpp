@@ -189,6 +189,24 @@ AudioObjectPropertyAddress overloadAddress()
              kAudioObjectPropertyElementWildcard };
 }
 
+AudioObjectPropertyAddress deviceListAddress()
+{
+    return { kAudioHardwarePropertyDevices,
+             kAudioObjectPropertyScopeGlobal,
+             kAudioObjectPropertyElementMain };
+}
+
+OSStatus deviceListListener(AudioObjectID,
+                            UInt32,
+                            const AudioObjectPropertyAddress*,
+                            void* client)
+{
+    auto* engine = static_cast<AudioEngine*>(client);
+    if (engine != nullptr)
+        engine->noteHardwareDevicesChanged();
+    return noErr;
+}
+
 AudioDeviceID findCoreAudioDevice(const juce::String& name)
 {
     if (name.isEmpty())
@@ -332,6 +350,7 @@ void AudioEngine::start(bool allowInput)
 
     deviceManager_.addChangeListener(this);
     deviceManager_.addAudioCallback(this);
+    installDeviceListListener();
     started_ = true;
     if (allowInput)
         reconcileStartupDevice();
@@ -391,36 +410,24 @@ void AudioEngine::pollDeviceStats()
         return;
     }
 
-    if (awaitingSavedDevice_ && device->getName() != wantedName_ && device->getName() != startupFallbackName_)
+    // A card that is not the session card is not the host. The built-in
+    // device must not take over when the X32 is unplugged.
+    if (wantedName_.isNotEmpty() && device->getName() != wantedName_
+        && (setupLocked_ || awaitingSavedDevice_ || deviceLostBanner_ || lossFinalized_))
     {
-        awaitingSavedDevice_ = false;
-        startupDeviceNote_.clear();
-        startupFallbackName_.clear();
-        deviceLostBanner_ = false;
-        syncLost_.deviceReturned();
-        lossFinalized_ = false;
-        downSinceMs_ = 0;
-        deviceDown_.store(false, std::memory_order_relaxed);
-        wantedName_ = device->getName();
-        applyOpenDevice(*device, true);
+        if (! awaitingSavedDevice_)
+        {
+            deviceLostBanner_ = true;
+            syncLost_.deviceLost();
+            if (downSinceMs_ == 0)
+                downSinceMs_ = juce::Time::getMillisecondCounter();
+        }
+        rejectForeignDevice();
         return;
     }
 
-    if ((awaitingSavedDevice_ || deviceLostBanner_) && device->getName() != wantedName_)
-    {
-        applyOpenDevice(*device, false);
-        tryReopenWanted();
-        return;
-    }
-
-    deviceLostBanner_ = false;
-        syncLost_.deviceReturned();
-    lossFinalized_ = false;
-    awaitingSavedDevice_ = false;
-    startupDeviceNote_.clear();
-    startupFallbackName_.clear();
-    downSinceMs_ = 0;
-    deviceDown_.store(false, std::memory_order_relaxed);
+    // applyOpenDevice clears the loss flags after it has logged the gap
+    // and, when a take was recording, started the next one.
     applyOpenDevice(*device, true);
 }
 
@@ -1208,7 +1215,12 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     lastInputMask_ = inputMask;
     lastOutputMask_ = outputMask;
-    if (remember && live->getName() == wantedName_)
+    const bool sameCard = wantedName_.isEmpty() || live->getName() == wantedName_;
+    const bool cameBack = remember && sameCard && live->getName() == wantedName_
+                          && (deviceLostBanner_ || lossFinalized_);
+    const auto lostMs = downSinceMs_;
+    const bool resumeTake = cameBack && resumeRecordingOnReturn_;
+    if (remember && sameCard)
     {
         deviceLostBanner_ = false;
         syncLost_.deviceReturned();
@@ -1217,7 +1229,18 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         startupDeviceNote_.clear();
         startupFallbackName_.clear();
         downSinceMs_ = 0;
-        setupLocked_ = true;
+        resumeRecordingOnReturn_ = false;
+        deviceDown_.store(false, std::memory_order_relaxed);
+        if (live->getName() == wantedName_)
+            setupLocked_ = true;
+    }
+    if (cameBack)
+    {
+        const auto duration = static_cast<std::int64_t>(juce::Time::getMillisecondCounter() - lostMs);
+        if (resumeTake && recorder_ != nullptr)
+            pressTransport(TransportPress::commandSpace);
+        const bool resumed = resumeTake && recorder_ != nullptr && recorder_->isRecording();
+        appendHostLog(settings_, juce::String::fromUTF8(deviceLossLogLine(live->getName().toStdString(), duration, resumed).c_str()));
     }
     const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
     rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
@@ -1258,12 +1281,109 @@ void AudioEngine::handleDeviceDown()
         deviceLostBanner_ = true;
         syncLost_.deviceLost();
         removeOverloadListener();
-        if (recorder_ != nullptr)
+        const bool recording = recorder_ != nullptr && recorder_->isRecording();
+        resumeRecordingOnReturn_ = recording;
+        if (recording)
+        {
+            markers_.push_back(deviceLossMarker(recorder_->playhead()));
+            ++markerRevision_;
             recorder_->stop();
+            saveSession();
+        }
+        appendHostLog(settings_, juce::String::fromUTF8(deviceLossStartLine(wantedName_.toStdString(), recording).c_str()));
     }
+}
 
-    if (deviceLostBanner_ || awaitingSavedDevice_)
-        tryReopenWanted();
+void AudioEngine::noteHardwareDevicesChanged()
+{
+    auto life = alive_;
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        messages->callAsync([life, this]
+        {
+            if (life == nullptr || ! life->load(std::memory_order_acquire))
+                return;
+            noteHardwareDeviceList();
+        });
+    }
+}
+
+void AudioEngine::noteHardwareDeviceList()
+{
+    if (! started_ || offlineTemplate_ || closingDevice_.load(std::memory_order_acquire) || reopenInProgress_)
+        return;
+    if (wantedName_.isEmpty())
+        return;
+
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    if (live != nullptr && live->isOpen() && live->getName() == wantedName_)
+        return;
+
+    const bool waiting = deviceLostBanner_ || awaitingSavedDevice_ || lossFinalized_
+                         || deviceDown_.load(std::memory_order_acquire) || ! deviceOpen_.load(std::memory_order_relaxed);
+    if (! waiting)
+        return;
+    tryReopenWanted();
+}
+
+void AudioEngine::rejectForeignDevice()
+{
+    if (reopenInProgress_ || closingDevice_.load(std::memory_order_acquire) || foreignCloseQueued_)
+        return;
+    if (wantedName_.isEmpty())
+        return;
+
+    foreignCloseQueued_ = true;
+    auto life = alive_;
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        messages->callAsync([life, this]
+        {
+            if (life == nullptr || ! life->load(std::memory_order_acquire))
+                return;
+            foreignCloseQueued_ = false;
+            if (reopenInProgress_ || ! started_)
+                return;
+            auto* live = deviceManager_.getCurrentAudioDevice();
+            if (live == nullptr || ! live->isOpen() || live->getName() == wantedName_)
+                return;
+            if (! setupLocked_ && ! awaitingSavedDevice_ && ! deviceLostBanner_ && ! lossFinalized_)
+                return;
+            closingDevice_.store(true, std::memory_order_release);
+            deviceManager_.closeAudioDevice();
+            closingDevice_.store(false, std::memory_order_release);
+            deviceOpen_.store(false, std::memory_order_relaxed);
+            deviceDown_.store(true, std::memory_order_release);
+            if (downSinceMs_ == 0)
+                downSinceMs_ = juce::Time::getMillisecondCounter();
+        });
+    }
+    else
+    {
+        foreignCloseQueued_ = false;
+    }
+}
+
+void AudioEngine::installDeviceListListener()
+{
+   #if JUCE_MAC
+    if (deviceListListenerInstalled_)
+        return;
+    const AudioObjectPropertyAddress address = deviceListAddress();
+    if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &address, &deviceListListener, this) == noErr)
+        deviceListListenerInstalled_ = true;
+   #endif
+}
+
+void AudioEngine::removeDeviceListListener()
+{
+   #if JUCE_MAC
+    if (! deviceListListenerInstalled_)
+        return;
+    const AudioObjectPropertyAddress address = deviceListAddress();
+    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &address, &deviceListListener, this);
+    deviceListListenerInstalled_ = false;
+   #endif
 }
 
 void AudioEngine::tryReopenWanted()
@@ -1271,10 +1391,7 @@ void AudioEngine::tryReopenWanted()
     if (reopenInProgress_ || closingDevice_.load(std::memory_order_acquire) || wantedName_.isEmpty())
         return;
 
-    const auto now = juce::Time::getMillisecondCounter();
-    if (now - lastDeviceScanMs_ < 500)
-        return;
-    lastDeviceScanMs_ = now;
+    // The caller already saw this name on the device-list notification.
     if (! deviceNameListed(wantedName_))
         return;
 
@@ -1411,6 +1528,7 @@ void AudioEngine::prepareForQuit()
     closingDevice_.store(true, std::memory_order_release);
     deviceManager_.removeAudioCallback(this);
     deviceManager_.removeChangeListener(this);
+    removeDeviceListListener();
     deviceManager_.closeAudioDevice();
     removeOverloadListener();
     if (recorder_ != nullptr)

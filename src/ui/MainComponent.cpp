@@ -3049,17 +3049,17 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
-    if (engine_.syncLostVisible())
+    if (engine_.deviceLost())
     {
         graphics.setColour(juce::Colour(0xff5a1e28));
         graphics.fillRoundedRectangle(deviceLostArea_.toFloat(), 8.0f);
         graphics.setColour(theme::red);
         graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
-        graphics.drawFittedText("SYNC LOST. YouHost will reopen the card when it comes back. The take was saved.",
+        graphics.drawFittedText(kDeviceLostBanner,
                                 deviceLostArea_.reduced(12, 4),
                                 juce::Justification::centredLeft,
                                 2);
-        if (syncLostBlink(juce::Time::getMillisecondCounter()))
+        if (engine_.syncLostVisible() && syncLostBlink(juce::Time::getMillisecondCounter()))
         {
             graphics.setFont(juce::Font(juce::FontOptions(42.0f).withStyle("Bold")));
             graphics.drawText("SYNC LOST", getLocalBounds(), juce::Justification::centred, false);
@@ -3254,11 +3254,12 @@ void MainComponent::resized()
     }
 
     syncOk_.setVisible(engine_.syncLostVisible());
-    if (engine_.syncLostVisible())
+    if (engine_.deviceLost())
     {
         area.removeFromTop(8);
         deviceLostArea_ = area.removeFromTop(44);
-        syncOk_.setBounds(deviceLostArea_.removeFromRight(72).reduced(8, 8));
+        if (engine_.syncLostVisible())
+            syncOk_.setBounds(deviceLostArea_.removeFromRight(72).reduced(8, 8));
     }
     else
     {

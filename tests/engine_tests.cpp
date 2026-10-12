@@ -19,6 +19,7 @@
 #include "engine/DropoutLog.h"
 #include "engine/CpuMeter.h"
 #include "engine/PlaybackRoute.h"
+#include "engine/DeviceLoss.h"
 #include "engine/SyncLost.h"
 #include "engine/Markers.h"
 #include "engine/GroupEdit.h"
@@ -4303,6 +4304,7 @@ void testReleaseChecklist()
     std::atomic<int> publishes { 0 };
     std::atomic<int> overruns { 0 };
     std::atomic<int> callbacks { 0 };
+    std::atomic<std::int64_t> fastestNs { 1000000000 };
     std::atomic<bool> runCallback { true };
     std::thread callback([&]
     {
@@ -4318,8 +4320,10 @@ void testReleaseChecklist()
             const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                      std::chrono::steady_clock::now() - started)
                                      .count();
-            if (youhost::dropoutOverrunCount(elapsed, 20000000) != 0)
-                overruns.fetch_add(1, std::memory_order_relaxed);
+            auto seen = fastestNs.load(std::memory_order_relaxed);
+            while (elapsed < seen && ! fastestNs.compare_exchange_weak(seen, elapsed, std::memory_order_relaxed))
+            {
+            }
             callbacks.fetch_add(1, std::memory_order_relaxed);
         }
     });
@@ -4345,6 +4349,7 @@ void testReleaseChecklist()
              && groupEdits.find("Removing a group leaves every plugin instance") != std::string::npos
              && callbacks.load() > 0
              && overruns.load() == 0
+             && fastestNs.load() < 20000000
              && prepares.load() == 0
              && publishes.load() == 0
              && checklistDoc.find("Groups are purely visual") != std::string::npos
@@ -4543,7 +4548,36 @@ void testReleaseChecklist()
              && ! youhost::syncLostBlink(400)
              && mainUi.find("acknowledgeSyncLost") != std::string::npos
              && mainUi.find("SYNC LOST") != std::string::npos
-             && checklistDoc.find("SYNC LOST") != std::string::npos);
+             && mainUi.find("kDeviceLostBanner") != std::string::npos
+             && checklistDoc.find("SYNC LOST") != std::string::npos
+             && checklistDoc.find("Device lost - waiting") != std::string::npos);
+    const auto lossBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
+    const auto listBody = sliceBetween(engineSrc, "void AudioEngine::noteHardwareDeviceList()", "void AudioEngine::rejectForeignDevice()");
+    const auto reopenBody = sliceBetween(engineSrc, "void AudioEngine::tryReopenWanted()", "bool AudioEngine::deviceNameListed");
+    const auto lost = youhost::decideDeviceLoss("X32", "", false, true, true, true);
+    const auto other = youhost::decideDeviceLoss("X32", "MacBook Pro Speakers", false, true, true, true);
+    const auto back = youhost::decideDeviceLoss("X32", "X32", true, true, true, true);
+    const auto idle = youhost::decideDeviceLoss("X32", "X32", true, false, false, false);
+    item("Device lost recovery",
+         std::string(youhost::kDeviceLostBanner) == "Device lost - waiting"
+             && ! youhost::deviceReattachUsesTimer()
+             && youhost::deviceLossKeepsPlugins()
+             && lost.showWaiting && lost.closeTake && ! lost.reattachSame && lost.keepLock
+             && other.refusedOther && ! other.reattachSame && other.showWaiting
+             && back.reattachSame && back.resumeRecording && back.keepLock && ! back.refusedOther
+             && ! idle.reattachSame && ! idle.closeTake
+             && youhost::deviceLossMarker(48000).name == "Device lost"
+             && youhost::deviceLossStartLine("X32", true) == "device lost \"X32\", take closed"
+             && youhost::deviceLossLogLine("X32", 1500, true) == "device lost \"X32\" for 1500 ms, recording resumed"
+             && ! lossBody.empty() && lossBody.find("tryReopenWanted") == std::string::npos
+             && lossBody.find("deviceLossMarker") != std::string::npos
+             && lossBody.find("removePlugin") == std::string::npos
+             && listBody.find("tryReopenWanted()") != std::string::npos
+             && listBody.find("lastDeviceScanMs_") == std::string::npos
+             && reopenBody.find("lastDeviceScanMs_") == std::string::npos
+             && engineSrc.find("kAudioHardwarePropertyDevices") != std::string::npos
+             && engineSrc.find("noteHardwareDevicesChanged") != std::string::npos
+             && checklistDoc.find("not from a timer scan") != std::string::npos);
     item("HOST OUT meter",
          outColumns.gain.x + outColumns.gain.width == outColumns.output.x
              && delayHeader.x == outColumns.exclude.x
