@@ -965,7 +965,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     const auto finishedNs = steadyNowNs();
     StallClock::get().audioNs.store(finishedNs, std::memory_order_relaxed);
-    noteDropout(dropoutOverrunCount(finishedNs - startedNs, config.expectedPeriodNs));
+    const auto elapsedNs = finishedNs - startedNs;
+    if (elapsedNs > 0)
+        callbackElapsedNs_.store(static_cast<std::uint64_t>(elapsedNs), std::memory_order_relaxed);
+    noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs));
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
@@ -981,6 +984,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
     // The device thread only raises flags. Sample rate, plugin prepare, and the
     // CoreAudio listener run on the message thread in pollDeviceStats.
     lastCallbackNs_.store(0, std::memory_order_relaxed);
+    callbackElapsedNs_.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
     hostFade_.gain = 0;
     deviceStarting_.store(true, std::memory_order_release);
@@ -996,6 +1000,7 @@ void AudioEngine::audioDeviceStopped()
     if (catalogue_ != nullptr)
         catalogue_->setDeviceOpen(false);
     deviceOpen_.store(false, std::memory_order_relaxed);
+    callbackElapsedNs_.store(0, std::memory_order_relaxed);
     StallClock::get().audioLive.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
     hostFade_.gain = 0;
@@ -1078,6 +1083,7 @@ void AudioEngine::prepareStandaloneCallback(double sampleRate, int bufferSamples
     bufferSamples_.store(block, std::memory_order_relaxed);
     sessionAudioLimit_.store(channels, std::memory_order_relaxed);
     lastCallbackNs_.store(0, std::memory_order_relaxed);
+    callbackElapsedNs_.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
     hostFade_.gain = 0;
 
@@ -1361,12 +1367,25 @@ void AudioEngine::noteSyncLost()
     deviceLostBanner_ = true;
 }
 
-void AudioEngine::handleDeviceDown()
+void AudioEngine::clearDisplayedCpu() noexcept
 {
-    deviceOpen_.store(false, std::memory_order_relaxed);
     cpuUsage_.store(0.0f, std::memory_order_relaxed);
     pluginCpuPercent_.store(0, std::memory_order_relaxed);
     callbackCpuPercent_.store(0, std::memory_order_relaxed);
+    dspPeakPercent_.store(0, std::memory_order_relaxed);
+    coreWorkerCount_.store(0, std::memory_order_relaxed);
+    for (auto& core : coreDisplayPercent_)
+        core.store(0, std::memory_order_relaxed);
+    dspDisplay_.reset();
+    pluginDisplay_.reset();
+    for (auto& meter : coreDisplay_)
+        meter.reset();
+}
+
+void AudioEngine::handleDeviceDown()
+{
+    deviceOpen_.store(false, std::memory_order_relaxed);
+    clearDisplayedCpu();
     deviceName_ = "No device";
     publishSessionChannelLimit();
     if (closingDevice_.load(std::memory_order_acquire) || ! started_ || openingChosenDevice_)
@@ -1684,8 +1703,9 @@ void AudioEngine::notePluginTrace(int channel,
 
 juce::String AudioEngine::dspLoadText() const
 {
+    juce::String text = "DSP " + juce::String(callbackCpuPercent()) + "%   plugins " + juce::String(pluginCpuPercent()) + "%";
     if (rack_ == nullptr)
-        return "DSP callback 0%   plugin CPU 0%";
+        return text;
 
     const auto load = rack_->dspLoad();
     auto lines = load.lines;
@@ -1697,10 +1717,9 @@ juce::String AudioEngine::dspLoadText() const
 
     const auto percent = [](float value)
     {
-        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 9999.0f)));
+        return juce::String(displayCpuPercent(value));
     };
 
-    juce::String text = "DSP callback " + percent(load.callbackPercent) + "%   plugin CPU " + percent(load.pluginPercent) + "%";
     for (int index = 0; index < count; ++index)
     {
         const auto& line = lines[static_cast<std::size_t>(index)];
@@ -2408,18 +2427,40 @@ void AudioEngine::sampleLiveCpu()
 {
     if (offlineTemplate_ || ! deviceOpen_.load(std::memory_order_relaxed) || rack_ == nullptr)
     {
-        cpuUsage_.store(0.0f, std::memory_order_relaxed);
-        pluginCpuPercent_.store(0, std::memory_order_relaxed);
-        callbackCpuPercent_.store(0, std::memory_order_relaxed);
+        clearDisplayedCpu();
         return;
     }
-    const auto load = rack_->dspLoad();
-    const int plugins = clampCpuPercent(rack_->livePluginPercent());
-    const int callback = clampCpuPercent(juce::roundToInt(load.callbackPercent));
+
+    const auto nowMs = static_cast<std::int64_t>(juce::Time::getMillisecondCounter());
+    const auto elapsed = callbackElapsedNs_.load(std::memory_order_relaxed);
+    const int samples = bufferSamples_.load(std::memory_order_relaxed);
+    const double rate = sampleRate_.load(std::memory_order_relaxed);
+    const int dsp = dspDisplay_.push(nowMs, blockCpuPercent(elapsed, samples, rate));
+    callbackCpuPercent_.store(dsp, std::memory_order_relaxed);
+    dspPeakPercent_.store(dspDisplay_.peak, std::memory_order_relaxed);
+    cpuUsage_.store(static_cast<float>(dsp) / 100.0f, std::memory_order_relaxed);
+
+    const int plugins = pluginDisplay_.push(nowMs, clampCpuPercent(rack_->livePluginPercent()));
     pluginCpuPercent_.store(plugins, std::memory_order_relaxed);
-    callbackCpuPercent_.store(callback, std::memory_order_relaxed);
-    const float graph = load.callbackPercent / 100.0f;
-    cpuUsage_.store(graph > 0.0f ? graph : 0.0f, std::memory_order_relaxed);
+
+    const auto meters = rack_->cpuMeters();
+    const int workers = std::clamp(meters.workers, 0, 7);
+    coreWorkerCount_.store(workers, std::memory_order_relaxed);
+    const int cores = std::min(1 + workers, static_cast<int>(coreDisplay_.size()));
+    for (int core = 0; core < static_cast<int>(coreDisplay_.size()); ++core)
+    {
+        if (core < cores)
+        {
+            const int shown = coreDisplay_[static_cast<std::size_t>(core)].push(
+                nowMs, displayCpuPercent(meters.percent[static_cast<std::size_t>(core)]));
+            coreDisplayPercent_[static_cast<std::size_t>(core)].store(shown, std::memory_order_relaxed);
+        }
+        else
+        {
+            coreDisplay_[static_cast<std::size_t>(core)].reset();
+            coreDisplayPercent_[static_cast<std::size_t>(core)].store(0, std::memory_order_relaxed);
+        }
+    }
 }
 
 void AudioEngine::openNamedDevice(const juce::String& name)

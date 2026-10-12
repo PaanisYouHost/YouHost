@@ -144,7 +144,7 @@ public:
 
         graphics.setColour(theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-        graphics.drawText("CPU", juce::Rectangle<float>(inner.getX(), inner.getY(), 40.0f, 14.0f),
+        graphics.drawText("DSP", juce::Rectangle<float>(inner.getX(), inner.getY(), 40.0f, 14.0f),
                           juce::Justification::centredLeft, false);
         graphics.drawText("now", juce::Rectangle<float>(inner.getRight() - 36.0f, bottom, 36.0f, 16.0f),
                           juce::Justification::centredRight, false);

@@ -106,6 +106,20 @@ target_link_libraries(YouHostSyncLostGlyphs PRIVATE
     juce::juce_recommended_warning_flags)
 add_test(NAME YouHostSyncLostGlyphs COMMAND YouHostSyncLostGlyphs)
 
+# Focuses MARKERS, CPU, DROPOUTS, and LATENCY and sends keys through the
+# real ComponentPeer path. A marker name editor must keep Space.
+add_executable(YouHostToolKeys tests/tool_window_keys.cpp)
+target_include_directories(YouHostToolKeys PRIVATE src)
+target_compile_features(YouHostToolKeys PRIVATE cxx_std_20)
+target_compile_definitions(YouHostToolKeys PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(YouHostToolKeys PRIVATE
+    juce::juce_gui_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+add_test(NAME YouHostToolKeys COMMAND YouHostToolKeys)
+
 # Loads Apple AUDelay on macOS, feeds silence into both inputs, and fails if the
 # output is non-finite or nowhere near silence. The GitHub macOS job runs it.
 if(APPLE)

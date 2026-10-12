@@ -15,7 +15,7 @@ inline int cpuCardHeight(int workers) noexcept
     if (workers > 7)
         workers = 7;
     const int pad = 28;
-    const int inner = 16 + 36 + 8 + 28 + 10 + 16 + 4 + 26 + workers * 32 + 8 + 48;
+    const int inner = 16 + 36 + 16 + 22 + 8 + 16 + 4 + 26 + workers * 32 + 8 + 64;
     return pad + inner;
 }
 

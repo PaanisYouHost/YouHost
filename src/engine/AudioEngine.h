@@ -20,6 +20,7 @@
 #include "EditHistory.h"
 #include "EditSnapshot.h"
 #include "Markers.h"
+#include "CpuMeter.h"
 #include "DeviceLoss.h"
 #include "SyncLost.h"
 
@@ -113,6 +114,14 @@ public:
     float cpuUsage() const noexcept { return cpuUsage_.load(std::memory_order_relaxed); }
     int pluginCpuPercent() const noexcept { return pluginCpuPercent_.load(std::memory_order_relaxed); }
     int callbackCpuPercent() const noexcept { return callbackCpuPercent_.load(std::memory_order_relaxed); }
+    int dspPeakPercent() const noexcept { return dspPeakPercent_.load(std::memory_order_relaxed); }
+    int displayedWorkerCount() const noexcept { return coreWorkerCount_.load(std::memory_order_relaxed); }
+    int displayedCorePercent(int core) const noexcept
+    {
+        if (core < 0 || core >= static_cast<int>(coreDisplayPercent_.size()))
+            return 0;
+        return coreDisplayPercent_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed);
+    }
     float outputPeakFor(int channel) const noexcept;
 
     PluginCatalogue& pluginCatalogue() noexcept { return *catalogue_; }
@@ -324,6 +333,7 @@ private:
     void clearSyncLost() noexcept;
     void parkOfflineAfterFailedOpen(const juce::String& name);
     void handleDeviceDown();
+    void clearDisplayedCpu() noexcept;
     void noteHardwareDeviceList();
     void tryReopenWanted();
     void rejectForeignDevice();
@@ -351,6 +361,7 @@ private:
     std::int64_t lastCpuSampleNs_ = 0;
     bool dropoutHeaderWritten_ = false;
     std::atomic<std::int64_t> lastCallbackNs_ { 0 };
+    std::atomic<std::uint64_t> callbackElapsedNs_ { 0 };
     std::atomic<bool> skipNextGap_ { true };
     std::uint32_t overloadDeviceId_ = 0;
     std::atomic<int> formulaValue_ { static_cast<int>(RoundTripFormula::driverSum) };
@@ -360,6 +371,12 @@ private:
     std::atomic<float> cpuUsage_ { 0.0f };
     std::atomic<int> pluginCpuPercent_ { 0 };
     std::atomic<int> callbackCpuPercent_ { 0 };
+    std::atomic<int> dspPeakPercent_ { 0 };
+    std::atomic<int> coreWorkerCount_ { 0 };
+    std::array<std::atomic<int>, 8> coreDisplayPercent_ {};
+    CpuDisplayMeter dspDisplay_;
+    CpuDisplayMeter pluginDisplay_;
+    std::array<CpuDisplayMeter, 8> coreDisplay_ {};
     std::array<std::atomic<float>, kMaxChannels> outputPeak_ {};
 
     std::unique_ptr<PluginCatalogue> catalogue_;

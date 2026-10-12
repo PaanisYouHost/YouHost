@@ -18,9 +18,12 @@ public:
 
     void refresh()
     {
-        total_ = static_cast<float>(engine_.pluginCpuPercent());
-        meters_ = engine_.cpuMeters();
-        meters_.callbackPercent = static_cast<float>(engine_.callbackCpuPercent());
+        total_ = static_cast<float>(engine_.callbackCpuPercent());
+        peak_ = static_cast<float>(engine_.dspPeakPercent());
+        plugins_ = static_cast<float>(engine_.pluginCpuPercent());
+        workers_ = engine_.displayedWorkerCount();
+        for (int core = 0; core < static_cast<int>(cores_.size()); ++core)
+            cores_[static_cast<std::size_t>(core)] = static_cast<float>(engine_.displayedCorePercent(core));
         repaint();
     }
 
@@ -31,7 +34,7 @@ public:
 
         graphics.setColour(theme::dim);
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText("System usage", area.removeFromTop(16), juce::Justification::centredLeft, false);
+        graphics.drawText("Realtime path", area.removeFromTop(16), juce::Justification::centredLeft, false);
 
         auto hero = area.removeFromTop(36);
         graphics.setColour(theme::text);
@@ -39,39 +42,47 @@ public:
         graphics.drawText(percentText(total_) + "%", hero.removeFromLeft(120), juce::Justification::centredLeft, false);
         graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
         graphics.setColour(theme::dim);
-        graphics.drawText("plugins", hero, juce::Justification::centredLeft, false);
+        graphics.drawText("DSP", hero, juce::Justification::centredLeft, false);
 
+        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
+        graphics.drawText("peak " + percentText(peak_) + "%", area.removeFromTop(16),
+                          juce::Justification::centredLeft, false);
+
+        auto plugins = area.removeFromTop(22);
+        graphics.setColour(theme::text);
+        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+        graphics.drawText("Plugins", plugins.removeFromLeft(110), juce::Justification::centredLeft, true);
+        graphics.drawText(percentText(plugins_) + "%", plugins.removeFromRight(64), juce::Justification::centredRight, false);
         area.removeFromTop(8);
-        drawBar(graphics, area.removeFromTop(28), "Audio", meters_.callbackPercent);
-        area.removeFromTop(10);
 
         graphics.setColour(theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
         graphics.drawText("Cores", area.removeFromTop(16), juce::Justification::centredLeft, false);
         area.removeFromTop(4);
 
-        const int workers = std::clamp(meters_.workers, 0, 7);
-        drawBar(graphics, area.removeFromTop(26), "Audio thread", meters_.percent[0]);
+        const int workers = std::clamp(workers_, 0, 7);
+        drawBar(graphics, area.removeFromTop(26), "Audio thread", cores_[0]);
         for (int index = 0; index < workers; ++index)
         {
             area.removeFromTop(6);
             drawBar(graphics, area.removeFromTop(26), "Worker " + juce::String(index + 1),
-                    meters_.percent[static_cast<std::size_t>(index + 1)]);
+                    cores_[static_cast<std::size_t>(index + 1)]);
         }
 
         graphics.setColour(theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-        graphics.drawFittedText("Each bar is that thread's time against the buffer. "
-                                "The audio thread runs the callback. Workers share the plugin chains.",
-                                area.removeFromTop(48),
+        graphics.drawFittedText("DSP is the realtime path against the buffer. 100% fills the buffer and the next "
+                                "callback drops out. The number stops at 100. Plugins adds each plugin's own time "
+                                "and also stops at 100. It is not the dropout line. Each bar is one thread, from 0 to 100.",
+                                area.removeFromTop(64),
                                 juce::Justification::topLeft,
-                                3);
+                                4);
     }
 
 private:
     static juce::String percentText(float value)
     {
-        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 999.0f)));
+        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 100.0f)));
     }
 
     static juce::Colour barColour(float percent)
@@ -102,7 +113,10 @@ private:
 
     AudioEngine& engine_;
     float total_ = 0.0f;
-    CpuMeters meters_ {};
+    float peak_ = 0.0f;
+    float plugins_ = 0.0f;
+    int workers_ = 0;
+    std::array<float, 8> cores_ {};
 };
 
 class CpuShell : public juce::Component

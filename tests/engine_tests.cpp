@@ -3407,7 +3407,7 @@ void testKeyDispatch()
 
     const auto ui = readWorkspaceFile("src/ui/MainComponent.cpp");
     const auto header = readWorkspaceFile("src/ui/MainComponent.h");
-    CHECK(ui.find("dispatchRawKey(raw, page_, false)") != std::string::npos);
+    CHECK(ui.find("dispatchRawKey(rawKeyFromPress(key), page_, false)") != std::string::npos);
     CHECK(ui.find("shortcutIdForCommand(static_cast<int>(info.commandID))") != std::string::npos);
     CHECK(ui.find("commandApplies(*shortcut, page_, shortcutBlocked(info.originatingComponent))") != std::string::npos);
     CHECK(ui.find("return runShortcut(*shortcut)") != std::string::npos);
@@ -3956,7 +3956,7 @@ void testReleaseChecklist()
                                   && offlineLine.find("Offline (no audio) - 128 channels") == 0
                                   && offlineLine.find("cha128") == std::string::npos
                                   && offlineLine.find("0%10.") == std::string::npos
-                                  && offlineLine.compare(cpuAt, 8, "CPU   0%") == 0
+                                  && offlineLine.compare(cpuAt, 8, "DSP   0%") == 0
                                   && offlineLine[cpuAt + 8] == ' '
                                   && offlineLine.find("10.10.2026_1 disk") != std::string::npos
                                   && offlineLine.compare(static_cast<std::size_t>(youhost::kStatusDeviceChars), 6, "128 ch") == 0;
@@ -3965,12 +3965,12 @@ void testReleaseChecklist()
                              && cutLine.find("...") == static_cast<std::size_t>(youhost::kStatusDeviceChars - youhost::kStatusColumnGap - 3)
                              && cutLine[static_cast<std::size_t>(youhost::kStatusDeviceChars - 1)] == ' '
                              && cutLine.compare(static_cast<std::size_t>(youhost::kStatusDeviceChars), 12, "1 in / 2 out") == 0;
-    item("status line keeps fixed columns and pads CPU",
-         youhost::formatCpuField(7) == "CPU   7%" && youhost::formatCpuField(42) == "CPU  42%"
-             && youhost::formatCpuField(100) == "CPU 100%" && youhost::formatCpuField(-4) == "CPU   0%"
-             && youhost::formatCpuField(140) == "CPU 140%"
-             && youhost::formatCpuField(999) == "CPU 999%"
-             && youhost::formatCpuField(1400) == "CPU 999%"
+    item("status line keeps fixed columns and pads DSP",
+         youhost::formatCpuField(7) == "DSP   7%" && youhost::formatCpuField(42) == "DSP  42%"
+             && youhost::formatCpuField(100) == "DSP 100%" && youhost::formatCpuField(-4) == "DSP   0%"
+             && youhost::formatCpuField(140) == "DSP 100%"
+             && youhost::formatCpuField(999) == "DSP 100%"
+             && youhost::formatCpuField(1400) == "DSP 100%"
              && shortLine.size() == longLine.size()
              && shortLine.size() == static_cast<std::size_t>(youhost::statusLineChars())
              && offlineSeparated && cutKeepsGap);
@@ -4206,7 +4206,7 @@ void testReleaseChecklist()
              && youhost::dispatchRawKey(macLetter('g', false, true, false), 2, false) == youhost::ShortcutId::makeGroup
              && ! youhost::dispatchRawKey(macLetter('a', false, true, false), 2, true).has_value()
              && ! youhost::dispatchRawKey(macLetter('g', false, true, false), 2, true).has_value()
-             && mainUi.find("dispatchRawKey(raw, page_, false)") != std::string::npos
+             && mainUi.find("dispatchRawKey(rawKeyFromPress(key), page_, false)") != std::string::npos
              && mainUi.find("showMakeGroupDialog") != std::string::npos);
     item("HOST header is fixed, cached, and aligned CH MODE NAME DELAY COMP PLUGINS GAIN",
          columns.channel.x < columns.mode.x
@@ -4521,15 +4521,37 @@ void testReleaseChecklist()
     const auto helpText = youhost::shortcutHelpText();
     const auto gigAt = helpText.find("Before a gig / for best performance");
     const auto installSteps = helpText.find("1. Unzip the file");
+    youhost::CpuDisplayMeter dspMeter;
+    const bool dspHolds = dspMeter.push(0, 10) == 10
+                          && dspMeter.push(100, 90) == 10
+                          && dspMeter.push(499, 80) == 10
+                          && dspMeter.peak == 90
+                          && dspMeter.push(500, 40) == 55
+                          && dspMeter.push(900, 0) == 55;
+    youhost::CpuDisplayMeter capped;
+    const bool cappedAtFull = capped.push(0, 250) == 100 && capped.push(400, 400) == 100;
+    const auto cpuWindow = readWorkspaceFile("src/ui/CpuWindow.cpp");
     item("Real CPU meter",
-         youhost::formatCpuField(140) == "CPU 140%"
-             && youhost::blockCpuPercent(21333333, 512, 48000.0) == 200
-             && youhost::clampCpuPercent(1400) == 999
+         youhost::formatCpuField(140) == "DSP 100%"
+             && youhost::blockCpuPercent(21333333, 512, 48000.0) == 100
+             && youhost::clampCpuPercent(1400) == 100
+             && youhost::clampCpuPercent(-8) == 0
+             && youhost::displayCpuPercent(140.4f) == 100
+             && dspHolds
+             && cappedAtFull
              && rackSrc.find("gate->shownPercent.store") != std::string::npos
              && dspLoad.find("shownPercent.load") != std::string::npos
              && dspLoad.find("shownPercent.exchange") == std::string::npos
-             && mainUi.find("engine_.pluginCpuPercent()") != std::string::npos
-             && readWorkspaceFile("src/ui/CpuWindow.cpp").find("\"plugins\"") != std::string::npos
+             && dspLoad.find("displayCpuPercent") != std::string::npos
+             && callbackSlice.find("callbackElapsedNs_.store") != std::string::npos
+             && engineSrc.find("dspDisplay_.push") != std::string::npos
+             && mainUi.find("engine_.callbackCpuPercent()") != std::string::npos
+             && mainUi.find("engine_.pluginCpuPercent()") == std::string::npos
+             && cpuWindow.find("\"DSP\"") != std::string::npos
+             && cpuWindow.find("\"Plugins\"") != std::string::npos
+             && cpuWindow.find("999") == std::string::npos
+             && helpText.find("Every CPU and DSP figure stops at 100") != std::string::npos
+             && checklistDoc.find("never goes above 100") != std::string::npos
              && checklistDoc.find("Real CPU meter") != std::string::npos);
     item("Dropout log",
          youhost::formatDropoutHostLine(3, 48000, 32, 180, 15) == "dropout x3  take 48000  buffer 32  dsp 180%  plugins 15"
@@ -4705,17 +4727,33 @@ void testReleaseChecklist()
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-${VERSION}-macOS.zip") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos);
+    const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     item("Markers",
          ! youhost::markerDropAffectsTransport()
              && youhost::markerDropAllowedWhileLocked()
+             && youhost::toolWindowForwardsTransportKeys(false)
+             && ! youhost::toolWindowForwardsTransportKeys(true)
+             && fromMarker.has_value() && *fromMarker == 48000
+             && ! youhost::playSampleFromSelectedMarker(true, true, true, 48000, true).has_value()
+             && ! youhost::playSampleFromSelectedMarker(false, false, true, 48000, true).has_value()
+             && ! youhost::playSampleFromSelectedMarker(true, false, false, 48000, true).has_value()
+             && ! youhost::playSampleFromSelectedMarker(true, false, true, 48000, false).has_value()
              && youhost::dispatchRawKey(macLetter('m', false, false, false), 1, false) == youhost::ShortcutId::marker
+             && youhost::dispatchRawKey(macLetter('m', false, false, false), 1, true) == std::nullopt
              && ! youhost::shortcutAsksTransport(youhost::ShortcutId::marker)
              && markerBody.find("stop(") == std::string::npos
              && mainUi.find("addAndMakeVisible(markerButton_)") != std::string::npos
              && mainUi.find("addAndMakeVisible(markersButton_)") != std::string::npos
              && mainUi.find("addChildComponent(syncOverlay_)") != std::string::npos
              && mainUi.find("markerButton_.setBounds(transport.removeFromRight") != std::string::npos
-             && checklistDoc.find("| Markers |") != std::string::npos);
+             && mainUi.find("bindToolKeys(dropouts_") != std::string::npos
+             && mainUi.find("bindToolKeys(cpu_") != std::string::npos
+             && mainUi.find("bindToolKeys(*latencyWindow_") != std::string::npos
+             && mainUi.find("bindToolKeys(*this") != std::string::npos
+             && mainUi.find("playSampleFromSelectedMarker") != std::string::npos
+             && help.find("play from that marker") != std::string::npos
+             && checklistDoc.find("| Markers |") != std::string::npos
+             && checklistDoc.find("starts playback from that marker") != std::string::npos);
     item("WAV names",
          youhost::takeWaveName(1, 1, "BD") == "1_BD_1.wav"
              && youhost::takeWaveName(2, 1, "BD") == "1_BD_2.wav"
@@ -5022,12 +5060,12 @@ void testBeta090()
 {
     const double periodNs = (512.0 / 48000.0) * 1.0e9;
     CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs), 512, 48000.0) == 100);
-    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 2.0), 512, 48000.0) == 200);
-    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 20.0), 512, 48000.0) == 999);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 2.0), 512, 48000.0) == 100);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 20.0), 512, 48000.0) == 100);
     CHECK(youhost::blockCpuPercent(0, 512, 48000.0) == 0);
     CHECK(youhost::smoothCpuPercent(0, 100) == 50);
     CHECK(youhost::smoothCpuPercent(50, 100) == 75);
-    CHECK(youhost::smoothCpuPercent(2000, -4) == 499);
+    CHECK(youhost::smoothCpuPercent(2000, -4) == 50);
 
     const auto started = std::chrono::steady_clock::now();
     int shown = 0;

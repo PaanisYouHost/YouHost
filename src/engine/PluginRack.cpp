@@ -1162,7 +1162,8 @@ DspLoad PluginRack::dspLoad() const
         return load;
 
     const auto callbackNs = lastCallbackNs_.load(std::memory_order_relaxed);
-    load.callbackPercent = static_cast<float>((static_cast<double>(callbackNs) / 1.0e9) / period * 100.0);
+    const float rawCallback = static_cast<float>((static_cast<double>(callbackNs) / 1.0e9) / period * 100.0);
+    load.callbackPercent = static_cast<float>(displayCpuPercent(rawCallback));
 
     std::lock_guard<std::mutex> lock(lifeLock_);
     float pluginSum = 0.0f;
@@ -1174,7 +1175,7 @@ DspLoad PluginRack::dspLoad() const
             if (model.plugin == nullptr || model.plugin->gate == nullptr || model.plugin->instance == nullptr)
                 continue;
             auto& gate = *model.plugin->gate;
-            const float percent = static_cast<float>(gate.shownPercent.load(std::memory_order_relaxed));
+            const float percent = static_cast<float>(clampCpuPercent(gate.shownPercent.load(std::memory_order_relaxed)));
             if (percent <= 0.0f)
                 continue;
             pluginSum += percent;
@@ -1209,7 +1210,7 @@ DspLoad PluginRack::dspLoad() const
             }
         }
     }
-    load.pluginPercent = pluginSum;
+    load.pluginPercent = static_cast<float>(displayCpuPercent(pluginSum));
     return load;
 }
 
@@ -1232,11 +1233,13 @@ CpuMeters PluginRack::cpuMeters() const
     const double period = static_cast<double>(block) / rate;
     const auto callbackNs = lastCallbackNs_.load(std::memory_order_relaxed);
     if (period > 0.0)
-        meters.callbackPercent = static_cast<float>((static_cast<double>(callbackNs) / 1.0e9) / period * 100.0);
+        meters.callbackPercent = static_cast<float>(displayCpuPercent(
+            static_cast<float>((static_cast<double>(callbackNs) / 1.0e9) / period * 100.0)));
     meters.workers = pool_ != nullptr ? pool_->workerCount() : 0;
     const int cores = std::min(1 + meters.workers, static_cast<int>(meters.percent.size()));
     for (int core = 0; core < cores; ++core)
-        meters.percent[static_cast<std::size_t>(core)] = static_cast<float>(coreShown_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed));
+        meters.percent[static_cast<std::size_t>(core)] = static_cast<float>(
+            clampCpuPercent(coreShown_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed)));
     return meters;
 }
 

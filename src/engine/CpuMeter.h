@@ -5,8 +5,11 @@
 namespace youhost
 {
 
-// Status and the CPU window show this. Above 100 is a real overload, up to 999.
-inline constexpr int kCpuPercentCeiling = 999;
+// Every CPU and DSP figure stops at 100. 100% is full: the buffer is used up.
+inline constexpr int kCpuPercentCeiling = 100;
+inline constexpr int kCpuDisplaySlots = 16;
+inline constexpr std::int64_t kCpuAverageMs = 1000;
+inline constexpr std::int64_t kCpuPublishMs = 500;
 
 inline int clampCpuPercent(int percent) noexcept
 {
@@ -17,8 +20,15 @@ inline int clampCpuPercent(int percent) noexcept
     return percent;
 }
 
-// One block's time against the buffer period, as a whole percent.
-// Arithmetic only: the audio thread calls this once per plugin per block.
+inline int displayCpuPercent(float percent) noexcept
+{
+    if (! (percent > 0.0f))
+        return 0;
+    return clampCpuPercent(static_cast<int>(percent + 0.5f));
+}
+
+// One block's time against the buffer period, as a whole percent from 0 to 100.
+// 100% fills the buffer. Arithmetic only: the audio thread calls this once per plugin per block.
 inline int blockCpuPercent(std::uint64_t elapsedNs, int samples, double sampleRate) noexcept
 {
     if (elapsedNs == 0 || samples <= 0 || sampleRate <= 0.0)
@@ -45,5 +55,73 @@ inline int smoothCpuPercent(int previous, int instant) noexcept
         return clampCpuPercent((prior + now + 1) / 2);
     return clampCpuPercent((prior + now) / 2);
 }
+
+// Message-thread display. The first sample shows at once. Later samples wait
+// for the publish interval, then the shown figure becomes the mean of the
+// last second. Peak keeps the highest sample in that second. No heap.
+struct CpuDisplayMeter
+{
+    struct Sample
+    {
+        std::int64_t timeMs = 0;
+        int percent = 0;
+    };
+
+    Sample samples[kCpuDisplaySlots] {};
+    int count = 0;
+    int next = 0;
+    std::int64_t publishedMs = 0;
+    int shown = 0;
+    int peak = 0;
+    bool haveShown = false;
+
+    void reset() noexcept
+    {
+        count = 0;
+        next = 0;
+        publishedMs = 0;
+        shown = 0;
+        peak = 0;
+        haveShown = false;
+    }
+
+    int push(std::int64_t timeMs, int percent) noexcept
+    {
+        percent = clampCpuPercent(percent);
+        samples[static_cast<std::size_t>(next)] = Sample { timeMs, percent };
+        next = (next + 1) % kCpuDisplaySlots;
+        if (count < kCpuDisplaySlots)
+            ++count;
+
+        int windowPeak = 0;
+        int sum = 0;
+        int samplesInWindow = 0;
+        for (int index = 0; index < count; ++index)
+        {
+            const Sample& sample = samples[static_cast<std::size_t>(index)];
+            if (sample.timeMs > timeMs || timeMs - sample.timeMs > kCpuAverageMs)
+                continue;
+            sum += sample.percent;
+            ++samplesInWindow;
+            if (sample.percent > windowPeak)
+                windowPeak = sample.percent;
+        }
+        peak = windowPeak;
+
+        if (! haveShown)
+        {
+            haveShown = true;
+            publishedMs = timeMs;
+            shown = percent;
+            return shown;
+        }
+        if (timeMs < publishedMs || timeMs - publishedMs < kCpuPublishMs)
+            return shown;
+        publishedMs = timeMs;
+        if (samplesInWindow > 0)
+            shown = clampCpuPercent((sum + samplesInWindow / 2) / samplesInWindow);
+        return shown;
+    }
+};
 
 } // namespace youhost

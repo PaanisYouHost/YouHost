@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CpuMeter.h"
+
 #include <string>
 
 namespace youhost
@@ -48,18 +50,15 @@ inline std::string fitStatusColumn(std::string text, int width)
     return text;
 }
 
-// 'CPU   7%', 'CPU  42%', 'CPU 140%', 'CPU 999%'. Values above 999 clamp.
-// 'CPU 999%' is 8 characters and fits the 10-wide column with its 2-character gap.
+// 'DSP   7%', 'DSP  42%', 'DSP 100%'. 100% is full. 'DSP 100%' is 8 characters
+// and fits the 10-wide column with its 2-character gap.
 inline std::string formatCpuField(int percent)
 {
-    if (percent < 0)
-        percent = 0;
-    if (percent > 999)
-        percent = 999;
+    percent = clampCpuPercent(percent);
     std::string digits = std::to_string(percent);
     while (digits.size() < 3)
         digits.insert(digits.begin(), ' ');
-    return "CPU " + digits + "%";
+    return "DSP " + digits + "%";
 }
 
 inline std::string formatStatusLine(std::string device,

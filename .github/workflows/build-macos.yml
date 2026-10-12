@@ -61,6 +61,18 @@ jobs:
           fi
           "${TEST}"
 
+      - name: Tool window keys
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostToolKeys
+          TEST=build/YouHostToolKeys
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostToolKeys was not produced"
+            find build -name 'YouHostToolKeys*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: AUDelay silent input
         run: |
           set -euo pipefail

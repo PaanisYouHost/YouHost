@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace youhost
@@ -86,6 +87,7 @@ private:
     void requestRecord();
     void startRecordingIfReady();
     bool shortcutBlocked(juce::Component* originating) const;
+    std::optional<std::int64_t> markerPlaySample() const;
 
     juce::ApplicationCommandTarget* getNextCommandTarget() override;
     void getAllCommands(juce::Array<juce::CommandID>& commands) override;

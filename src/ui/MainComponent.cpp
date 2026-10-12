@@ -20,6 +20,7 @@
 #include "engine/StatusLine.h"
 #include "engine/VersionLabel.h"
 #include "engine/SyncLost.h"
+#include "ui/ToolKeyBind.h"
 
 #include <algorithm>
 #include <array>
@@ -1322,9 +1323,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     if (keys_ != nullptr)
     {
         scanner_.addKeyListener(keys_.get());
-        dropouts_.addKeyListener(keys_.get());
-        cpu_.addKeyListener(keys_.get());
-        latencyWindow_->addKeyListener(keys_.get());
+        bindToolKeys(dropouts_, *keys_);
+        bindToolKeys(cpu_, *keys_);
+        bindToolKeys(*latencyWindow_, *keys_);
     }
     setupWindow_ = std::make_unique<SetupWindow>(engine_, settings_);
     commandManager_.registerAllCommandsForTarget(this);
@@ -1356,7 +1357,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     scannerButton_.setTooltip("SCAN (" + juce::String(shortcutChord(ShortcutId::scanner))
                               + "). Used when new plugins are installed.");
     cpuButton_.onClick = [this] { toggleCpu(); };
-    cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu)) + "). Per-core usage and the audio callback.");
+    cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu))
+                          + "). DSP is the buffer. 100% fills it.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
     stopButton_.onClick = [this]
@@ -1575,9 +1577,12 @@ MainComponent::~MainComponent()
     if (keys_ != nullptr)
     {
         scanner_.removeKeyListener(keys_.get());
-        dropouts_.removeKeyListener(keys_.get());
+        unbindToolKeys(dropouts_, *keys_);
+        unbindToolKeys(cpu_, *keys_);
         if (latencyWindow_ != nullptr)
-            latencyWindow_->removeKeyListener(keys_.get());
+            unbindToolKeys(*latencyWindow_, *keys_);
+        if (markersWindow_ != nullptr)
+            unbindToolKeys(*markersWindow_, *keys_);
     }
     engine_.setMeterRestoreHandler(nullptr);
     engine_.setPageRestoreHandler(nullptr);
@@ -1609,12 +1614,10 @@ void MainComponent::parentHierarchyChanged()
 
 bool textEditing(juce::Component* component)
 {
+    if (componentIsTextInput(component))
+        return true;
     if (component == nullptr)
         return false;
-    if (dynamic_cast<juce::TextEditor*>(component) != nullptr)
-        return true;
-    if (component->findParentComponentOfClass<juce::TextEditor>() != nullptr)
-        return true;
     if (dynamic_cast<juce::AudioProcessorEditor*>(component) != nullptr)
         return true;
     if (component->findParentComponentOfClass<juce::AudioProcessorEditor>() != nullptr)
@@ -1632,20 +1635,7 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
     if (shortcutBlocked(originating))
         return false;
 
-    RawKey raw;
-    raw.shift = key.getModifiers().isShiftDown();
-    raw.command = key.getModifiers().isCommandDown();
-    raw.alt = key.getModifiers().isAltDown();
-    raw.textCharacter = key.getTextCharacter();
-    raw.keyCode = key.getKeyCode();
-    if (key.isKeyCode(juce::KeyPress::spaceKey))
-        raw.token = RawToken::space;
-    else if (key.isKeyCode(juce::KeyPress::leftKey))
-        raw.token = RawToken::left;
-    else if (key.isKeyCode(juce::KeyPress::rightKey))
-        raw.token = RawToken::right;
-
-    const auto matched = dispatchRawKey(raw, page_, false);
+    const auto matched = dispatchRawKey(rawKeyFromPress(key), page_, false);
     if (! matched.has_value())
         return false;
     return runShortcut(*matched);
@@ -1723,7 +1713,11 @@ bool MainComponent::runShortcut(ShortcutId id)
             if (mode == TransportMode::stopped && engine_.isRecordReady())
                 requestRecord();
             else if (mode == TransportMode::stopped)
+            {
+                if (const auto sample = markerPlaySample())
+                    engine_.transportLocate(*sample);
                 showTransportResult(engine_.transportPlay(), [this] { toggleSetup(); });
+            }
             else
                 showTransportResult(engine_.transportStop(), [this] { toggleSetup(); });
             refresh();
@@ -2232,15 +2226,18 @@ void MainComponent::toggleLatency()
 class MarkersWindow : public juce::DocumentWindow, private juce::Timer
 {
 public:
-    MarkersWindow(AudioEngine& engine, AppSettings& settings)
+    MarkersWindow(AudioEngine& engine, AppSettings& settings, juce::KeyListener* keys)
         : juce::DocumentWindow("MARKERS", theme::panel, juce::DocumentWindow::closeButton),
           engine_(engine),
-          settings_(settings)
+          settings_(settings),
+          keys_(keys)
     {
         setUsingNativeTitleBar(true);
         setContentOwned(new Body(*this), true);
         prepareRememberedWindow(*this, settings_, "windowMarkers", 420, 360, 280, 220);
         setVisible(false);
+        if (keys_ != nullptr)
+            bindToolKeys(*this, *keys_);
         startTimerHz(4);
     }
 
@@ -2254,6 +2251,20 @@ public:
     {
         saveRememberedWindow(*this, settings_, "windowMarkers", 420, 360);
         setVisible(false);
+    }
+
+    std::optional<std::int64_t> selectedSample() const
+    {
+        if (selectedIndex_ < 0 || selectedIndex_ >= engine_.markerCount())
+            return std::nullopt;
+        return engine_.markerSample(selectedIndex_);
+    }
+
+    bool nameEditActive() const
+    {
+        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
+            return body->nameEditActive();
+        return false;
     }
 
 private:
@@ -2281,13 +2292,33 @@ private:
             built_ = count;
             revision_ = owner_.engine_.markerRevision();
             rows_.clear();
+            if (owner_.selectedIndex_ >= count)
+                owner_.selectedIndex_ = count - 1;
             for (int index = 0; index < count; ++index)
             {
-                auto row = std::make_unique<Row>(owner_.engine_, index);
+                auto row = std::make_unique<Row>(owner_, index);
                 column_.addAndMakeVisible(*row);
+                row->setChosen(index == owner_.selectedIndex_);
                 rows_.push_back(std::move(row));
             }
+            if (owner_.keys_ != nullptr)
+                for (auto& row : rows_)
+                    bindToolKeys(*row, *owner_.keys_);
             resized();
+        }
+
+        bool nameEditActive() const
+        {
+            for (const auto& row : rows_)
+                if (row->nameBeingEdited())
+                    return true;
+            return false;
+        }
+
+        void showSelection(int index)
+        {
+            for (int row = 0; row < static_cast<int>(rows_.size()); ++row)
+                rows_[static_cast<std::size_t>(row)]->setChosen(row == index);
         }
 
         void resized() override
@@ -2313,25 +2344,38 @@ private:
         class Row : public juce::Component
         {
         public:
-            Row(AudioEngine& engine, int index)
-                : engine_(engine),
+            Row(MarkersWindow& owner, int index)
+                : owner_(owner),
                   index_(index)
             {
                 addAndMakeVisible(jump_);
                 addAndMakeVisible(name_);
-                const double rate = engine_.preferredSampleRate() > 0.0 ? engine_.preferredSampleRate() : 48000.0;
-                jump_.setButtonText(timecodeText(engine_.markerSample(index_), rate));
-                name_.setText(engine_.markerName(index_), juce::dontSendNotification);
+                addMouseListener(this, true);
+                const double rate = owner_.engine_.preferredSampleRate() > 0.0 ? owner_.engine_.preferredSampleRate() : 48000.0;
+                jump_.setButtonText(timecodeText(owner_.engine_.markerSample(index_), rate));
+                jump_.setMouseClickGrabsKeyboardFocus(false);
+                jump_.setWantsKeyboardFocus(false);
+                name_.setText(owner_.engine_.markerName(index_), juce::dontSendNotification);
                 name_.setEditable(false, true, false);
+                name_.setWantsKeyboardFocus(false);
                 name_.onTextChange = [this]
                 {
-                    engine_.setMarkerName(index_, name_.getText());
+                    owner_.engine_.setMarkerName(index_, name_.getText());
                 };
-                jump_.onClick = [this]
-                {
-                    engine_.transportLocate(engine_.markerSample(index_));
-                };
-                jump_.setMouseClickGrabsKeyboardFocus(false);
+                jump_.onClick = [this] { choose(); };
+            }
+
+            void setChosen(bool chosen)
+            {
+                if (chosen_ == chosen)
+                    return;
+                chosen_ = chosen;
+                repaint();
+            }
+
+            bool nameBeingEdited() const
+            {
+                return name_.isBeingEdited();
             }
 
             void resized() override
@@ -2342,9 +2386,29 @@ private:
                 name_.setBounds(area);
             }
 
+            void paint(juce::Graphics& graphics) override
+            {
+                if (! chosen_)
+                    return;
+                graphics.setColour(theme::buttonOn);
+                graphics.fillRect(getLocalBounds());
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                choose();
+            }
+
         private:
-            AudioEngine& engine_;
+            void choose()
+            {
+                owner_.selectIndex(index_);
+                owner_.engine_.transportLocate(owner_.engine_.markerSample(index_));
+            }
+
+            MarkersWindow& owner_;
             int index_ = 0;
+            bool chosen_ = false;
             juce::TextButton jump_;
             juce::Label name_;
         };
@@ -2365,14 +2429,40 @@ private:
             body->refresh();
     }
 
+    void selectIndex(int index)
+    {
+        selectedIndex_ = index;
+        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
+            body->showSelection(index);
+    }
+
     AudioEngine& engine_;
     AppSettings& settings_;
+    juce::KeyListener* keys_ = nullptr;
+    int selectedIndex_ = -1;
 };
+
+std::optional<std::int64_t> MainComponent::markerPlaySample() const
+{
+    auto* window = dynamic_cast<MarkersWindow*>(markersWindow_.get());
+    if (window == nullptr)
+        return std::nullopt;
+    const auto sample = window->selectedSample();
+    if (! sample.has_value())
+        return std::nullopt;
+    const bool stopped = engine_.transportView().mode == TransportMode::stopped;
+    const bool startingPlayback = stopped && ! engine_.isRecordReady();
+    return playSampleFromSelectedMarker(window->isVisible(),
+                                        window->nameEditActive(),
+                                        true,
+                                        *sample,
+                                        startingPlayback);
+}
 
 void MainComponent::toggleMarkers()
 {
     if (markersWindow_ == nullptr)
-        markersWindow_ = std::make_unique<MarkersWindow>(engine_, settings_);
+        markersWindow_ = std::make_unique<MarkersWindow>(engine_, settings_, keys_.get());
     const bool show = ! markersWindow_->isVisible();
     markersWindow_->setVisible(show);
     markersButton_.setToggleState(show, juce::dontSendNotification);
@@ -2957,7 +3047,7 @@ void MainComponent::refresh()
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
-    const int cpuNow = engine_.pluginCpuPercent();
+    const int cpuNow = engine_.callbackCpuPercent();
     std::string statusKey = engine_.missingCardStatus().isNotEmpty() ? engine_.missingCardStatus().toStdString()
                                                                      : engine_.deviceName().toStdString();
     statusKey += "|";
@@ -3047,7 +3137,7 @@ void MainComponent::paint(juce::Graphics& graphics)
     if (engine_.sessionIsOnInternalDisk())
         session += " disk";
     const auto line = formatStatusLine(device, io, rate, engine_.wavBitDepthLabel().toStdString(),
-                                       engine_.pluginCpuPercent(),
+                                       engine_.callbackCpuPercent(),
                                        session);
 
     graphics.setColour(theme::dim);
