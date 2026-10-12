@@ -10,12 +10,12 @@
 namespace youhost
 {
 
-// One solid layer over the main window. It repaints only when the words change.
-// A click after audio is back hides it. The click does not touch the device.
+// Centered while the card is gone. A small bottom-left box after audio returns.
+// The box repaints itself only when its blink phase changes.
 class SyncLostOverlay : public juce::Component
 {
 public:
-    std::function<void()> onAcknowledge;
+    std::function<void()> onOpenDetails;
 
     SyncLostOverlay()
     {
@@ -25,90 +25,124 @@ public:
         setVisible(false);
     }
 
-    // True only when the alarm appears, changes, or goes away. A steady
-    // overlay compares a few integers and does not repaint.
+    SyncLostChrome place() const noexcept { return place_; }
+
+    std::string restoredLine() const
+    {
+        return syncRestoredLine(hour_, minute_, second_, gapMs_);
+    }
+
+    // True only when the alarm appears, moves, or goes away.
     bool sync(const SyncLostState& state)
     {
-        const bool visible = state.showAlarm();
-        const bool lost = state.isMissing();
-        if (visible == showing_ && lost == lost_ && state.hour == hour_ && state.minute == minute_
-            && state.second == second_ && state.gapMs == gapMs_)
+        const auto next = syncLostChrome(state);
+        if (next == place_ && state.hour == hour_ && state.minute == minute_ && state.second == second_ && state.gapMs == gapMs_)
             return false;
 
-        showing_ = visible;
-        lost_ = lost;
+        place_ = next;
         hour_ = state.hour;
         minute_ = state.minute;
         second_ = state.second;
         gapMs_ = state.gapMs;
-        if (lost_)
-        {
-            primary_ = kSyncLostTitle;
-            secondary_ = kSyncLostFinnish;
-        }
-        else if (showing_)
-        {
-            primary_ = syncRestoredLine(hour_, minute_, second_, gapMs_);
-            secondary_ = kSyncRestoredFinnish;
-        }
-        else
-        {
-            primary_.clear();
-            secondary_.clear();
-        }
-        setVisible(showing_);
-        if (showing_)
-            repaint();
+        if (place_ == SyncLostChrome::hidden)
+            lit_ = true;
+        repaint();
+        return true;
+    }
+
+    // Corner only. A steady phase does not repaint.
+    bool setBlinkPhase(bool lit)
+    {
+        if (place_ != SyncLostChrome::corner || lit == lit_)
+            return false;
+        lit_ = lit;
+        repaint();
         return true;
     }
 
     void paint(juce::Graphics& graphics) override
     {
-        graphics.fillAll(juce::Colour(0xff14060a));
-        auto area = getLocalBounds().reduced(48, 32);
-        const int titleH = lost_ ? 150 : 200;
-        const int block = titleH + 16 + 64 + (lost_ ? 0 : 44);
-        if (area.getHeight() > block)
-            area = area.withSizeKeepingCentre(area.getWidth(), block);
-
-        graphics.setColour(lost_ ? juce::Colour(0xffff2438) : juce::Colours::white);
-        graphics.setFont(juce::Font(juce::FontOptions(lost_ ? 84.0f : 40.0f).withStyle("Bold")));
-        graphics.drawFittedText(juce::String(primary_), area.removeFromTop(titleH), juce::Justification::centred, lost_ ? 2 : 4);
-
-        area.removeFromTop(16);
-        graphics.setColour(juce::Colour(0xffffc9c9));
-        graphics.setFont(juce::Font(juce::FontOptions(36.0f).withStyle("Bold")));
-        graphics.drawFittedText(juce::String(secondary_), area.removeFromTop(64), juce::Justification::centred, 2);
-
-        if (! lost_)
+        const bool center = place_ == SyncLostChrome::center;
+        graphics.fillAll(center || lit_ ? juce::Colour(0xff8d1424) : juce::Colour(0xff3a1016));
+        graphics.setColour(juce::Colours::white);
+        if (center)
         {
-            graphics.setColour(juce::Colour(0xffc8b8b8));
-            graphics.setFont(juce::Font(juce::FontOptions(18.0f)));
-            graphics.drawFittedText("Click to close  /  Sulje napsauttamalla",
-                                    area.removeFromTop(44),
-                                    juce::Justification::centred,
-                                    1);
+            auto area = getLocalBounds().reduced(24, 16);
+            graphics.setFont(juce::Font(juce::FontOptions(72.0f).withStyle("Bold")));
+            graphics.drawFittedText(kSyncLostTitle, area.removeFromTop(area.getHeight() * 2 / 3), juce::Justification::centred, 2);
+            graphics.setColour(juce::Colour(0xffffc9c9));
+            graphics.setFont(juce::Font(juce::FontOptions(28.0f).withStyle("Bold")));
+            graphics.drawFittedText(kSyncLostFinnish, area, juce::Justification::centred, 2);
+            return;
         }
+
+        graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
+        graphics.drawFittedText(kSyncLostTitle, getLocalBounds().reduced(8, 2), juce::Justification::centred, 1);
     }
 
     void mouseDown(const juce::MouseEvent&) override
     {
-        // Message thread only. While the card is still gone the overlay stays.
-        // After audio is back, the click hides the notice and does not close the device.
-        if (lost_ || onAcknowledge == nullptr)
+        // The centered window stays up while the card is gone.
+        // The corner box only asks for the dialog. It does not touch the device.
+        if (place_ != SyncLostChrome::corner || onOpenDetails == nullptr)
             return;
-        onAcknowledge();
+        onOpenDetails();
     }
 
 private:
-    bool showing_ = false;
-    bool lost_ = false;
+    SyncLostChrome place_ = SyncLostChrome::hidden;
+    bool lit_ = true;
     int hour_ = 0;
     int minute_ = 0;
     int second_ = 0;
     std::int64_t gapMs_ = 0;
-    std::string primary_;
-    std::string secondary_;
+};
+
+// Non-modal. OK clears the notice and does not stop audio or a take.
+class SyncRestoredDialog : public juce::Component
+{
+public:
+    std::function<void()> onOk;
+
+    SyncRestoredDialog()
+    {
+        setOpaque(true);
+        setAlwaysOnTop(true);
+        setVisible(false);
+        addAndMakeVisible(ok_);
+        ok_.onClick = [this]
+        {
+            if (onOk != nullptr)
+                onOk();
+        };
+    }
+
+    void setMessage(const std::string& line)
+    {
+        if (line == message_)
+            return;
+        message_ = line;
+        repaint();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(juce::Colour(0xff14060a));
+        graphics.setColour(juce::Colours::white);
+        graphics.setFont(juce::Font(juce::FontOptions(22.0f).withStyle("Bold")));
+        auto area = getLocalBounds().reduced(24, 18);
+        area.removeFromBottom(48);
+        graphics.drawFittedText(juce::String(message_), area, juce::Justification::centred, 4);
+    }
+
+    void resized() override
+    {
+        ok_.setBounds(getWidth() / 2 - 44, getHeight() - 52, 88, 32);
+    }
+
+private:
+    juce::TextButton ok_ { "OK" };
+    std::string message_;
 };
 
 } // namespace youhost

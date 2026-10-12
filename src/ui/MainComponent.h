@@ -43,6 +43,9 @@ private:
     bool handleKey(const juce::KeyPress& key, juce::Component* originating);
     bool runShortcut(ShortcutId id);
     void refresh();
+    void placeSyncOverlay();
+    void placeSyncDialog();
+    void showSyncRestoredDialog();
     void publishMeters(bool repaintLevels);
     void onPluginSlot(int channel);
     void setPeakMode(bool peak, bool fromUser);
@@ -139,6 +142,7 @@ private:
     juce::TextButton markersButton_ { "6 MARKERS" };
     juce::TextButton markerButton_ { "MARKER" };
     SyncLostOverlay syncOverlay_;
+    SyncRestoredDialog syncDialog_;
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };

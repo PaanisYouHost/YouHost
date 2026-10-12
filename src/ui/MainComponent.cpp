@@ -1402,12 +1402,14 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
     markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
     markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
-    syncOverlay_.onAcknowledge = [this]
+    syncOverlay_.onOpenDetails = [this] { showSyncRestoredDialog(); };
+    syncDialog_.onOk = [this]
     {
         engine_.acknowledgeSyncLost();
         refresh();
     };
     addChildComponent(syncOverlay_);
+    addChildComponent(syncDialog_);
 
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
@@ -2985,14 +2987,20 @@ void MainComponent::refresh()
         if (! bannerArea_.isEmpty())
             repaint(bannerArea_);
     }
-    if (syncOverlay_.sync(engine_.syncLostState()))
+    const auto& syncState = engine_.syncLostState();
+    if (syncOverlay_.sync(syncState))
     {
-        syncOverlay_.setBounds(getLocalBounds());
-        if (syncOverlay_.isVisible())
-            syncOverlay_.toFront(false);
-        else
-            repaint();
+        const bool show = syncOverlay_.place() != SyncLostChrome::hidden;
+        if (show)
+            placeSyncOverlay();
+        syncOverlay_.setVisible(show);
+        if (! show)
+            syncDialog_.setVisible(false);
     }
+    if (syncOverlay_.place() == SyncLostChrome::corner && ! syncDialog_.isVisible())
+        syncOverlay_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
+    if (syncDialog_.isVisible() && ! syncState.showRestored())
+        syncDialog_.setVisible(false);
     if (loading)
         heavyPaintHeld_ = true;
 }
@@ -3293,10 +3301,37 @@ void MainComponent::resized()
         bridgeArea_ = {};
         pluginPage_.setBounds(area);
     }
-    syncOverlay_.setBounds(getLocalBounds());
     if (syncOverlay_.isVisible())
-        syncOverlay_.toFront(false);
+        placeSyncOverlay();
+    if (syncDialog_.isVisible())
+        placeSyncDialog();
     repaint();
+}
+
+void MainComponent::placeSyncOverlay()
+{
+    const auto box = syncOverlay_.place() == SyncLostChrome::corner
+                         ? syncLostCornerBox(getWidth(), getHeight())
+                         : syncLostCenterBox(getWidth(), getHeight());
+    syncOverlay_.setBounds(box.x, box.y, box.w, box.h);
+    syncOverlay_.toFront(false);
+}
+
+void MainComponent::placeSyncDialog()
+{
+    const auto box = syncLostDialogBox(getWidth(), getHeight());
+    syncDialog_.setBounds(box.x, box.y, box.w, box.h);
+    syncDialog_.toFront(false);
+}
+
+void MainComponent::showSyncRestoredDialog()
+{
+    if (syncOverlay_.place() != SyncLostChrome::corner)
+        return;
+    syncDialog_.setMessage(syncOverlay_.restoredLine());
+    placeSyncDialog();
+    syncDialog_.setVisible(true);
+    syncDialog_.toFront(false);
 }
 
 } // namespace youhost

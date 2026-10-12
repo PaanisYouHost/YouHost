@@ -4468,15 +4468,20 @@ void testReleaseChecklist()
     const bool alarmOn = sync.showAlarm() && sync.keepReattaching() && sync.isMissing()
                          && lostText.visible && lostText.lost
                          && lostText.primary == youhost::kSyncLostTitle
-                         && lostText.secondary == youhost::kSyncLostFinnish;
+                         && lostText.secondary == youhost::kSyncLostFinnish
+                         && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::center;
     sync.acknowledge();
     const bool stillLost = sync.showAlarm() && sync.keepReattaching() && sync.isMissing();
     sync.deviceReturned(3000);
     const auto restored = youhost::syncOverlayText(sync);
-    const bool waitingForClick = sync.showRestored() && ! sync.keepReattaching() && restored.visible && ! restored.lost
-                                 && restored.primary == "SYNC WAS LOST at 14:32:01 for 3 s - audio restored"
-                                 && restored.secondary == youhost::kSyncRestoredFinnish
-                                 && restored.secondary == "Ääni palautettu";
+    const auto cornerBox = youhost::syncLostCornerBox(1280, 800);
+    const auto centerBox = youhost::syncLostCenterBox(1280, 800);
+    const bool waitingForClick = sync.showRestored() && ! sync.keepReattaching()
+                                 && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::corner
+                                 && restored.visible && ! restored.lost
+                                 && restored.primary == "Sync was lost at 14:32:01 for 3 s, now restored"
+                                 && cornerBox.x == 12 && cornerBox.y == 752 && cornerBox.y > 400
+                                 && centerBox.w == 720 && centerBox.x == (1280 - 720) / 2;
     sync.acknowledge();
     const bool alarmClear = ! sync.showAlarm() && ! sync.keepReattaching();
     sync.deviceLost(1, 2, 3);
@@ -4559,29 +4564,38 @@ void testReleaseChecklist()
     const auto syncHeader = readWorkspaceFile("src/engine/SyncLost.h");
     const auto overlayUi = readWorkspaceFile("src/ui/SyncLostOverlay.h");
     const auto choseOther = sliceBetween(engineSrc, "if (userChoseThis)", "A card that is not the session card");
+    const auto paintBody = sliceBetween(mainUi, "void MainComponent::paint(", "void MainComponent::resized()");
     item("SYNC LOST",
          alarmOn && stillLost && waitingForClick && alarmClear && restamped && dismissed
              && youhost::syncLossWholeSeconds(3000) == 3
+             && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::hidden
              && ! youhost::syncOverlayText(sync).visible
+             && youhost::syncLostBlink(0)
+             && ! youhost::syncLostBlink(400)
              && std::string(youhost::kSyncLostFinnish) == "Äänikortti kadonnut"
              && syncHeader.find("Äänikortti kadonnut") != std::string::npos
              && overlayUi.find("setOpaque(true)") != std::string::npos
+             && overlayUi.find("place_ != SyncLostChrome::corner") != std::string::npos
              && overlayUi.find("return false") != std::string::npos
              && overlayUi.find("closeAudioDevice") == std::string::npos
              && overlayUi.find("recorder_") == std::string::npos
-             && overlayUi.find("gapMs_") != std::string::npos
+             && overlayUi.find("onOpenDetails") != std::string::npos
+             && overlayUi.find("\"OK\"") != std::string::npos
              && mainUi.find("acknowledgeSyncLost") != std::string::npos
              && mainUi.find("syncOverlay_.sync") != std::string::npos
-             && mainUi.find("syncLostBlink") == std::string::npos
+             && mainUi.find("syncOverlay_.onOpenDetails") != std::string::npos
+             && mainUi.find("setBlinkPhase(syncLostBlink") != std::string::npos
+             && mainUi.find("syncLostCornerBox") != std::string::npos
              && mainUi.find("drawText(\"SYNC LOST\"") == std::string::npos
              && mainUi.find("syncOverlay_.repaint()") == std::string::npos
+             && paintBody.find("syncLostBlink") == std::string::npos
              && choseOther.find("dismiss()") != std::string::npos
              && choseOther.find("deviceReturned") == std::string::npos
              && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
              && checklistDoc.find("SYNC LOST") != std::string::npos
              && checklistDoc.find("not from a timer scan") != std::string::npos
-             && checklistDoc.find("until a click") != std::string::npos
-             && checklistDoc.find("repaints only when those words change") != std::string::npos);
+             && checklistDoc.find("bottom-left") != std::string::npos
+             && checklistDoc.find("repaints only that box") != std::string::npos);
     const auto lossBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
     const auto listBody = sliceBetween(engineSrc, "void AudioEngine::noteHardwareDeviceList()", "void AudioEngine::rejectForeignDevice()");
     const auto reopenBody = sliceBetween(engineSrc, "void AudioEngine::tryReopenWanted()", "bool AudioEngine::deviceNameListed");
