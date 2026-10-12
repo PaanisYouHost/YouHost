@@ -100,9 +100,9 @@ bool busesMatch(juce::AudioPluginInstance& instance, int inCh, int outCh)
            && width == std::max(inCh, outCh);
 }
 
-// Keep the layout the plugin opened with. A stereo effect that also accepts
-// mono stays stereo: both inputs get the same samples and the mono output is L.
-// kUnlinkedMonoUsesMonoBus asks an unlinked mono channel for 1/1 instead.
+// Keep the layout the plugin opened with. A linked pair stays stereo: both
+// inputs get the same samples and the mono output is L. An unlinked mono
+// channel asks for 1/1 when kUnlinkedMonoUsesMonoBus is set.
 // Fallback, when that layout cannot be set, is stereo, then mono, then 1-in/2-out.
 BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
 {

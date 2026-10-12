@@ -1,6 +1,6 @@
 // Compare a real Apple AU opened 1/1 with the same AU opened 2/2 and folded
-// to the left, which is the mono path YouHost uses today. Factory defaults
-// stay put. The level is the RMS after the plugin's own latency.
+// to the left. Factory defaults stay put. The level is the RMS after the
+// plugin's own latency.
 //
 // Within 0.1 dB on every AU that accepts both layouts, unlinked mono channels
 // use 1/1 (kUnlinkedMonoUsesMonoBus). A larger difference keeps 2/2. A linked
@@ -214,7 +214,7 @@ int run()
 
         const double delta = direct.db - folded.db;
         const double absDelta = std::fabs(delta);
-        if (absDelta > worst)
+        if (worstName.empty() || absDelta > worst)
         {
             worst = absDelta;
             worstName = unit.name;

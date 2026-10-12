@@ -56,10 +56,10 @@ inline const char* chosenLayoutName(ChosenLayout layout) noexcept
     return "none";
 }
 
-// YouHostMonoNullTest on macOS compares 1/1 with Fold L 2/2. This stays false
-// while any Apple AU in that test differs by more than 0.1 dB. A linked pair
-// never uses it: the pair stays one stereo process.
-inline constexpr bool kUnlinkedMonoUsesMonoBus = false;
+// YouHostMonoNullTest measured 0.000 dB between 1/1 and Fold L 2/2 on
+// AUDelay, AUDistortion, AUGraphicEQ, and AUBandpass. Unlinked mono channels
+// open 1/1. A linked pair never uses this: the pair stays one stereo process.
+inline constexpr bool kUnlinkedMonoUsesMonoBus = true;
 
 inline ChosenLayout layoutForChannel(ChosenLayout opened, bool unlinkedMono, bool monoSupported) noexcept
 {
