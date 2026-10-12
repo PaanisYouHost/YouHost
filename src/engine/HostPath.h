@@ -56,6 +56,18 @@ inline const char* chosenLayoutName(ChosenLayout layout) noexcept
     return "none";
 }
 
+// YouHostMonoNullTest on macOS compares 1/1 with Fold L 2/2. This stays false
+// while any Apple AU in that test differs by more than 0.1 dB. A linked pair
+// never uses it: the pair stays one stereo process.
+inline constexpr bool kUnlinkedMonoUsesMonoBus = false;
+
+inline ChosenLayout layoutForChannel(ChosenLayout opened, bool unlinkedMono, bool monoSupported) noexcept
+{
+    if (unlinkedMono && kUnlinkedMonoUsesMonoBus && monoSupported && opened != ChosenLayout::none)
+        return ChosenLayout::mono;
+    return opened;
+}
+
 // A callback that is an exact multiple of the prepared block can be sliced
 // with no extra delay. Anything else has to wait for a full block.
 inline bool pluginBlockFeedsDirect(int numSamples, int preparedBlock) noexcept

@@ -102,8 +102,9 @@ bool busesMatch(juce::AudioPluginInstance& instance, int inCh, int outCh)
 
 // Keep the layout the plugin opened with. A stereo effect that also accepts
 // mono stays stereo: both inputs get the same samples and the mono output is L.
+// kUnlinkedMonoUsesMonoBus asks an unlinked mono channel for 1/1 instead.
 // Fallback, when that layout cannot be set, is stereo, then mono, then 1-in/2-out.
-BusChoice configureBuses(juce::AudioPluginInstance& instance)
+BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
 {
     BusChoice choice;
     choice.openInputs = instance.getTotalNumInputChannels();
@@ -123,7 +124,7 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance)
     offer.mono = choice.supportMono;
     offer.side = choice.supportSide;
     offer.stereo = choice.supportStereo;
-    const ChosenLayout preferred = chooseOpenedLayout(offer);
+    const ChosenLayout preferred = layoutForChannel(chooseOpenedLayout(offer), unlinkedMono, choice.supportMono);
 
     auto apply = [&](ChosenLayout layout)
     {
@@ -1539,7 +1540,11 @@ void PluginRack::finishLoad(int channel,
     BusChoice buses;
     juce::String problem = error;
     if (instance != nullptr)
-        buses = configureBuses(*instance);
+    {
+        const int left = channel & ~1;
+        const bool unlinkedMono = ! stereoLink(left);
+        buses = configureBuses(*instance, unlinkedMono);
+    }
     if (instance != nullptr && ! buses.ok)
     {
         if (problem.isEmpty())
@@ -2332,6 +2337,7 @@ void PluginRack::setDirtyHandler(std::function<void()> handler)
 
 void PluginRack::publishUnlocked()
 {
+    graphPublishSerial_.fetch_add(1, std::memory_order_relaxed);
     auto graph = buildGraph();
     if (current_ != nullptr)
         retired_.push_back(std::move(current_));

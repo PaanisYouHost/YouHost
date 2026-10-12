@@ -48,4 +48,31 @@ inline int dropoutOverrunCount(int64_t processingNs, int64_t periodNs)
     return 1;
 }
 
+// Deadline for the group-edit stress test. Pass the realtime thread's own CPU
+// time, not the wall clock: a deschedule makes wall time late without the
+// callback doing more work. Continuous dropouts still fail, because the median
+// wall time of the whole window moves past the buffer period.
+inline int callbackCpuOverrun(int64_t cpuNs, int64_t periodNs) noexcept
+{
+    return dropoutOverrunCount(cpuNs, periodNs);
+}
+
+// 1.5x the quiet median, plus 20 us. A meter stuck near 270% of that quiet
+// reading is outside this limit. The slack covers a callback that was already
+// only a few microseconds.
+inline bool callbackCpuNearBaseline(int64_t baselineNs, int64_t afterNs) noexcept
+{
+    if (baselineNs < 0 || afterNs < 0)
+        return false;
+    const int64_t limit = baselineNs + baselineNs / 2 + 20000;
+    return afterNs <= limit;
+}
+
+// One late sample does not move the median. A callback that is late on every
+// buffer does.
+inline bool callbackMedianInsidePeriod(int64_t medianNs, int64_t periodNs) noexcept
+{
+    return periodNs > 0 && medianNs >= 0 && medianNs <= periodNs;
+}
+
 } // namespace youhost

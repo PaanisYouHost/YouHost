@@ -4302,31 +4302,27 @@ void testReleaseChecklist()
     std::array<VisualGroup, youhost::kMaxDisplayGroups> visual {};
     std::atomic<int> prepares { 0 };
     std::atomic<int> publishes { 0 };
-    std::atomic<int> overruns { 0 };
+    std::atomic<int> broken { 0 };
     std::atomic<int> callbacks { 0 };
-    std::atomic<std::int64_t> fastestNs { 1000000000 };
     std::atomic<bool> runCallback { true };
     std::thread callback([&]
     {
         while (runCallback.load(std::memory_order_acquire))
         {
-            const auto started = std::chrono::steady_clock::now();
             int loaded = 0;
             for (int channel = 0; channel < kChannels; ++channel)
                 loaded += plugins[static_cast<std::size_t>(channel)][0];
             if (loaded != kChannels || prepares.load(std::memory_order_relaxed) != 0
                 || publishes.load(std::memory_order_relaxed) != 0)
-                overruns.fetch_add(1, std::memory_order_relaxed);
-            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                     std::chrono::steady_clock::now() - started)
-                                     .count();
-            auto seen = fastestNs.load(std::memory_order_relaxed);
-            while (elapsed < seen && ! fastestNs.compare_exchange_weak(seen, elapsed, std::memory_order_relaxed))
-            {
-            }
+                broken.fetch_add(1, std::memory_order_relaxed);
             callbacks.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
         }
     });
+    const auto armed = std::chrono::steady_clock::now();
+    while (callbacks.load(std::memory_order_acquire) < 10
+           && std::chrono::steady_clock::now() - armed < std::chrono::seconds(2))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     for (int step = 0; step < 300; ++step)
     {
         const int group = step % youhost::kMaxDisplayGroups;
@@ -4344,16 +4340,27 @@ void testReleaseChecklist()
     runCallback.store(false, std::memory_order_release);
     callback.join();
     const auto checklistDoc = readWorkspaceFile("docs/release-checklist.md");
+    const auto workflow = readWorkspaceFile(".github/workflows/build-macos.yml");
+    const auto periodNs = youhost::expectedPeriodNs(48000.0, 32);
     item("Groups stay visual",
          groupEditsStayVisual
              && groupEdits.find("Removing a group leaves every plugin instance") != std::string::npos
-             && callbacks.load() > 0
-             && overruns.load() == 0
-             && fastestNs.load() < 20000000
+             && callbacks.load() >= 10
+             && broken.load() == 0
              && prepares.load() == 0
              && publishes.load() == 0
+             && periodNs == 666667
+             && youhost::callbackCpuOverrun(periodNs + 1, periodNs) == 1
+             && youhost::callbackCpuOverrun(periodNs, periodNs) == 0
+             && ! youhost::callbackCpuNearBaseline(100000, 270000)
+             && youhost::callbackCpuNearBaseline(100000, 170000)
+             && ! youhost::callbackCpuNearBaseline(100000, 170001)
+             && youhost::callbackMedianInsidePeriod(400000, periodNs)
+             && ! youhost::callbackMedianInsidePeriod(periodNs + 1, periodNs)
+             && workflow.find("YouHostGroupStressTest") != std::string::npos
              && checklistDoc.find("Groups are purely visual") != std::string::npos
-             && checklistDoc.find("prepareToPlay") != std::string::npos);
+             && checklistDoc.find("prepareToPlay") != std::string::npos
+             && checklistDoc.find("fastest pass") == std::string::npos);
 
     auto lockedTake = readyTake();
     lockedTake.lockArmed = true;
@@ -4692,7 +4699,17 @@ void testReleaseChecklist()
          youhost::pluginProcessCallsForPair(true, true) == 1
              && std::string(youhost::stereoFoldToken(youhost::StereoFold::left)) == "L"
              && youhost::stereoFoldFromInt(0) == youhost::StereoFold::left
-             && checklistDoc.find("Mono fold stays 2/2") != std::string::npos);
+             && youhost::layoutForChannel(youhost::ChosenLayout::stereo, false, true) == youhost::ChosenLayout::stereo
+             && youhost::layoutForChannel(youhost::ChosenLayout::stereo, true, true)
+                    == (youhost::kUnlinkedMonoUsesMonoBus ? youhost::ChosenLayout::mono : youhost::ChosenLayout::stereo)
+             && checklistDoc.find("Mono fold stays 2/2") != std::string::npos
+             && checklistDoc.find(youhost::kUnlinkedMonoUsesMonoBus ? "unlinked mono channels use 1/1"
+                                                                   : "Mono 1/1 is not switched on")
+                    != std::string::npos
+             && checklistDoc.find("YouHostMonoNullTest") != std::string::npos
+             && workflow.find("YouHostMonoNullTest") != std::string::npos
+             && readWorkspaceFile("src/engine/PluginRack.cpp").find("layoutForChannel") != std::string::npos
+             && readWorkspaceFile("src/engine/HostPath.h").find("kUnlinkedMonoUsesMonoBus") != std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);

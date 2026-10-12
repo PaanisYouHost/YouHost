@@ -73,6 +73,30 @@ jobs:
           fi
           "${TEST}"
 
+      - name: Group edit stress
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostGroupStressTest
+          TEST=build/YouHostGroupStressTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostGroupStressTest was not produced"
+            find build -name 'YouHostGroupStressTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Mono 1/1 null
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostMonoNullTest
+          TEST=build/YouHostMonoNullTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostMonoNullTest was not produced"
+            find build -name 'YouHostMonoNullTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: Ad-hoc sign
         run: |
           set -euo pipefail

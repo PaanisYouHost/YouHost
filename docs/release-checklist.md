@@ -8,11 +8,15 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src tests/engine_tests.cpp -o /tmp/Yo
 
 The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so the lock-reentry checks stay on, plus an Apple AUDelay silent-input load and an offline chain of AUDelay, AUDistortion, AUGraphicEQ, and AUBandpass at factory defaults. Silence must stay silent. An impulse must decay: the tail peak never grows, each 1 s window has less energy than the one before, and the signal is at or below -60 dBFS by 10 s. Parameters are not pulled to zero. The job fails if any of them fail.
 
+`YouHostGroupStressTest` runs the real audio callback on a realtime thread at 48 kHz and 32 samples with 16 Apple Audio Units loaded, while the message thread creates, edits, recolours, and removes groups for more than 30 s. A deadline miss is that thread's own CPU time past the buffer period. The median wall time of each window also has to sit inside the period, and the median after the edits has to come back to the quiet reading. `YouHostMonoNullTest` compares a 1/1 Apple AU with the Fold L 2/2 path.
+
 `testReleaseChecklist` is the report for this file. The other tests in that binary stay part of the same gate. A Mac build of the app still has to open every window below, once with no saved size and once with an old small saved size, and the text must be on screen. This test checks that open size instead of a screenshot: there is no display in the unit-test run.
 
 ## Groups are purely visual
 
 Groups store a name, a colour, which channels are members, and whether the strips are folded. Create, edit, recolour, and remove — including Remove group while those channels have plugins loaded — must not touch plugin instances, the live graph, compensation delay, or the audio thread. No lock the callback takes, no allocation, no `publish` / graph rebuild, no `prepareToPlay`.
+
+Remove group used to call compensation sync. That took the rack lock and published a new graph, rebuilding delay lines, feed rings, and scratch while the plugins were still loaded. The callback then ran long on every buffer, and the CPU meter stayed high until the process was restarted. Membership edits no longer publish.
 
 Only plugins, output gain, and stereo link may change audio processing.
 
@@ -73,7 +77,7 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Plugin list M/ST | Each plugin row shows M, ST, or M/ST from the scanned bus layouts. |
 | Message heartbeat | The 30 Hz timer beats the watchdog before the card-open branch. An open card no longer looks like a growing stall while the message thread is idle. |
 | New, Open, and Offline clear DSP | New, Open, and Offline zero every meter, clip latch, delay line, and per-slot scratch. A poisoned stereo scratch fed silence stays bit-zero, and a cleared meter sits at the -160 dB floor. Parameter and latency callbacks do not paint the whole window. |
-| Groups stay visual | Create, edit, recolour, and Remove group do not call compensation sync or rebuild the plugin graph. Channels that already have plugins keep those instances. A hammer of those edits beside a running callback leaves those instances in place, and the fastest pass stays inside 20 ms. Adding channels to an existing group, or removing them, is the same kind of edit: membership and colour only. |
+| Groups stay visual | Create, edit, recolour, and Remove group do not call compensation sync or rebuild the plugin graph. Channels that already have plugins keep those instances. A hammer of those edits beside a running callback leaves those instances in place. There is no wall-clock deadline in this binary. YouHostGroupStressTest on macOS runs the real audio callback at 48 kHz and 32 samples with 16 Apple AUs while groups are created, edited, recoloured, and removed for more than 30 s. Adding channels to an existing group, or removing them, is the same kind of edit: membership and colour only. |
 | Real CPU meter | The status line and the CPU window hero show the sum of each plugin's own block time, up to 999%. The Audio bar is the callback wall-clock. Each plugin's shown percent is an audio-thread average updated with a plain load and store. |
 | Dropout log | A dropout is written to youhost.log with the take position, buffer, dsp percent, and the full plugin count. Events inside 500 ms share one line. The audio thread only pushes a fixed ring. |
 | Playback through host | Record and live pass-through run the input to the recorder and, separately, through the host chain. Play feeds each take to that same chain instead of the live input. The handoff is a short crossfade on the dry input: it does not rebuild the graph, reset the delay lines, or replace the live input with silence while the play ring is still empty. Stop returns the live input through the host chain. The recorder copies the device input before the swap, so a take is never recorded over itself. |
@@ -85,7 +89,7 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Before a gig | Help opens with Before a gig / for best performance, in English and Finnish, before the shortcut list body. INSTALL.md has the same section before step 1 in both languages. |
 | Version label | The window title, Help, and About say YouHost Beta 0.9.0. A saved session stores that in savedWith. The Mac zip is YouHost-Beta-0.9.0-macOS.zip. |
 | Markers | The MARKER button sits at the right of the transport. M and that button drop a marker at the playhead and do not start, stop, or move the take, including while the record lock is on. 6 opens the marker list. Markers live in the session file only. |
-| Mono fold stays 2/2 | A stereo plugin on a linked pair stays one 2-in/2-out process. Fold L remains the mono fold. Mono 1/1 is not switched on in this build. |
+| Mono fold stays 2/2 | A stereo plugin on a linked pair stays one 2-in/2-out process. Fold L remains the mono fold. Mono 1/1 is not switched on in this build. YouHostMonoNullTest compares a 1/1 Apple AU with the current 2/2 Fold L path. The switch stays off unless that level difference is within 0.1 dB. |
 | WAV names | A new recording is channel_name_take.wav, for example 1_BD_1.wav, 1_BD_2.wav, and 2_Sn_1.wav. A channel with no name is channel_take.wav, for example 1_1.wav and 1_2.wav. The name is made safe for the filesystem. Files already stored in a session keep the names they have, including the older channel_take_name.wav layout, and those sessions still open. |
 
 ## Windows to photograph on a Mac release

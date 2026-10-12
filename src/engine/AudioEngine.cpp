@@ -1044,6 +1044,64 @@ void AudioEngine::publishConfig(juce::AudioIODevice& device)
     publishSessionChannelLimit();
 }
 
+void AudioEngine::prepareStandaloneCallback(double sampleRate, int bufferSamples, int channels)
+{
+    if (channels < 1)
+        channels = 1;
+    if (channels > kMaxChannels)
+        channels = kMaxChannels;
+    const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const int block = bufferSamples > 0 ? bufferSamples : 32;
+
+    std::array<bool, kMaxChannels> open {};
+    for (int channel = 0; channel < channels; ++channel)
+        open[static_cast<std::size_t>(channel)] = true;
+
+    AudioThreadConfig next;
+    next.routing = makeRouting(open, open);
+    next.meterTiming = meterTimingFor(rate);
+    next.expectedPeriodNs = expectedPeriodNs(rate, block);
+
+    const int current = configIndex_.load(std::memory_order_relaxed);
+    const int slot = 1 - current;
+    configs_[static_cast<std::size_t>(slot)] = std::move(next);
+    configIndex_.store(slot, std::memory_order_release);
+
+    sampleRate_.store(rate, std::memory_order_relaxed);
+    bufferSamples_.store(block, std::memory_order_relaxed);
+    sessionAudioLimit_.store(channels, std::memory_order_relaxed);
+    lastCallbackNs_.store(0, std::memory_order_relaxed);
+    skipNextGap_.store(true, std::memory_order_relaxed);
+    hostFade_.gain = 0;
+
+    if (rack_ != nullptr)
+    {
+        rack_->setActiveChannels(channels);
+        rack_->prepare(rate, block, configs_[static_cast<std::size_t>(configIndex_.load(std::memory_order_relaxed))].routing, {});
+    }
+    if (recorder_ != nullptr)
+        recorder_->setCallbacksLive(true);
+}
+
+void AudioEngine::processStandaloneCallback(const float* const* inputChannelData,
+                                            int numInputChannels,
+                                            float* const* outputChannelData,
+                                            int numOutputChannels,
+                                            int numSamples)
+{
+    audioDeviceIOCallbackWithContext(inputChannelData,
+                                     numInputChannels,
+                                     outputChannelData,
+                                     numOutputChannels,
+                                     numSamples,
+                                     {});
+}
+
+std::uint64_t AudioEngine::graphPublishSerial() const noexcept
+{
+    return rack_ != nullptr ? rack_->graphPublishSerial() : 0;
+}
+
 void AudioEngine::installOverloadListener(const juce::String& deviceName)
 {
     removeOverloadListener();
@@ -3387,6 +3445,8 @@ void AudioEngine::clearGroup(int group)
         channelGroup_[index] = -1;
     }
     // Removing a group leaves every plugin instance, delay line, and scratch buffer alone.
+    // Publishing here rebuilt that graph under the rack lock. The callback then
+    // missed every buffer and the CPU meter stayed high until the process restarted.
     groups_[static_cast<std::size_t>(group)] = {};
     bumpDisplay();
     closeOwnEdit(ownEdit);

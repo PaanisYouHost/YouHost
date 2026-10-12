@@ -139,4 +139,57 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework Cocoa")
     add_test(NAME YouHostAuChainTest COMMAND YouHostAuChainTest)
+
+    # Real AudioEngine callback, realtime thread, 48 kHz / 32 samples, 16 Apple
+    # AUs. The message thread creates, edits, recolours, and removes groups for
+    # more than 30 s. Deadline misses are the callback thread's own CPU time.
+    add_executable(YouHostGroupStressTest
+        tests/group_stress.cpp
+        src/engine/AudioEngine.cpp
+        src/engine/PluginCatalogue.cpp
+        src/engine/PluginRack.cpp
+        src/engine/Recorder.cpp
+        src/engine/SessionDisk.cpp
+        src/engine/SessionDocument.cpp)
+    target_include_directories(YouHostGroupStressTest PRIVATE src)
+    target_compile_features(YouHostGroupStressTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostGroupStressTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostGroupStressTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostGroupStressTest COMMAND YouHostGroupStressTest)
+
+    # 1/1 versus Fold L 2/2 on Apple AUs. The product flag has to match the level.
+    add_executable(YouHostMonoNullTest tests/mono_null.cpp)
+    target_include_directories(YouHostMonoNullTest PRIVATE src)
+    target_compile_features(YouHostMonoNullTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostMonoNullTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostMonoNullTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostMonoNullTest COMMAND YouHostMonoNullTest)
 endif()

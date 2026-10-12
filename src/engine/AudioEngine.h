@@ -266,6 +266,16 @@ public:
                                                     const std::vector<TakeMark>&)>& fn) const;
     juce::String dspLoadText() const;
 
+    // No CoreAudio device. The macOS stress test publishes a packed routing,
+    // prepares the rack, and runs the real device callback on its own thread.
+    void prepareStandaloneCallback(double sampleRate, int bufferSamples, int channels);
+    void processStandaloneCallback(const float* const* inputChannelData,
+                                   int numInputChannels,
+                                   float* const* outputChannelData,
+                                   int numOutputChannels,
+                                   int numSamples);
+    std::uint64_t graphPublishSerial() const noexcept;
+
 private:
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                           int numInputChannels,

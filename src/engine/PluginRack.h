@@ -105,6 +105,7 @@ public:
     DspLoad dspLoad() const;
     CpuMeters cpuMeters() const;
     int livePluginPercent() const noexcept { return livePluginPercent_.load(std::memory_order_relaxed); }
+    std::uint64_t graphPublishSerial() const noexcept { return graphPublishSerial_.load(std::memory_order_relaxed); }
     void setAlignMode(int perGroup);
     void setChannelGroups(const int* groups, int count);
     void copyLatencyInputs(ChannelLatencyInput* out, int count) const;
@@ -337,6 +338,7 @@ private:
     int triggerLoggedNotes_ = 0;
     std::atomic<bool> capturing_ { false };
     std::atomic<std::uint64_t> lastCallbackNs_ { 0 };
+    std::atomic<std::uint64_t> graphPublishSerial_ { 0 };
 
     std::unique_ptr<RealtimePool> pool_;
     juce::AudioWorkgroup workgroup_;
