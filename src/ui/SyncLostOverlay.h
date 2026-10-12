@@ -10,6 +10,44 @@
 namespace youhost
 {
 
+// juce::String(const char*) is ASCII and turns ä/ö into the wrong glyphs.
+inline juce::String syncLostUtf8(const char* text)
+{
+    return juce::String(juce::CharPointer_UTF8(text == nullptr ? "" : text));
+}
+
+// The default UI face on some Macs has no ä/ö. Pick a face that does.
+inline const juce::String& syncLostTypefaceName()
+{
+    static const juce::String chosen = []
+    {
+        const char* faces[] = {
+            "Helvetica Neue",
+            "Helvetica",
+            "Lucida Grande",
+            "Arial",
+            "DejaVu Sans",
+            "Noto Sans",
+            "Liberation Sans",
+            "Cantarell",
+        };
+        const auto installed = juce::Font::findAllTypefaceNames();
+        for (const char* face : faces)
+        {
+            const juce::String candidate(face);
+            if (installed.contains(candidate))
+                return candidate;
+        }
+        return juce::Font::getDefaultSansSerifFontName();
+    }();
+    return chosen;
+}
+
+inline juce::Font syncLostFont(float height)
+{
+    return juce::Font(juce::FontOptions(height).withName(syncLostTypefaceName()).withStyle("Bold"));
+}
+
 // Centered while the card is gone. A small bottom-left box after audio returns.
 // The box repaints itself only when its blink phase changes.
 class SyncLostOverlay : public juce::Component
@@ -68,16 +106,16 @@ public:
         if (center)
         {
             auto area = getLocalBounds().reduced(24, 16);
-            graphics.setFont(juce::Font(juce::FontOptions(72.0f).withStyle("Bold")));
-            graphics.drawFittedText(kSyncLostTitle, area.removeFromTop(area.getHeight() * 2 / 3), juce::Justification::centred, 2);
+            graphics.setFont(syncLostFont(72.0f));
+            graphics.drawFittedText(syncLostUtf8(kSyncLostTitle), area.removeFromTop(area.getHeight() * 2 / 3), juce::Justification::centred, 2);
             graphics.setColour(juce::Colour(0xffffc9c9));
-            graphics.setFont(juce::Font(juce::FontOptions(28.0f).withStyle("Bold")));
-            graphics.drawFittedText(kSyncLostFinnish, area, juce::Justification::centred, 2);
+            graphics.setFont(syncLostFont(28.0f));
+            graphics.drawFittedText(syncLostUtf8(kSyncLostFinnish), area, juce::Justification::centred, 2);
             return;
         }
 
-        graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
-        graphics.drawFittedText(kSyncLostTitle, getLocalBounds().reduced(8, 2), juce::Justification::centred, 1);
+        graphics.setFont(syncLostFont(15.0f));
+        graphics.drawFittedText(syncLostUtf8(kSyncLostTitle), getLocalBounds().reduced(8, 2), juce::Justification::centred, 1);
     }
 
     void mouseDown(const juce::MouseEvent&) override
@@ -129,7 +167,7 @@ public:
     {
         graphics.fillAll(juce::Colour(0xff14060a));
         graphics.setColour(juce::Colours::white);
-        graphics.setFont(juce::Font(juce::FontOptions(22.0f).withStyle("Bold")));
+        graphics.setFont(syncLostFont(22.0f));
         auto area = getLocalBounds().reduced(24, 18);
         area.removeFromBottom(48);
         graphics.drawFittedText(juce::String(message_), area, juce::Justification::centred, 4);

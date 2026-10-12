@@ -4049,6 +4049,23 @@ void testReleaseChecklist()
              && youhost::chooseStartupDevice("", "", virtualOnly).empty()
              && youhost::chooseStartupDevice("", "Pro Tools Audio Bridge 32", virtualOnly) == "Pro Tools Audio Bridge 32");
 
+    const auto missingSaved = youhost::decideStartupCard("Scarlet ja mac out", false);
+    const auto listedSaved = youhost::decideStartupCard("Scarlet ja mac out", true);
+    item("startup with a missing saved card stays Offline",
+         ! youhost::startupOpensSavedDevice()
+             && ! missingSaved.openSaved && missingSaved.offline && ! missingSaved.showSyncLost
+             && missingSaved.notice == "Saved card Scarlet ja mac out not found - Offline"
+             && ! listedSaved.openSaved && listedSaved.offline && ! listedSaved.showSyncLost
+             && listedSaved.notice.empty()
+             && ! youhost::syncLostMayShow(false, false)
+             && ! youhost::syncLostMayShow(false, true)
+             && ! youhost::syncLostMayShow(true, true)
+             && youhost::syncLostMayShow(true, false)
+             && youhost::choosingOfflineClearsSyncLost()
+             && engineSrc.find("initialise(inputs, kMaxChannels, saved.get(), true)") == std::string::npos
+             && engineSrc.find("awaitingSavedDevice_ = true") == std::string::npos
+             && engineSrc.find("syncLostMayShow") != std::string::npos);
+
     const auto sampleCpu = mainUi.find("engine_.sampleLiveCpu();");
     const auto lockedSkip = mainUi.find("if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))");
     const auto pollAfterSkip = lockedSkip == std::string::npos ? std::string::npos : mainUi.find("engine_.pollDeviceStats();", lockedSkip);
@@ -4586,7 +4603,12 @@ void testReleaseChecklist()
              && youhost::syncLostBlink(0)
              && ! youhost::syncLostBlink(400)
              && std::string(youhost::kSyncLostFinnish) == "Äänikortti kadonnut"
+             && static_cast<unsigned char>(youhost::kSyncLostFinnish[0]) == 0xC3
+             && static_cast<unsigned char>(youhost::kSyncLostFinnish[1]) == 0x84
              && syncHeader.find("Äänikortti kadonnut") != std::string::npos
+             && overlayUi.find("CharPointer_UTF8") != std::string::npos
+             && overlayUi.find("syncLostUtf8(kSyncLostFinnish)") != std::string::npos
+             && overlayUi.find("DejaVu Sans") != std::string::npos
              && overlayUi.find("setOpaque(true)") != std::string::npos
              && overlayUi.find("place_ != SyncLostChrome::corner") != std::string::npos
              && overlayUi.find("return false") != std::string::npos
@@ -4606,6 +4628,10 @@ void testReleaseChecklist()
              && choseOther.find("deviceReturned") == std::string::npos
              && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
              && checklistDoc.find("SYNC LOST") != std::string::npos
+             && checklistDoc.find("does not appear at startup") != std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("openNamedDevice") == std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("decideStartupCard") != std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::setOfflineTemplate", "void AudioEngine::setPreferredSampleRate").find("clearSyncLost") != std::string::npos
              && checklistDoc.find("not from a timer scan") != std::string::npos
              && checklistDoc.find("bottom-left") != std::string::npos
              && checklistDoc.find("repaints only that box") != std::string::npos);
@@ -4674,8 +4700,8 @@ void testReleaseChecklist()
              && readWorkspaceFile("INSTALL.md").find("Ennen keikkaa / paras suorituskyky") != std::string::npos
              && checklistDoc.find("Before a gig") != std::string::npos);
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.0"
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.0") != std::string::npos
+         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.1"
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.1") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-${VERSION}-macOS.zip") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos);

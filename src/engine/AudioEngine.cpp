@@ -334,18 +334,18 @@ void AudioEngine::start(bool allowInput)
     rememberSavedSetup(saved.get());
 
     const int inputs = allowInput ? kMaxChannels : 0;
-    openError_ = deviceManager_.initialise(inputs, kMaxChannels, saved.get(), true);
-
-    if (allowInput && wantedName_.isNotEmpty())
+    // A saved card is not opened here. Passing the settings XML made JUCE open
+    // it, and a missing aggregate then looked like a card that had been running.
+    juce::XmlElement holdClosed("DEVICESETUP");
+    holdClosed.setAttribute("audioInputDeviceName", "YouHost startup holds the card closed");
+    holdClosed.setAttribute("audioOutputDeviceName", "YouHost startup holds the card closed");
+    deviceManager_.initialise(inputs, kMaxChannels, allowInput ? &holdClosed : nullptr, false);
+    if (auto* opened = deviceManager_.getCurrentAudioDevice())
     {
-        auto* device = deviceManager_.getCurrentAudioDevice();
-        const auto opened = device != nullptr ? device->getName() : juce::String();
-        if (opened != wantedName_)
-        {
-            awaitingSavedDevice_ = true;
-            startupFallbackName_ = opened;
-            startupDeviceNote_ = "Saved device \"" + wantedName_ + "\" is not available. YouHost will open it when it appears.";
-        }
+        juce::ignoreUnused(opened);
+        closingDevice_.store(true, std::memory_order_release);
+        deviceManager_.closeAudioDevice();
+        closingDevice_.store(false, std::memory_order_release);
     }
 
     deviceManager_.addChangeListener(this);
@@ -471,6 +471,11 @@ void AudioEngine::setOfflineTemplate(bool offline)
 {
     if (! recordActionAllowed(RecordDisrupt::offlineSwitch, isRecording(), recordLockArmed_))
         return;
+    if (offline)
+    {
+        hostWasRunning_.store(false, std::memory_order_release);
+        clearSyncLost();
+    }
     if (offlineTemplate_ == offline && ! missingCard_)
         return;
     missingCard_ = false;
@@ -980,6 +985,8 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
     hostFade_.gain = 0;
     deviceStarting_.store(true, std::memory_order_release);
     deviceDown_.store(false, std::memory_order_release);
+    if (! closingDevice_.load(std::memory_order_acquire) && ! offlineTemplate_)
+        hostWasRunning_.store(true, std::memory_order_release);
     if (recorder_ != nullptr)
         recorder_->setCallbacksLive(true);
 }
@@ -1202,6 +1209,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 {
     if (forcingChannels_)
         return;
+    if (! offlineTemplate_ && device.isOpen())
+        hostWasRunning_.store(true, std::memory_order_release);
 
     // A short saved mask is reopened once here. Later polls skip this unless the open mask changes.
     const bool unseen = lastFullOpenInputs_ < 0 || device.getName() != lastFullOpenName_;
@@ -1317,8 +1326,36 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     }
 }
 
+void AudioEngine::clearSyncLost() noexcept
+{
+    syncLost_.dismiss();
+    deviceLostBanner_ = false;
+    lossFinalized_ = false;
+    awaitingSavedDevice_ = false;
+    downSinceMs_ = 0;
+    resumeRecordingOnReturn_ = false;
+    deviceDown_.store(false, std::memory_order_release);
+}
+
+void AudioEngine::parkOfflineAfterFailedOpen(const juce::String& name)
+{
+    hostWasRunning_.store(false, std::memory_order_release);
+    const auto notice = "Saved card " + name + " not found - Offline";
+    setOfflineTemplate(true);
+    missingCard_ = true;
+    missingCardStatus_ = notice;
+    sessionMessage_ = notice;
+    startupDeviceNote_ = notice;
+    wantedName_ = name;
+    publishSessionChannelLimit();
+}
+
 void AudioEngine::noteSyncLost()
 {
+    if (openingChosenDevice_)
+        return;
+    if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
+        return;
     const auto now = juce::Time::getCurrentTime();
     syncLost_.deviceLost(now.getHours(), now.getMinutes(), now.getSeconds());
     deviceLostBanner_ = true;
@@ -1332,8 +1369,14 @@ void AudioEngine::handleDeviceDown()
     callbackCpuPercent_.store(0, std::memory_order_relaxed);
     deviceName_ = "No device";
     publishSessionChannelLimit();
-    if (closingDevice_.load(std::memory_order_acquire) || ! started_)
+    if (closingDevice_.load(std::memory_order_acquire) || ! started_ || openingChosenDevice_)
         return;
+
+    if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
+    {
+        deviceDown_.store(false, std::memory_order_release);
+        return;
+    }
 
     if (! deviceDown_.load(std::memory_order_acquire) && ! awaitingSavedDevice_)
         return;
@@ -2417,9 +2460,18 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     startupDeviceNote_.clear();
     setupLocked_ = false;
     inventoryForce_ = true;
+    openingChosenDevice_ = true;
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
-    if (error.isNotEmpty())
-        openError_ = error;
+    openingChosenDevice_ = false;
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    const bool opened = live != nullptr && live->isOpen();
+    if (! opened)
+    {
+        if (error.isNotEmpty())
+            openError_ = error;
+        parkOfflineAfterFailedOpen(name);
+        return;
+    }
     deviceInventoryMs_ = 0;
 }
 
@@ -2432,27 +2484,24 @@ void AudioEngine::noteUserChoseDevice(const juce::String& name)
 
 void AudioEngine::reconcileStartupDevice()
 {
-    const auto present = connectedDevices();
-    const auto choice = chooseStartupDevice(wantedName_.toStdString(),
-                                            settings_.loadUserChosenDevice().toStdString(),
-                                            present);
-    auto* device = deviceManager_.getCurrentAudioDevice();
-    const auto opened = device != nullptr ? device->getName().toStdString() : std::string();
-    if (choice.empty())
+    const auto saved = wantedName_;
+    wantedName_.clear();
+    hostWasRunning_.store(false, std::memory_order_release);
+    clearSyncLost();
+    offlineTemplate_ = true;
+    deviceOpen_.store(false, std::memory_order_relaxed);
+    deviceName_ = juce::String(kOfflineDeviceName);
+    publishSessionChannelLimit();
+    if (saved.isEmpty() || startupOpensSavedDevice())
+        return;
+    inventoryForce_ = true;
+    const auto decision = decideStartupCard(saved.toStdString(), deviceNameListed(saved));
+    if (! decision.notice.empty())
     {
-        if (audioCardKind(opened) == AudioCardKind::virtualDevice)
-        {
-            closingDevice_.store(true, std::memory_order_release);
-            deviceManager_.closeAudioDevice();
-            closingDevice_.store(false, std::memory_order_release);
-            appendHostLog(settings_, "startup left virtual device \"" + juce::String(opened) + "\" closed");
-        }
-        return;
+        startupDeviceNote_ = juce::String::fromUTF8(decision.notice.c_str());
+        sessionMessage_ = startupDeviceNote_;
+        appendHostLog(settings_, startupDeviceNote_);
     }
-    if (opened == choice)
-        return;
-    appendHostLog(settings_, "startup device \"" + juce::String(choice) + "\"");
-    openNamedDevice(juce::String(choice));
 }
 
 void AudioEngine::transportLocate(std::int64_t sample)

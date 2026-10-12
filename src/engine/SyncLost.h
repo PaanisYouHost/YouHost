@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace youhost
 {
@@ -9,6 +10,50 @@ namespace youhost
 inline constexpr const char* kSyncLostTitle = "SYNC LOST";
 inline constexpr const char* kSyncLostFinnish = "Äänikortti kadonnut";
 inline constexpr const char* kSyncRestoredFinnish = "Ääni palautettu";
+
+// Settings may remember a card. Startup does not open it. The user picks one,
+// or a session file names one.
+inline bool startupOpensSavedDevice() noexcept
+{
+    return false;
+}
+
+// SYNC LOST is a card that was already running in this session and then
+// disappeared. A saved card that never opened, startup, and Offline do not.
+inline bool syncLostMayShow(bool deviceWasRunning, bool offline) noexcept
+{
+    return deviceWasRunning && ! offline;
+}
+
+inline bool choosingOfflineClearsSyncLost() noexcept
+{
+    return true;
+}
+
+struct StartupCardDecision
+{
+    bool openSaved = false;
+    bool offline = true;
+    bool showSyncLost = false;
+    std::string notice;
+};
+
+// A missing saved card stays Offline with the same notice as a session whose
+// card is gone. The overlay stays down.
+inline StartupCardDecision decideStartupCard(std::string_view savedName, bool savedListed) noexcept
+{
+    StartupCardDecision decision;
+    decision.openSaved = startupOpensSavedDevice();
+    decision.offline = ! decision.openSaved;
+    decision.showSyncLost = false;
+    if (! savedName.empty() && ! savedListed)
+    {
+        decision.notice = "Saved card ";
+        decision.notice.append(savedName.begin(), savedName.end());
+        decision.notice += " not found - Offline";
+    }
+    return decision;
+}
 
 // The notice and the reopen are separate. While the card is gone a large
 // window stays centered. After audio returns it shrinks to a bottom-left

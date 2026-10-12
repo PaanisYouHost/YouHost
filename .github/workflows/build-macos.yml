@@ -49,6 +49,18 @@ jobs:
           fi
           "${TEST}"
 
+      - name: SYNC LOST glyphs
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostSyncLostGlyphs
+          TEST=build/YouHostSyncLostGlyphs
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostSyncLostGlyphs was not produced"
+            find build -name 'YouHostSyncLostGlyphs*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: AUDelay silent input
         run: |
           set -euo pipefail

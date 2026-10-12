@@ -321,6 +321,8 @@ private:
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void noteSyncLost();
+    void clearSyncLost() noexcept;
+    void parkOfflineAfterFailedOpen(const juce::String& name);
     void handleDeviceDown();
     void noteHardwareDeviceList();
     void tryReopenWanted();
@@ -439,6 +441,8 @@ private:
     std::atomic<bool> closingDevice_ { false };
     bool deviceLostBanner_ = false;
     SyncLostState syncLost_ {};
+    std::atomic<bool> hostWasRunning_ { false };
+    bool openingChosenDevice_ = false;
     std::int64_t lastDropoutLogNs_ = 0;
     int dropoutCoalesceCount_ = 0;
     int dropoutCoalesceBuffer_ = 0;

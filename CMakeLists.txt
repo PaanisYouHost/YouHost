@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 0.9.0
+    VERSION 0.9.1
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -92,6 +92,19 @@ target_compile_options(YouHostTests PRIVATE -UNDEBUG)
 
 enable_testing()
 add_test(NAME YouHostTests COMMAND YouHostTests)
+
+# Paints SYNC LOST and fails if the Finnish line has no Ä/ä/ö glyph.
+add_executable(YouHostSyncLostGlyphs tests/sync_lost_glyphs.cpp)
+target_include_directories(YouHostSyncLostGlyphs PRIVATE src)
+target_compile_features(YouHostSyncLostGlyphs PRIVATE cxx_std_20)
+target_compile_definitions(YouHostSyncLostGlyphs PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(YouHostSyncLostGlyphs PRIVATE
+    juce::juce_gui_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+add_test(NAME YouHostSyncLostGlyphs COMMAND YouHostSyncLostGlyphs)
 
 # Loads Apple AUDelay on macOS, feeds silence into both inputs, and fails if the
 # output is non-finite or nowhere near silence. The GitHub macOS job runs it.
