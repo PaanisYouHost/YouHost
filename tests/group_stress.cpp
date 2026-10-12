@@ -13,7 +13,7 @@
 // that is late on every buffer moves the median past the period, and a meter
 // that stays near 270% of the quiet reading fails callbackCpuNearBaseline.
 
-#include "engine/AppSettings.h"
+#include "AppSettings.h"
 #include "engine/AudioEngine.h"
 #include "engine/DropoutDetect.h"
 
