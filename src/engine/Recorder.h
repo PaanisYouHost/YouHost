@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CheckedMutex.h"
+#include "PlaybackRoute.h"
 #include "SessionDocument.h"
 #include "TakePlan.h"
 
@@ -78,8 +79,11 @@ public:
                        int packedCount,
                        int numSamples,
                        int activeChannels) noexcept;
-    bool processPlayback(float* const* dest, int numSamples) noexcept;
+    // keepReading lets Stop finish the crossfade from samples still in the ring.
+    PlaybackPull processPlayback(float* const* dest, int numSamples, bool keepReading = false) noexcept;
     void noteCallback() noexcept;
+    void setPlaybackRingHeld(bool held) noexcept { playbackRingHeld_.store(held, std::memory_order_release); }
+    bool playbackRingHeld() const noexcept { return playbackRingHeld_.load(std::memory_order_acquire); }
 
     bool isRecording() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::recording); }
     bool isPlaying() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::playing); }
@@ -209,6 +213,8 @@ private:
     std::atomic<std::int64_t> readerCursor_ { 0 };
     std::atomic<int> overflows_ { 0 };
     std::atomic<std::uint64_t> callbackCount_ { 0 };
+    // The audio thread sets this while Play is up or the crossfade still owns the rings.
+    std::atomic<int> playbackRingHeld_ { 0 };
     std::atomic<double> deviceRate_ { 0.0 };
     std::atomic<double> timelineRate_ { 0.0 };
 

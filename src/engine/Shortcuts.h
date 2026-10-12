@@ -522,7 +522,7 @@ inline constexpr const char* kShortcutNotes =
     "A take that is still recording has to be stopped before the session can close.\n"
     "Record arms the take and the button blinks red. While REC is armed and not recording, the transport shows REC ARMED - press PLAY (or Cmd+Space). "
     "Play or Space starts the take. Cmd+Space records immediately. "
-    "Play while not armed is the virtual soundcheck. The take replaces the live input on each channel and runs through the same plugins, stereo link, delay compensation, and output gain. Stop returns those outputs to the live input. The recorder still writes only the raw device input, never the playback. "
+    "Play while not armed is the virtual soundcheck. Record and live pass-through keep the recorder and the host chain independent: the input is recorded, and that same input runs through the plugins, stereo link, delay compensation, and output gain. Play feeds the recorded tracks to that host chain instead of the live input. Stop returns the live input through the same chain. The handoff is a short crossfade, so the switch does not click or drop the output, and it does not rebuild the plugin graph. The recorder still writes only the raw device input, never the playback. "
     "If recording does not start, YouHost writes the reason to youhost.log and shows an alert. "
     "The reasons include no session, the disk, the device not running, and no REC channel with an input.\n"
     "Cmd+Space reaches YouHost only when Spotlight is not using that shortcut.\n"

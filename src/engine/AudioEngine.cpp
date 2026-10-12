@@ -833,10 +833,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
     noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap));
 
-    // Record tap is a lock-free copy of the raw input. Playback, when active,
-    // replaces that input before meters and plugins. Neither path takes a lock.
-    // The tap scans every channel. sessionAudioLimit_ is only the plugin CPU
-    // limit: using it as the scan length made Play open no files.
+    // Record and the host chain are independent while live or recording:
+    // the tap copies the device input, and the same input feeds the chain.
+    // Play swaps the dry input to the take. Stop eases that dry input back.
+    // Neither path takes a lock or rebuilds the graph. The tap scans every
+    // channel. sessionAudioLimit_ is only the plugin CPU limit: using it as
+    // the scan length made Play open no files.
     const int sessionChannels = sessionAudioLimit_.load(std::memory_order_relaxed);
     if (inputChannelData != nullptr && numSamples > 0)
         for (int index = 0; index < numInputChannels; ++index)
@@ -853,10 +855,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
     const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
 
-    const bool playing = recorder_ != nullptr && numSamples > 0 && numSamples <= playbackMax_
-                         && recorder_->processPlayback(playbackPtrs_.data(), numSamples);
-    if (playing)
+    const int fadeBefore = hostFade_.gain;
+    PlaybackPull pull;
+    if (recorder_ != nullptr && numSamples > 0 && numSamples <= playbackMax_)
+        pull = recorder_->processPlayback(playbackPtrs_.data(), numSamples, fadeBefore > 0);
+
+    const bool wantTake = hostWantsTake(pull.transportPlaying,
+                                        pull.samples,
+                                        numSamples,
+                                        pull.held,
+                                        fadeBefore,
+                                        pull.ended);
+    const HostFadeStep handoff = stepHostFade(hostFade_, wantTake, numSamples);
+    if (! handoff.steadyLive())
     {
+        if (! handoff.steadyTake())
+            blendHostChannels(playbackPtrs_.data(),
+                              inputChannelData,
+                              numInputChannels,
+                              config.routing.inputPacked.data(),
+                              sessionChannels,
+                              numSamples,
+                              handoff.gain0,
+                              handoff.gain1);
         AudioThreadConfig playConfig = config;
         for (int channel = 0; channel < kMaxChannels; ++channel)
             playConfig.routing.inputPacked[static_cast<std::size_t>(channel)] = channel;
@@ -926,7 +947,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     }
 
     if (recorder_ != nullptr)
+    {
+        recorder_->setPlaybackRingHeld(recorder_->isPlaying() || hostFade_.gain > 0);
         recorder_->noteCallback();
+    }
 
     const auto finishedNs = steadyNowNs();
     StallClock::get().audioNs.store(finishedNs, std::memory_order_relaxed);
@@ -947,6 +971,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
     // CoreAudio listener run on the message thread in pollDeviceStats.
     lastCallbackNs_.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
+    hostFade_.gain = 0;
     deviceStarting_.store(true, std::memory_order_release);
     deviceDown_.store(false, std::memory_order_release);
     if (recorder_ != nullptr)
@@ -960,6 +985,9 @@ void AudioEngine::audioDeviceStopped()
     deviceOpen_.store(false, std::memory_order_relaxed);
     StallClock::get().audioLive.store(0, std::memory_order_relaxed);
     skipNextGap_.store(true, std::memory_order_relaxed);
+    hostFade_.gain = 0;
+    if (recorder_ != nullptr)
+        recorder_->setPlaybackRingHeld(false);
     if (recorder_ != nullptr)
         recorder_->setCallbacksLive(false);
     if (rack_ != nullptr)

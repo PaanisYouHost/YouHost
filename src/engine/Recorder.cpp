@@ -299,12 +299,16 @@ void Recorder::processRecord(const float* const* inputs,
     position_.store(takeStart_.load(std::memory_order_relaxed) + clock, std::memory_order_relaxed);
 }
 
-bool Recorder::processPlayback(float* const* dest, int numSamples) noexcept
+PlaybackPull Recorder::processPlayback(float* const* dest, int numSamples, bool keepReading) noexcept
 {
+    PlaybackPull pull;
     if (dest == nullptr || numSamples <= 0)
-        return false;
-    if (mode_.load(std::memory_order_acquire) != static_cast<int>(TransportMode::playing))
-        return false;
+        return pull;
+
+    const bool playing = mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::playing);
+    pull.transportPlaying = playing;
+    if (! playing && ! keepReading)
+        return pull;
 
     if (hold_.load(std::memory_order_acquire))
     {
@@ -312,7 +316,8 @@ bool Recorder::processPlayback(float* const* dest, int numSamples) noexcept
         for (int channel = 0; channel < kMaxChannels; ++channel)
             if (dest[channel] != nullptr)
                 zeroRange(dest[channel], numSamples);
-        return true;
+        pull.held = true;
+        return pull;
     }
 
     audioHolding_.store(false, std::memory_order_release);
@@ -339,15 +344,19 @@ bool Recorder::processPlayback(float* const* dest, int numSamples) noexcept
             zeroRange(dest[channel] + pulled, numSamples - pulled);
     }
 
-    if (pulled > 0)
+    // The fade-out after Stop consumes the ring so the ramp has real samples.
+    // The playhead stays where Stop landed.
+    if (playing && pulled > 0)
         position_.fetch_add(pulled, std::memory_order_relaxed);
 
     const auto position = position_.load(std::memory_order_relaxed);
     const auto end = contentEnd_.load(std::memory_order_relaxed);
-    if (position >= end && ready == 0)
+    pull.samples = pulled;
+    pull.ended = end <= 0 || position >= end;
+    if (playing && position >= end && ready == 0)
         naturalEnd_.store(true, std::memory_order_release);
 
-    return true;
+    return pull;
 }
 
 void Recorder::noteCallback() noexcept
@@ -720,6 +729,18 @@ void Recorder::stop()
     }
     else
     {
+        // The audio thread owns the rings until the crossfade back to live
+        // has finished. Clearing them early would turn that ramp into silence.
+        if (callbacksLive_.load(std::memory_order_acquire))
+        {
+            for (int attempt = 0; attempt < 50; ++attempt)
+            {
+                if (playbackRingHeld_.load(std::memory_order_acquire) == 0)
+                    break;
+                juce::Thread::sleep(2);
+            }
+        }
+        playbackRingHeld_.store(0, std::memory_order_release);
         holdStreams();
         readers_.clear();
         for (auto& ring : playRings_)
@@ -793,10 +814,25 @@ void Recorder::play()
     for (auto& ring : playRings_)
         ring.clear();
 
+    // Fill the ring on this thread before the audio thread can see Play.
+    // The disk thread only reads once mode is playing, so this does not race it.
+    // An empty ring would otherwise become a block of silence on the outputs.
+    // 4096 covers the live buffer. A larger buffer stays on the live input
+    // until a full block is ready, then fades. It does not play a hole.
+    int primed = 0;
+    while (primed < 8 && fillOnce())
+    {
+        ++primed;
+        const auto* fifo = playRings_[0].fifo.get();
+        if (fifo == nullptr || fifo->getNumReady() >= 4096)
+            break;
+    }
+
     {
         const std::lock_guard<CheckedMutex> lock(stateLock_);
         status_ = "Playback - virtual soundcheck.";
     }
+    playbackRingHeld_.store(1, std::memory_order_release);
     mode_.store(static_cast<int>(TransportMode::playing), std::memory_order_release);
     notify();
 }

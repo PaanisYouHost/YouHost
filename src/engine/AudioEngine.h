@@ -348,6 +348,8 @@ private:
     std::vector<float> playbackScratch_;
     std::array<float*, kMaxChannels> playbackPtrs_ {};
     int playbackMax_ = 0;
+    // Audio thread only, apart from device start/stop, which JUCE keeps off the callback.
+    HostFade hostFade_ {};
     bool sessionPeak_ = false;
     int sessionReferenceDb_ = kDefaultRmsReferenceDb;
     int wavBitDepth_ = kDefaultWavBitDepth;

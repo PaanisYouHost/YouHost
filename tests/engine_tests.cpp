@@ -1384,6 +1384,75 @@ void testPlaybackCopiesDryChannels()
     CHECK(out2[1] == 0.0f);
 }
 
+void testHostSwitchIsClickFree()
+{
+    const float liveLevel = 0.5f;
+    const float takeLevel = -0.5f;
+    float live[256];
+    float take[256];
+    std::fill(live, live + 256, liveLevel);
+    std::fill(take, take + 256, takeLevel);
+
+    youhost::HostFade fade;
+    CHECK(! youhost::hostWantsTake(true, 0, 256, false, fade.gain, false));
+    auto waiting = youhost::stepHostFade(fade, false, 256);
+    CHECK(waiting.steadyLive());
+    CHECK(fade.gain == 0);
+
+    CHECK(youhost::hostWantsTake(true, 256, 256, false, fade.gain, false));
+    auto up = youhost::stepHostFade(fade, true, 256);
+    CHECK(up.gain0 == 0);
+    CHECK(up.gain1 == youhost::kHostSwitchFade);
+    float dest[256];
+    youhost::mixHostBlock(dest, live, take, 256, up.gain0, up.gain1);
+    CHECK(dest[0] == liveLevel);
+    CHECK(dest[youhost::kHostSwitchFade] == takeLevel);
+    float maxJump = 0.0f;
+    for (int index = 1; index < 256; ++index)
+        maxJump = std::max(maxJump, std::fabs(dest[index] - dest[index - 1]));
+    const float oneStep = std::fabs(takeLevel - liveLevel) / static_cast<float>(youhost::kHostSwitchFade);
+    CHECK(maxJump <= oneStep + 1.0e-5f);
+
+    float previous = dest[255];
+    auto down = youhost::stepHostFade(fade, false, 256);
+    CHECK(down.gain0 == youhost::kHostSwitchFade);
+    CHECK(down.gain1 == 0);
+    youhost::mixHostBlock(dest, live, take, 256, down.gain0, down.gain1);
+    CHECK(dest[0] == previous);
+    CHECK(dest[youhost::kHostSwitchFade] == liveLevel);
+    CHECK(fade.gain == 0);
+    maxJump = 0.0f;
+    for (int index = 1; index < 256; ++index)
+        maxJump = std::max(maxJump, std::fabs(dest[index] - dest[index - 1]));
+    CHECK(maxJump <= oneStep + 1.0e-5f);
+
+    // A 32-sample buffer has to cross the same ramp without a step between blocks.
+    youhost::HostFade small;
+    previous = liveLevel;
+    bool wantTake = true;
+    for (int block = 0; block < 10; ++block)
+    {
+        if (block == 6)
+            wantTake = false;
+        const bool open = wantTake && youhost::hostWantsTake(true, 32, 32, false, small.gain, false);
+        auto step = youhost::stepHostFade(small, open, 32);
+        float blockDest[32];
+        youhost::mixHostBlock(blockDest, live, take, 32, step.gain0, step.gain1);
+        CHECK(std::fabs(blockDest[0] - previous) <= oneStep + 1.0e-5f);
+        for (int index = 1; index < 32; ++index)
+            CHECK(std::fabs(blockDest[index] - blockDest[index - 1]) <= oneStep + 1.0e-5f);
+        previous = blockDest[31];
+    }
+    CHECK(small.gain == 0);
+    auto settled = youhost::stepHostFade(small, false, 32);
+    CHECK(settled.steadyLive());
+    float tail[32];
+    youhost::mixHostBlock(tail, live, take, 32, settled.gain0, settled.gain1);
+    CHECK(std::fabs(tail[0] - previous) <= oneStep + 1.0e-5f);
+    CHECK(tail[0] == liveLevel);
+    CHECK(tail[31] == liveLevel);
+}
+
 void testDryChannelDelayMatchesPluginChannel()
 {
     youhost::ChannelLatencyInput channels[2] {};
@@ -4442,8 +4511,32 @@ void testReleaseChecklist()
              && pluginsAt < gainAt && playCopyAt < liveCopyAt
              && callbackSlice.find("processRecord(playbackPtrs_") == std::string::npos
              && callbackSlice.find("delayInPlace") == std::string::npos
+             && callbackSlice.find("hostWantsTake") != std::string::npos
+             && callbackSlice.find("blendHostChannels") != std::string::npos
+             && callbackSlice.find("prepareToPlay") == std::string::npos
+             && callbackSlice.find("publishUnlocked") == std::string::npos
+             && callbackSlice.find("buildGraph") == std::string::npos
              && readWorkspaceFile("src/engine/PluginRack.cpp").find("delayInPlace") != std::string::npos
-             && checklistDoc.find("The recorder copies the device input before the swap") != std::string::npos);
+             && checklistDoc.find("The recorder copies the device input before the swap") != std::string::npos
+             && checklistDoc.find("short crossfade") != std::string::npos);
+    const auto playBody = sliceBetween(recorderSrc, "void Recorder::play()", "void Recorder::locate(");
+    const auto stopBody = sliceBetween(recorderSrc, "void Recorder::stop()", "void Recorder::play()");
+    const auto primeAt = playBody.find("fillOnce()");
+    const auto playingStore = playBody.find("TransportMode::playing");
+    item("Click-free playback handoff",
+         youhost::kHostSwitchFade == 128
+             && ! youhost::hostWantsTake(true, 0, 512, false, 0, false)
+             && youhost::hostWantsTake(true, 512, 512, false, 0, false)
+             && youhost::hostWantsTake(true, 0, 512, false, youhost::kHostSwitchFade, false)
+             && ! youhost::hostWantsTake(false, 512, 512, false, youhost::kHostSwitchFade, false)
+             && youhost::hostWantsTake(true, 10, 512, false, 0, true)
+             && ! youhost::hostWantsTake(true, 0, 512, false, 0, true)
+             && primeAt != std::string::npos && playingStore != std::string::npos && primeAt < playingStore
+             && playBody.find("prepareToPlay") == std::string::npos
+             && playBody.find("publishUnlocked") == std::string::npos
+             && stopBody.find("playbackRingHeld_") != std::string::npos
+             && stopBody.find("prepareToPlay") == std::string::npos
+             && help.find("short crossfade") != std::string::npos);
     item("SYNC LOST",
          alarmOn && alarmHidden && alarmClear
              && youhost::syncLostBlink(0)
@@ -4961,6 +5054,7 @@ int main()
     testDropoutDecisions();
     testLatencyCompensation();
     testPlaybackCopiesDryChannels();
+    testHostSwitchIsClickFree();
     testDryChannelDelayMatchesPluginChannel();
     testScanOrderSkipsWavesAndHidesBuiltIns();
     testTakeImportGroups();
