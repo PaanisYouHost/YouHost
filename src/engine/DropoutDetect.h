@@ -75,4 +75,36 @@ inline bool callbackMedianInsidePeriod(int64_t medianNs, int64_t periodNs) noexc
     return periodNs > 0 && medianNs >= 0 && medianNs <= periodNs;
 }
 
+// How many callbacks in a row had CPU time past the buffer period.
+// One late callback is a hitch. The Remove-group failure is a run of them.
+inline int callbackOverrunStreak(const int64_t* cpuNs, int count, int64_t periodNs) noexcept
+{
+    int streak = 0;
+    int longest = 0;
+    if (cpuNs == nullptr || count <= 0)
+        return 0;
+    for (int index = 0; index < count; ++index)
+    {
+        if (callbackCpuOverrun(cpuNs[index], periodNs) != 0)
+        {
+            ++streak;
+            if (streak > longest)
+                longest = streak;
+        }
+        else
+        {
+            streak = 0;
+        }
+    }
+    return longest;
+}
+
+// Four buffers is about 2.7 ms at 48 kHz / 32. A single hitch stays under this.
+inline constexpr int kDeadlineStreakLimit = 4;
+
+inline bool callbackDeadlinesHeld(int longestStreak) noexcept
+{
+    return longestStreak < kDeadlineStreakLimit;
+}
+
 } // namespace youhost

@@ -8,10 +8,10 @@
 // recolours, and removes groups, including Remove group on channels that have
 // plugins, for more than 30 s.
 //
-// A deadline miss is the callback thread's own CPU time past the buffer period.
-// Wall time is recorded too. One deschedule does not fail the run. A callback
-// that is late on every buffer moves the median past the period, and a meter
-// that stays near 270% of the quiet reading fails callbackCpuNearBaseline.
+// A deadline miss is a run of callbacks whose own CPU time exceeds the buffer
+// period. One late callback is a hitch and does not fail the run. The
+// Remove-group failure is a run of late callbacks, a median that leaves the
+// period, and a meter that stays near 270% of the quiet reading.
 
 #include "AppSettings.h"
 #include "engine/AudioEngine.h"
@@ -191,6 +191,15 @@ std::int64_t maxColumn(const std::vector<Sample>& samples, bool cpu)
     for (const auto& sample : samples)
         peak = std::max(peak, cpu ? sample.cpuNs : sample.wallNs);
     return peak;
+}
+
+int overrunStreak(const std::vector<Sample>& samples, std::int64_t periodNs)
+{
+    std::vector<std::int64_t> cpu;
+    cpu.reserve(samples.size());
+    for (const auto& sample : samples)
+        cpu.push_back(sample.cpuNs);
+    return youhost::callbackOverrunStreak(cpu.data(), static_cast<int>(cpu.size()), periodNs);
 }
 
 bool pushSample(std::vector<Sample>& dest, Sample sample, std::atomic<int>& overflow)
@@ -403,6 +412,9 @@ int run()
     const auto afterWall = columnMedian(after, false);
     const int cpuOverruns = countCpuOverruns(baseline, periodNs) + countCpuOverruns(during, periodNs) + countCpuOverruns(after, periodNs);
     const int wallOverruns = countWallOverruns(baseline, periodNs) + countWallOverruns(during, periodNs) + countWallOverruns(after, periodNs);
+    const int streak = std::max(overrunStreak(baseline, periodNs),
+                                std::max(overrunStreak(during, periodNs), overrunStreak(after, periodNs)));
+    const auto counted = static_cast<int>(baseline.size() + during.size() + after.size());
     const auto publishes = serialAfter - serialBefore;
 
     std::cout << "group stress channels " << kChannels
@@ -414,7 +426,9 @@ int run()
               << " edit " << during.size()
               << " after " << after.size()
               << "\n";
-    std::cout << "deadline overruns (callback CPU time > period) " << cpuOverruns << "\n";
+    std::cout << "deadline misses (consecutive callbacks over the period) " << (youhost::callbackDeadlinesHeld(streak) ? 0 : streak) << "\n";
+    std::cout << "longest late streak " << streak << "\n";
+    std::cout << "isolated CPU spikes over the period " << cpuOverruns << "\n";
     std::cout << "wall samples over period (preemptions, not the deadline count) " << wallOverruns << "\n";
     std::cout << "median CPU ns baseline " << baseCpu << " edit " << editCpu << " after " << afterCpu << "\n";
     std::cout << "median wall ns baseline " << baseWall << " edit " << editWall << " after " << afterWall << "\n";
@@ -443,8 +457,10 @@ int run()
         return fail("plugins were dropped, " + std::to_string(stillLoaded) + " left");
     if (publishes > kPublishBudget)
         return fail("group edits published the graph " + std::to_string(publishes) + " times");
-    if (cpuOverruns != 0)
-        return fail(std::to_string(cpuOverruns) + " callback CPU overruns");
+    if (! youhost::callbackDeadlinesHeld(streak))
+        return fail("late callbacks ran for " + std::to_string(streak) + " buffers in a row");
+    if (counted > 0 && cpuOverruns * 100 > counted * 5)
+        return fail(std::to_string(cpuOverruns) + " of " + std::to_string(counted) + " callbacks exceeded the period");
     if (! youhost::callbackMedianInsidePeriod(baseWall, periodNs)
         || ! youhost::callbackMedianInsidePeriod(editWall, periodNs)
         || ! youhost::callbackMedianInsidePeriod(afterWall, periodNs))

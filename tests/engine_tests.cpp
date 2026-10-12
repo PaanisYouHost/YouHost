@@ -4357,6 +4357,9 @@ void testReleaseChecklist()
              && ! youhost::callbackCpuNearBaseline(100000, 170001)
              && youhost::callbackMedianInsidePeriod(400000, periodNs)
              && ! youhost::callbackMedianInsidePeriod(periodNs + 1, periodNs)
+             && youhost::callbackOverrunStreak(nullptr, 0, periodNs) == 0
+             && youhost::callbackDeadlinesHeld(1)
+             && ! youhost::callbackDeadlinesHeld(youhost::kDeadlineStreakLimit)
              && workflow.find("YouHostGroupStressTest") != std::string::npos
              && checklistDoc.find("Groups are purely visual") != std::string::npos
              && checklistDoc.find("prepareToPlay") != std::string::npos
