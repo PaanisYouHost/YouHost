@@ -4236,6 +4236,69 @@ void testReleaseChecklist()
              && checklistDoc.find("Groups are purely visual") != std::string::npos
              && checklistDoc.find("prepareToPlay") != std::string::npos);
 
+    auto lockedTake = readyTake();
+    lockedTake.lockArmed = true;
+    lockedTake.recording = true;
+    auto openTake = lockedTake;
+    openTake.lockArmed = false;
+    int transportKeys = 0;
+    bool otherKeysLeaveTransport = true;
+    for (int raw = 0; raw < static_cast<int>(youhost::ShortcutId::count); ++raw)
+    {
+        const auto id = static_cast<youhost::ShortcutId>(raw);
+        if (youhost::shortcutAsksTransport(id))
+            ++transportKeys;
+        else if (id == youhost::ShortcutId::playOrStop || id == youhost::ShortcutId::recordNow)
+            otherKeysLeaveTransport = false;
+    }
+    for (const auto& binding : youhost::kBindings)
+        if (! youhost::shortcutAsksTransport(binding.id)
+            && (binding.id == youhost::ShortcutId::playOrStop || binding.id == youhost::ShortcutId::recordNow))
+            otherKeysLeaveTransport = false;
+    youhost::KeyQuery plainSpace;
+    plainSpace.kind = youhost::KeyKind::space;
+    youhost::KeyQuery commandSpace = plainSpace;
+    commandSpace.command = true;
+    const auto runKeys = sliceBetween(mainUi,
+                                      "bool MainComponent::runShortcut",
+                                      "juce::ApplicationCommandTarget* MainComponent::getNextCommandTarget");
+    const auto saveAsKeys = sliceBetween(mainUi,
+                                         "void MainComponent::saveSessionAs",
+                                         "void MainComponent::chooseSaveAsDestination");
+    const auto quitKeys = sliceBetween(mainUi,
+                                       "void MainComponent::runAfterUnsavedCheck",
+                                       "void MainComponent::requestApplicationQuit");
+    const auto locateKeys = sliceBetween(recorderSrc,
+                                         "void Recorder::locate",
+                                         "void Recorder::jumpMarker");
+    const auto moveKeys = sliceBetween(recorderSrc,
+                                       "void Recorder::jumpMarker",
+                                       "void Recorder::addImportedTake");
+    const auto saveAsLock = saveAsKeys.find("recordingLocked()");
+    const auto saveAsStop = saveAsKeys.find("transportStop()");
+    const auto help = youhost::shortcutHelpText();
+    item("Locked recording ignores keys",
+         youhost::lockedRecordingTransportHolds(lockedTake)
+             && ! youhost::lockedRecordingTransportHolds(openTake)
+             && youhost::resolveTransport(openTake, youhost::TransportPress::space).stop
+             && youhost::matchShortcut(plainSpace) == youhost::ShortcutId::playOrStop
+             && youhost::matchShortcut(commandSpace) == youhost::ShortcutId::recordNow
+             && transportKeys == 2
+             && otherKeysLeaveTransport
+             && static_cast<int>(youhost::ShortcutId::count) > 2
+             && runKeys.find("finishTransport") == std::string::npos
+             && runKeys.find("recorder_->stop") == std::string::npos
+             && runKeys.find("prepareForQuit") == std::string::npos
+             && runKeys.find("transportStop()") != std::string::npos
+             && saveAsLock != std::string::npos && saveAsStop != std::string::npos && saveAsLock < saveAsStop
+             && quitKeys.find("recordingLocked()") != std::string::npos
+             && quitKeys.find("prepareForQuit") == std::string::npos
+             && locateKeys.find("isRecording()") != std::string::npos
+             && locateKeys.find("stop()") == std::string::npos
+             && moveKeys.find("stop()") == std::string::npos
+             && help.find("No keyboard shortcut stops that take.") != std::string::npos
+             && checklistDoc.find("Locked recording ignores keys") != std::string::npos);
+
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
 }

@@ -48,6 +48,7 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Session required | The main window stays closed until a session exists. |
 | Cmd+Q hook | Quit goes through the unsaved-changes prompt. |
 | Record lock | The padlock is the only control that arms the lock. |
+| Locked recording ignores keys | While a take is recording and the padlock is on, Space, Cmd+Space, and every other shortcut leave the take running. Play, Stop, Space, and Cmd+Space do not stop it and do not start another take. Save As and quit ask to unlock and do not stop the take. Arrow keys do not stop it. |
 | Device menu flicker | The audio card menu is rebuilt when the device list changes, not on every timer tick. |
 | Show Backups | There is no Show Backups control. Backups still run on their own. |
 | REC lane click | Clicking a channel on the REC page scrolls to that lane and makes it tall enough to read. |

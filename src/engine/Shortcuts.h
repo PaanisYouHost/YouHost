@@ -181,6 +181,14 @@ inline constexpr int kSaveAsCommandId = 0x2102;
 inline constexpr int kSelectAllCommandId = 0x2103;
 inline constexpr int kMakeGroupCommandId = 0x2104;
 
+// Play/Stop and Record are the only keys that ask the transport to start or
+// stop. While a take is recording and the padlock is on, both are refused.
+// Every other shortcut leaves the recorder running.
+inline bool shortcutAsksTransport(ShortcutId id) noexcept
+{
+    return id == ShortcutId::playOrStop || id == ShortcutId::recordNow;
+}
+
 inline int commandIdFor(ShortcutId id) noexcept
 {
     if (id == ShortcutId::save)
@@ -447,6 +455,7 @@ inline constexpr const char* kShortcutNotes =
     "The padlock beside Record is the record lock. Click it to arm the lock, including before the take starts. "
     "While recording and locked, Stop, Space, Cmd+Space, Record, New, Open, Open Recent, Import, "
     "device, sample rate, buffer, Offline, and REC, INPUT, and OFF are blocked. "
+    "No keyboard shortcut stops that take. Space, Cmd+Space, and every other key leave it running. "
     "Quit asks you to unlock first. Only another click on the padlock unlocks it. There is no keyboard shortcut. "
     "The padlock is red and the banner says RECORDING LOCKED. Unlocked, the padlock is a calm teal. "
     "While recording, HOST stays usable: plugins, editors, bypass, output gain, groups, names, and colours. "

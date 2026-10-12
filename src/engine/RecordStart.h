@@ -233,6 +233,27 @@ inline RecordAttemptResult resolveTransport(const RecordAttempt& attempt, Transp
     return result;
 }
 
+// A take that is recording with the padlock on stays recording. Play, Stop,
+// Space, and Cmd+Space neither stop it nor start another take.
+inline bool lockedRecordingTransportHolds(const RecordAttempt& attempt) noexcept
+{
+    if (! recordLockEngaged(attempt.lockArmed, attempt.recording))
+        return false;
+    const TransportPress presses[] = {
+        TransportPress::play,
+        TransportPress::stop,
+        TransportPress::space,
+        TransportPress::commandSpace,
+    };
+    for (const auto press : presses)
+    {
+        const auto decision = resolveTransport(attempt, press);
+        if (decision.stop || decision.startRecording || decision.startPlayback)
+            return false;
+    }
+    return true;
+}
+
 // Minimal PCM file so tests can prove a start plan really writes audio.
 inline bool writeMonoWav(const std::string& path, int sampleRate, const float* samples, int count)
 {
