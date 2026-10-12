@@ -1,5 +1,6 @@
 #include "PluginRack.h"
 #include "AppSettings.h"
+#include "CpuMeter.h"
 #include "HostLog.h"
 #include "HostPath.h"
 #include "LatencyCompensation.h"
@@ -717,6 +718,7 @@ void PluginRack::process(float* const* outputs,
     }
 
     StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
+    pluginPercentScratch_.store(0, std::memory_order_relaxed);
     const auto started = steadyNs();
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
     auto* graph = published_.load(std::memory_order_acquire);
@@ -790,6 +792,8 @@ void PluginRack::process(float* const* outputs,
     inUse_.store(nullptr, std::memory_order_release);
     callbackEpoch_.fetch_add(1, std::memory_order_release);
     lastCallbackNs_.store(steadyNs() - started, std::memory_order_relaxed);
+    livePluginPercent_.store(clampCpuPercent(pluginPercentScratch_.exchange(0, std::memory_order_relaxed)),
+                             std::memory_order_relaxed);
     StallClock::get().audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
 }
 
@@ -971,8 +975,14 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 noteNaN(channel, slot);
             if (gate != nullptr)
             {
-                gate->cpuNs.fetch_add(steadyNs() - began, std::memory_order_relaxed);
+                const auto elapsed = steadyNs() - began;
+                gate->cpuNs.fetch_add(elapsed, std::memory_order_relaxed);
                 gate->blocks.fetch_add(1, std::memory_order_relaxed);
+                const int instant = blockCpuPercent(elapsed, count, sampleRate_);
+                const int previous = gate->shownPercent.load(std::memory_order_relaxed);
+                const int shown = smoothCpuPercent(previous, instant);
+                gate->shownPercent.store(shown, std::memory_order_relaxed);
+                pluginPercentScratch_.fetch_add(shown, std::memory_order_relaxed);
                 gate->depth.fetch_sub(1, std::memory_order_release);
             }
         }
@@ -1163,12 +1173,9 @@ DspLoad PluginRack::dspLoad() const
             if (model.plugin == nullptr || model.plugin->gate == nullptr || model.plugin->instance == nullptr)
                 continue;
             auto& gate = *model.plugin->gate;
-            const auto ns = gate.cpuNs.exchange(0, std::memory_order_relaxed);
-            const auto blocks = gate.blocks.exchange(0, std::memory_order_relaxed);
-            if (blocks == 0 || ns == 0)
+            const float percent = static_cast<float>(gate.shownPercent.load(std::memory_order_relaxed));
+            if (percent <= 0.0f)
                 continue;
-            const float percent = static_cast<float>((static_cast<double>(ns) / 1.0e9)
-                                                     / (period * static_cast<double>(blocks)) * 100.0);
             pluginSum += percent;
             int place = load.count;
             if (place >= static_cast<int>(load.lines.size()))
@@ -1211,6 +1218,9 @@ void PluginRack::addCoreNs(int core, std::uint64_t ns) noexcept
         return;
     coreNs_[static_cast<std::size_t>(core)].fetch_add(ns, std::memory_order_relaxed);
     coreBlocks_[static_cast<std::size_t>(core)].fetch_add(1, std::memory_order_relaxed);
+    const int instant = blockCpuPercent(ns, blockSize_ > 0 ? blockSize_ : 512, sampleRate_ > 0.0 ? sampleRate_ : 48000.0);
+    const int previous = coreShown_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed);
+    coreShown_[static_cast<std::size_t>(core)].store(smoothCpuPercent(previous, instant), std::memory_order_relaxed);
 }
 
 CpuMeters PluginRack::cpuMeters() const
@@ -1225,16 +1235,7 @@ CpuMeters PluginRack::cpuMeters() const
     meters.workers = pool_ != nullptr ? pool_->workerCount() : 0;
     const int cores = std::min(1 + meters.workers, static_cast<int>(meters.percent.size()));
     for (int core = 0; core < cores; ++core)
-    {
-        auto& nsSlot = coreNs_[static_cast<std::size_t>(core)];
-        auto& blockSlot = coreBlocks_[static_cast<std::size_t>(core)];
-        const auto ns = nsSlot.exchange(0, std::memory_order_relaxed);
-        const auto blocks = blockSlot.exchange(0, std::memory_order_relaxed);
-        if (blocks == 0 || period <= 0.0)
-            continue;
-        meters.percent[static_cast<std::size_t>(core)] = static_cast<float>((static_cast<double>(ns) / 1.0e9)
-                                                                            / (period * static_cast<double>(blocks)) * 100.0);
-    }
+        meters.percent[static_cast<std::size_t>(core)] = static_cast<float>(coreShown_[static_cast<std::size_t>(core)].load(std::memory_order_relaxed));
     return meters;
 }
 
@@ -2345,6 +2346,7 @@ void PluginRack::rememberActiveNames()
     char text[160] {};
     std::size_t used = 0;
     int count = 0;
+    int named = 0;
     auto append = [&](const char* chunk)
     {
         if (chunk == nullptr)
@@ -2360,15 +2362,14 @@ void PluginRack::rememberActiveNames()
             const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             if (model.plugin == nullptr || model.plugin->instance == nullptr)
                 continue;
-            if (count > 0)
+            ++count;
+            if (named >= 8)
+                continue;
+            if (named > 0)
                 append(", ");
             append(model.plugin->description.name.toRawUTF8());
-            ++count;
-            if (count >= 8)
-                break;
+            ++named;
         }
-        if (count >= 8)
-            break;
     }
     text[used] = '\0';
     StallClock::get().activePlugins.store(count, std::memory_order_relaxed);

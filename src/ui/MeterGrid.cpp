@@ -3,6 +3,7 @@
 #include "Theme.h"
 #include "X32Look.h"
 #include "engine/ChannelListen.h"
+#include "engine/MeterClip.h"
 #include "engine/MeterScale.h"
 #include "engine/Shortcuts.h"
 
@@ -35,7 +36,7 @@ BarParts splitCell(juce::Rectangle<float> cell)
     body.removeFromBottom(2.0f);
     auto button = body.removeFromBottom(buttonHeight);
     body.removeFromBottom(2.0f);
-    const auto clip = body.removeFromTop(juce::jmin(7.0f, body.getHeight() * 0.08f));
+    const auto clip = body.removeFromTop(clipBandHeight(body.getHeight()));
     body.removeFromTop(2.0f);
     return { body, clip, button, name, number };
 }
@@ -639,8 +640,20 @@ void MeterGrid::paint(juce::Graphics& graphics)
         const auto ticks = placeTicks(parts.bar, showPeak_, rmsReferenceDb_);
         drawScaleLines(graphics, ticks, parts.bar.getX(), parts.bar.getRight());
 
-        graphics.setColour(! on ? theme::panelEdge : cell.reading.clipped ? theme::red : theme::panelEdge);
-        graphics.fillRoundedRectangle(parts.clip.reduced(juce::jmax(0.0f, (parts.clip.getWidth() - 8.0f) * 0.5f), 0.0f), 1.5f);
+        auto clipMark = parts.clip.reduced(1.0f, 0.0f);
+        if (cell.reading.clipped)
+        {
+            graphics.setColour(theme::red);
+            graphics.fillRoundedRectangle(clipMark, 2.0f);
+            graphics.setColour(juce::Colours::white);
+            graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(8.0f, 11.0f, clipMark.getHeight() * 0.7f)).withStyle("Bold")));
+            graphics.drawText("CLIP", clipMark, juce::Justification::centred, false);
+        }
+        else
+        {
+            graphics.setColour(! on ? theme::panelEdge : theme::panelEdge);
+            graphics.fillRoundedRectangle(clipMark, 1.5f);
+        }
 
         auto button = parts.button.reduced(1.0f, 0.0f);
         // Flat colour. This is painted with the meters, so it stays a fill.
@@ -665,6 +678,11 @@ void MeterGrid::paint(juce::Graphics& graphics)
             graphics.setColour(theme::amber);
             graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(7.0f, 9.0f, width * 0.18f))));
             graphics.drawText(cell.pdc, pdcArea, juce::Justification::centred, true);
+        }
+        if (editingChannel_ != cell.channel)
+        {
+            graphics.setColour(juce::Colours::white);
+            graphics.drawRoundedRectangle(nameArea.reduced(1.0f, 0.5f), 2.0f, 1.0f);
         }
         if (cell.title.isNotEmpty())
         {

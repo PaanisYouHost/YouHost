@@ -1,4 +1,5 @@
 #include "SessionDocument.h"
+#include "VersionLabel.h"
 #include "ChannelColor.h"
 #include "MeterScale.h"
 #include "SignalPath.h"
@@ -115,6 +116,7 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
 {
     juce::XmlElement root("YouHostSession");
     root.setAttribute("version", kSessionFormatVersion);
+    root.setAttribute("savedWith", data.savedWith.isNotEmpty() ? data.savedWith : juce::String(versionLabel()));
     root.setAttribute("bits", normaliseWavBitDepth(data.wavBitDepth));
     root.setAttribute("page", data.page == 2 ? 2 : 1);
     root.setAttribute("wave", data.waveformGain);
@@ -202,6 +204,15 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
         element->setAttribute("collapsed", source.collapsed);
     }
 
+    for (int index = 0; index < static_cast<int>(data.markers.size()); ++index)
+    {
+        const auto& marker = data.markers[static_cast<std::size_t>(index)];
+        auto* element = root.createNewChildElement("Marker");
+        element->setAttribute("index", index);
+        element->setAttribute("sample", juce::String(marker.sample));
+        element->setAttribute("name", marker.name);
+    }
+
     auto* timeline = root.createNewChildElement("Timeline");
     timeline->setAttribute("zoom", std::max(0, data.timeline.zoom));
     timeline->setAttribute("vertical", std::max(0, data.timeline.vertical));
@@ -260,6 +271,7 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     data.inputDevice = root->getStringAttribute("input");
     data.outputDevice = root->getStringAttribute("output");
     data.explicitOffline = root->getBoolAttribute("offline", false);
+    data.savedWith = root->getStringAttribute("savedWith");
     data.channelCount = kMaxChannels;
     data.waveformGain = static_cast<float>(root->getDoubleAttribute("wave", 1.0));
     data.alignGroup = root->getStringAttribute("align") == "group" ? 1 : 0;
@@ -273,6 +285,14 @@ bool readSessionFile(const juce::File& file, SessionData& data)
     if (auto* device = root->getChildByName("Device"))
         if (auto* inner = device->getFirstChildElement())
             data.device = std::make_unique<juce::XmlElement>(*inner);
+
+    for (auto* marker = root->getChildByName("Marker"); marker != nullptr; marker = marker->getNextElementWithTagName("Marker"))
+    {
+        SessionMarker stored;
+        stored.sample = marker->getStringAttribute("sample").getLargeIntValue();
+        stored.name = marker->getStringAttribute("name");
+        data.markers.push_back(std::move(stored));
+    }
 
     for (auto* channel = root->getChildByName("Channel"); channel != nullptr; channel = channel->getNextElementWithTagName("Channel"))
     {

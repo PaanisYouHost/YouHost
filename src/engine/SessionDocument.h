@@ -33,6 +33,12 @@ struct SessionGroup
     bool collapsed = false;
 };
 
+struct SessionMarker
+{
+    std::int64_t sample = 0;
+    juce::String name;
+};
+
 struct SessionChannel
 {
     bool excludeFromCompensation = false;
@@ -76,6 +82,8 @@ struct SessionData
     std::array<SessionChannel, kMaxChannels> channels {};
     std::array<SessionGroup, kMaxDisplayGroups> groups {};
     std::vector<SessionTake> takes;
+    std::vector<SessionMarker> markers;
+    juce::String savedWith;
     SessionNode preserved {};
     bool hasPreserved = false;
 };

@@ -24,6 +24,7 @@ struct HostColumns
     HostColumnBox delay;
     HostColumnBox plugins;
     HostColumnBox gain;
+    HostColumnBox output;
 };
 
 inline constexpr int kHostColumnHeaderHeight = 22;
@@ -33,6 +34,7 @@ inline constexpr const char* kHostColumnName = "NAME";
 inline constexpr const char* kHostColumnDelay = "DELAY COMP";
 inline constexpr const char* kHostColumnPlugins = "PLUGINS";
 inline constexpr const char* kHostColumnGain = "GAIN";
+inline constexpr const char* kHostColumnOutput = "OUT";
 
 inline HostColumns layoutHostColumns(int rowWidth) noexcept
 {
@@ -57,8 +59,13 @@ inline HostColumns layoutHostColumns(int rowWidth) noexcept
 
     constexpr int gainWidth = 72;
     constexpr int delayWidth = 112;
-    columns.gain.width = std::min(gainWidth, std::max(0, rightLimit - x));
-    columns.gain.x = std::max(x, rightLimit - columns.gain.width);
+    constexpr int outputWidth = 20;
+    const int tail = std::max(0, rightLimit - x);
+    columns.output.width = std::min(outputWidth, tail);
+    columns.output.x = std::max(x, rightLimit - columns.output.width);
+    const int gainRoom = std::max(0, columns.output.x - x);
+    columns.gain.width = std::min(gainWidth, gainRoom);
+    columns.gain.x = std::max(x, columns.output.x - columns.gain.width);
 
     const int middle = std::max(0, columns.gain.x - x);
     columns.delay.x = x;
@@ -66,6 +73,16 @@ inline HostColumns layoutHostColumns(int rowWidth) noexcept
     columns.plugins.x = columns.delay.x + columns.delay.width;
     columns.plugins.width = std::max(0, columns.gain.x - columns.plugins.x);
     return columns;
+}
+
+// DELAY COMP starts at the EX button, not at the delay readout to its right.
+inline HostColumnBox delayCompHeaderBox(const HostColumns& columns) noexcept
+{
+    HostColumnBox box;
+    box.x = columns.exclude.x;
+    const int right = columns.delay.x + columns.delay.width;
+    box.width = std::max(0, right - box.x);
+    return box;
 }
 
 } // namespace youhost

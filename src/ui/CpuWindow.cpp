@@ -18,8 +18,9 @@ public:
 
     void refresh()
     {
-        total_ = engine_.cpuUsage() * 100.0f;
+        total_ = static_cast<float>(engine_.pluginCpuPercent());
         meters_ = engine_.cpuMeters();
+        meters_.callbackPercent = static_cast<float>(engine_.callbackCpuPercent());
         repaint();
     }
 
@@ -38,7 +39,7 @@ public:
         graphics.drawText(percentText(total_) + "%", hero.removeFromLeft(120), juce::Justification::centredLeft, false);
         graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
         graphics.setColour(theme::dim);
-        graphics.drawText("total CPU", hero, juce::Justification::centredLeft, false);
+        graphics.drawText("plugins", hero, juce::Justification::centredLeft, false);
 
         area.removeFromTop(8);
         drawBar(graphics, area.removeFromTop(28), "Audio", meters_.callbackPercent);
@@ -70,7 +71,7 @@ public:
 private:
     static juce::String percentText(float value)
     {
-        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 9999.0f)));
+        return juce::String(juce::roundToInt(std::clamp(value, 0.0f, 999.0f)));
     }
 
     static juce::Colour barColour(float percent)

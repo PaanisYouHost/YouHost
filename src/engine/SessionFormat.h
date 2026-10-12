@@ -6,6 +6,7 @@
 #include "HostLimits.h"
 #include "MeterScale.h"
 #include "SessionChannels.h"
+#include "VersionLabel.h"
 
 #include <algorithm>
 #include <cctype>
@@ -139,7 +140,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return false;
     };
 
-    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate" }))
+    if (listed("YouHostSession", { "version", "bits", "page", "wave", "align", "rate", "savedWith" }))
         return true;
     if (listed("Meters", { "peak", "reference" }))
         return true;
@@ -155,6 +156,8 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return true;
     if (listed("Timeline", { "zoom", "vertical", "scroll", "lanes", "height" }))
         return true;
+    if (listed("Marker", { "index", "sample", "name" }))
+        return true;
     if (listed("State", { "data" }))
         return true;
     return false;
@@ -164,7 +167,7 @@ inline bool knownSessionTag(std::string_view name) noexcept
 {
     return name == "YouHostSession" || name == "Meters" || name == "Device" || name == "Channel"
            || name == "Group" || name == "Take" || name == "Slot" || name == "File" || name == "PLUGIN"
-           || name == "State" || name == "Timeline";
+           || name == "State" || name == "Timeline" || name == "Marker";
 }
 
 inline int sessionMatchIndex(const SessionNode& written, const SessionNode& original, int takeOrdinal)
@@ -291,9 +294,17 @@ struct SessionTakeRecord
     std::vector<SessionFileRecord> files;
 };
 
+struct SessionMarkerRecord
+{
+    int index = 0;
+    std::int64_t sample = 0;
+    std::string name;
+};
+
 struct SessionDocumentModel
 {
     int version = 0;
+    std::string savedWith;
     int bits = kDefaultWavBitDepth;
     int page = 1;
     double wave = 1.0;
@@ -313,6 +324,7 @@ struct SessionDocumentModel
     std::vector<SessionChannelRecord> channels;
     std::vector<SessionGroupRecord> groups;
     std::vector<SessionTakeRecord> takes;
+    std::vector<SessionMarkerRecord> markers;
     SessionNode source;
     bool hasSource = false;
 };
@@ -339,6 +351,8 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
     if (const auto* output = sessionAttribute(root, "output"))
         model.outputDevice = *output;
     model.explicitOffline = sessionAttributeBool(root, "offline", false);
+    if (const auto* savedWith = sessionAttribute(root, "savedWith"))
+        model.savedWith = *savedWith;
     // A stored channels attribute is ignored. The session always holds 128.
     model.channelCount = kMaxChannels;
 
@@ -452,6 +466,18 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
         model.takes.push_back(std::move(record));
     }
 
+    for (const auto& marker : root.children)
+    {
+        if (marker.name != "Marker")
+            continue;
+        SessionMarkerRecord record;
+        record.index = sessionAttributeInt(marker, "index", static_cast<int>(model.markers.size()));
+        record.sample = sessionAttributeInt64(marker, "sample", 0);
+        if (const auto* name = sessionAttribute(marker, "name"))
+            record.name = *name;
+        model.markers.push_back(std::move(record));
+    }
+
     return true;
 }
 
@@ -485,6 +511,7 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
     SessionNode root;
     root.name = "YouHostSession";
     sessionSetAttribute(root, "version", std::to_string(kSessionFormatVersion));
+    sessionSetAttribute(root, "savedWith", model.savedWith.empty() ? versionLabel() : model.savedWith);
     sessionSetAttribute(root, "bits", std::to_string(normaliseWavBitDepth(model.bits)));
     sessionSetAttribute(root, "page", model.page == 2 ? "2" : "1");
     sessionSetAttribute(root, "wave", std::to_string(model.wave));
@@ -585,6 +612,17 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
             sessionSetAttribute(fileNode, "name", file.name);
             element.children.push_back(std::move(fileNode));
         }
+        root.children.push_back(std::move(element));
+    }
+
+    for (int index = 0; index < static_cast<int>(model.markers.size()); ++index)
+    {
+        const auto& marker = model.markers[static_cast<std::size_t>(index)];
+        SessionNode element;
+        element.name = "Marker";
+        sessionSetAttribute(element, "index", std::to_string(index));
+        sessionSetAttribute(element, "sample", std::to_string(marker.sample));
+        sessionSetAttribute(element, "name", marker.name);
         root.children.push_back(std::move(element));
     }
 

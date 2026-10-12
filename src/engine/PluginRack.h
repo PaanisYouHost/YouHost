@@ -53,6 +53,8 @@ struct PluginGate
     std::atomic<int> pause { 0 };
     std::atomic<std::uint64_t> cpuNs { 0 };
     std::atomic<std::uint32_t> blocks { 0 };
+    // Whole-percent EMA written on the audio thread. Readers never exchange it.
+    std::atomic<int> shownPercent { 0 };
 };
 
 struct DspLoadLine
@@ -102,6 +104,7 @@ public:
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
     CpuMeters cpuMeters() const;
+    int livePluginPercent() const noexcept { return livePluginPercent_.load(std::memory_order_relaxed); }
     void setAlignMode(int perGroup);
     void setChannelGroups(const int* groups, int count);
     void copyLatencyInputs(ChannelLatencyInput* out, int count) const;
@@ -272,6 +275,9 @@ private:
     std::atomic<int> activeChannels_ { kMaxChannels };
     mutable std::array<std::atomic<std::uint64_t>, 8> coreNs_ {};
     mutable std::array<std::atomic<std::uint32_t>, 8> coreBlocks_ {};
+    std::array<std::atomic<int>, 8> coreShown_ {};
+    std::atomic<int> pluginPercentScratch_ { 0 };
+    std::atomic<int> livePluginPercent_ { 0 };
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
     std::array<ChannelLatencyInput, kMaxChannels> latencyInputs_ {};

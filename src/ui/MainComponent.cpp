@@ -18,6 +18,8 @@
 #include "engine/SessionNames.h"
 #include "engine/Shortcuts.h"
 #include "engine/StatusLine.h"
+#include "engine/VersionLabel.h"
+#include "engine/SyncLost.h"
 
 #include <algorithm>
 #include <array>
@@ -1336,12 +1338,13 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_,
-                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &retryButton_, &groupButton_,
+                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &markersButton_, &markerButton_,
+                          &syncOk_, &retryButton_, &groupButton_,
                           &allButton_, &hideButton_, &globalRecButton_, &globalInputButton_, &globalOffButton_ })
         quiet(*button);
 
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &latencyButton_,
-                          &setupButton_, &groupButton_, &allButton_, &hideButton_ })
+                          &markersButton_, &setupButton_, &groupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
     recorderButton_.onClick = [this] { showPage(1); };
@@ -1392,6 +1395,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     saveAsButton_.setTooltip("Copy the WAV files on a background thread, write session.youhost once, skip Backups, then continue in the new folder ("
                              + juce::String(shortcutChord(ShortcutId::saveAs)) + "). Not while recording.");
     latencyButton_.onClick = [this] { toggleLatency(); };
+    markersButton_.onClick = [this] { toggleMarkers(); };
+    markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
+    markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
+    markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
+    syncOk_.onClick = [this] { engine_.acknowledgeSyncLost(); refresh(); };
+    syncOk_.setTooltip("Hide the SYNC LOST alarm. YouHost keeps reopening the card.");
 
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
@@ -1652,6 +1661,21 @@ bool MainComponent::runShortcut(ShortcutId id)
         case ShortcutId::latency:
             toggleLatency();
             return true;
+        case ShortcutId::markers:
+            toggleMarkers();
+            return true;
+        case ShortcutId::marker:
+            engine_.dropMarker();
+            refresh();
+            return true;
+        case ShortcutId::undo:
+            engine_.undoEdit();
+            refresh();
+            return true;
+        case ShortcutId::redo:
+            engine_.redoEdit();
+            refresh();
+            return true;
         case ShortcutId::scanner:
             toggleScanner();
             return true;
@@ -1731,6 +1755,8 @@ void MainComponent::getAllCommands(juce::Array<juce::CommandID>& commands)
     commands.add(saveAsCommand);
     commands.add(selectAllCommand);
     commands.add(makeGroupCommand);
+    commands.add(undoCommand);
+    commands.add(redoCommand);
 }
 
 void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationCommandInfo& result)
@@ -1772,6 +1798,16 @@ void MainComponent::getCommandInfo(juce::CommandID commandID, juce::ApplicationC
         name = "Make Group";
         category = "Edit";
     }
+    else if (*shortcut == ShortcutId::undo)
+    {
+        name = "Undo";
+        category = "Edit";
+    }
+    else if (*shortcut == ShortcutId::redo)
+    {
+        name = "Redo";
+        category = "Edit";
+    }
     result.setInfo(name, shortcutMeaning(*shortcut), category, 0);
     addKeys(*shortcut);
 }
@@ -1783,6 +1819,9 @@ bool MainComponent::perform(const juce::ApplicationCommandTarget::InvocationInfo
 
     const auto shortcut = shortcutIdForCommand(static_cast<int>(info.commandID));
     if (! shortcut.has_value())
+        return false;
+    if ((*shortcut == ShortcutId::undo || *shortcut == ShortcutId::redo)
+        && shortcutBlocked(info.originatingComponent))
         return false;
     if (! commandApplies(*shortcut, page_, shortcutBlocked(info.originatingComponent)))
         return true;
@@ -2121,16 +2160,53 @@ void MainComponent::toggleScanner()
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
 }
 
+void MainComponent::raiseMonitorWindows(MonitorWindow front)
+{
+    struct Item
+    {
+        MonitorWindow id;
+        juce::Component* window;
+    };
+    const Item items[] = {
+        { MonitorWindow::dropouts, &dropouts_ },
+        { MonitorWindow::cpu, &cpu_ },
+        { MonitorWindow::latency, latencyWindow_.get() },
+    };
+    for (const auto& item : items)
+        if (item.window != nullptr && item.id != front && item.window->isVisible())
+            item.window->toFront(false);
+    for (const auto& item : items)
+        if (item.window != nullptr && item.id == front && item.window->isVisible())
+            item.window->toFront(true);
+}
+
+void MainComponent::keepMonitorWindowsOpen(MonitorWindow front)
+{
+    // A click activates the main window and buries the other monitor windows.
+    // Raise them again after that activation, on this click and on the next turn.
+    raiseMonitorWindows(front);
+    juce::Component::SafePointer<MainComponent> safe(this);
+    juce::MessageManager::callAsync([safe, front]
+    {
+        if (safe != nullptr)
+            safe->raiseMonitorWindows(front);
+    });
+}
+
 void MainComponent::toggleDropouts()
 {
     dropouts_.toggle();
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
+    if (dropouts_.isVisible())
+        keepMonitorWindowsOpen(MonitorWindow::dropouts);
 }
 
 void MainComponent::toggleCpu()
 {
     cpu_.toggle();
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
+    if (cpu_.isVisible())
+        keepMonitorWindowsOpen(MonitorWindow::cpu);
 }
 
 void MainComponent::toggleLatency()
@@ -2141,7 +2217,158 @@ void MainComponent::toggleLatency()
     latencyWindow_->setVisible(show);
     latencyButton_.setToggleState(show, juce::dontSendNotification);
     if (show)
-        latencyWindow_->toFront(true);
+        keepMonitorWindowsOpen(MonitorWindow::latency);
+}
+
+class MarkersWindow : public juce::DocumentWindow, private juce::Timer
+{
+public:
+    MarkersWindow(AudioEngine& engine, AppSettings& settings)
+        : juce::DocumentWindow("MARKERS", theme::panel, juce::DocumentWindow::closeButton),
+          engine_(engine),
+          settings_(settings)
+    {
+        setUsingNativeTitleBar(true);
+        setContentOwned(new Body(*this), true);
+        prepareRememberedWindow(*this, settings_, "windowMarkers", 420, 360, 280, 220);
+        setVisible(false);
+        startTimerHz(4);
+    }
+
+    ~MarkersWindow() override
+    {
+        stopTimer();
+        saveRememberedWindow(*this, settings_, "windowMarkers", 420, 360);
+    }
+
+    void closeButtonPressed() override
+    {
+        saveRememberedWindow(*this, settings_, "windowMarkers", 420, 360);
+        setVisible(false);
+    }
+
+private:
+    class Body : public juce::Component
+    {
+    public:
+        explicit Body(MarkersWindow& owner)
+            : owner_(owner)
+        {
+            addAndMakeVisible(viewport_);
+            viewport_.setViewedComponent(&column_, false);
+            viewport_.setScrollBarsShown(true, false);
+        }
+
+        ~Body() override
+        {
+            viewport_.setViewedComponent(nullptr, false);
+        }
+
+        void refresh()
+        {
+            const int count = owner_.engine_.markerCount();
+            if (count == built_ && owner_.engine_.markerRevision() == revision_)
+                return;
+            built_ = count;
+            revision_ = owner_.engine_.markerRevision();
+            rows_.clear();
+            for (int index = 0; index < count; ++index)
+            {
+                auto row = std::make_unique<Row>(owner_.engine_, index);
+                column_.addAndMakeVisible(*row);
+                rows_.push_back(std::move(row));
+            }
+            resized();
+        }
+
+        void resized() override
+        {
+            viewport_.setBounds(getLocalBounds());
+            const int width = std::max(1, viewport_.getMaximumVisibleWidth());
+            const int height = std::max(getHeight(), 8 + static_cast<int>(rows_.size()) * 36);
+            column_.setSize(width, height);
+            auto area = column_.getLocalBounds().reduced(8, 8);
+            for (auto& row : rows_)
+            {
+                row->setBounds(area.removeFromTop(32));
+                area.removeFromTop(4);
+            }
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            graphics.fillAll(theme::background);
+        }
+
+    private:
+        class Row : public juce::Component
+        {
+        public:
+            Row(AudioEngine& engine, int index)
+                : engine_(engine),
+                  index_(index)
+            {
+                addAndMakeVisible(jump_);
+                addAndMakeVisible(name_);
+                const double rate = engine_.preferredSampleRate() > 0.0 ? engine_.preferredSampleRate() : 48000.0;
+                jump_.setButtonText(timecodeText(engine_.markerSample(index_), rate));
+                name_.setText(engine_.markerName(index_), juce::dontSendNotification);
+                name_.setEditable(false, true, false);
+                name_.onTextChange = [this]
+                {
+                    engine_.setMarkerName(index_, name_.getText());
+                };
+                jump_.onClick = [this]
+                {
+                    engine_.transportLocate(engine_.markerSample(index_));
+                };
+                jump_.setMouseClickGrabsKeyboardFocus(false);
+            }
+
+            void resized() override
+            {
+                auto area = getLocalBounds();
+                jump_.setBounds(area.removeFromLeft(96).reduced(0, 2));
+                area.removeFromLeft(6);
+                name_.setBounds(area);
+            }
+
+        private:
+            AudioEngine& engine_;
+            int index_ = 0;
+            juce::TextButton jump_;
+            juce::Label name_;
+        };
+
+        MarkersWindow& owner_;
+        juce::Viewport viewport_;
+        juce::Component column_;
+        std::vector<std::unique_ptr<Row>> rows_;
+        int built_ = -1;
+        int revision_ = -1;
+    };
+
+    void timerCallback() override
+    {
+        if (! isVisible())
+            return;
+        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
+            body->refresh();
+    }
+
+    AudioEngine& engine_;
+    AppSettings& settings_;
+};
+
+void MainComponent::toggleMarkers()
+{
+    if (markersWindow_ == nullptr)
+        markersWindow_ = std::make_unique<MarkersWindow>(engine_, settings_);
+    const bool show = ! markersWindow_->isVisible();
+    markersWindow_->setVisible(show);
+    markersButton_.setToggleState(show, juce::dontSendNotification);
+    if (show)
+        markersWindow_->toFront(true);
 }
 
 void MainComponent::saveSession()
@@ -2389,21 +2616,11 @@ class HelpWindow : public juce::DocumentWindow
 {
 public:
     explicit HelpWindow(AppSettings& settings)
-        : juce::DocumentWindow("Shortcuts", theme::panel, juce::DocumentWindow::closeButton),
+        : juce::DocumentWindow(versionLabel(), theme::panel, juce::DocumentWindow::closeButton),
           settings_(settings)
     {
-        text_.setMultiLine(true, true);
-        text_.setReadOnly(true);
-        text_.setScrollbarsShown(true);
-        text_.setCaretVisible(false);
-        text_.setMultiLine(true);
-        text_.setText(juce::String(shortcutHelpText()), juce::dontSendNotification);
-        text_.setColour(juce::TextEditor::backgroundColourId, theme::background);
-        text_.setColour(juce::TextEditor::textColourId, theme::text);
-        text_.setColour(juce::TextEditor::outlineColourId, theme::panelEdge);
-        text_.setFont(juce::Font(juce::FontOptions(14.0f)));
         setUsingNativeTitleBar(true);
-        setContentNonOwned(&text_, false);
+        setContentOwned(new Body(), true);
         const int characters = static_cast<int>(shortcutHelpText().size());
         prepareRememberedWindow(*this, settings_, "windowHelp", helpWindowWidth(), helpWindowHeightFor(characters), 480, 280);
         setVisible(false);
@@ -2411,7 +2628,6 @@ public:
 
     ~HelpWindow() override
     {
-        setContentNonOwned(nullptr, false);
         const int characters = static_cast<int>(shortcutHelpText().size());
         saveRememberedWindow(*this, settings_, "windowHelp", helpWindowWidth(), helpWindowHeightFor(characters));
     }
@@ -2424,8 +2640,42 @@ public:
     }
 
 private:
+    class Body : public juce::Component
+    {
+    public:
+        Body()
+        {
+            card_.setText(kGigPerformanceCard, juce::dontSendNotification);
+            card_.setJustificationType(juce::Justification::topLeft);
+            card_.setColour(juce::Label::backgroundColourId, juce::Colour(0xff3d3418));
+            card_.setColour(juce::Label::textColourId, juce::Colour(0xffffe08a));
+            card_.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
+            text_.setMultiLine(true, true);
+            text_.setReadOnly(true);
+            text_.setScrollbarsShown(true);
+            text_.setCaretVisible(false);
+            text_.setText(juce::String(shortcutHelpText()), juce::dontSendNotification);
+            text_.setColour(juce::TextEditor::backgroundColourId, theme::background);
+            text_.setColour(juce::TextEditor::textColourId, theme::text);
+            text_.setColour(juce::TextEditor::outlineColourId, theme::panelEdge);
+            text_.setFont(juce::Font(juce::FontOptions(14.0f)));
+            addAndMakeVisible(card_);
+            addAndMakeVisible(text_);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds();
+            card_.setBounds(area.removeFromTop(148).reduced(8));
+            text_.setBounds(area);
+        }
+
+    private:
+        juce::Label card_;
+        juce::TextEditor text_;
+    };
+
     AppSettings& settings_;
-    juce::TextEditor text_;
 };
 
 void MainComponent::showHelp()
@@ -2509,9 +2759,8 @@ void MainComponent::timerCallback()
     if (++pollDivider_ >= 6)
     {
         pollDivider_ = 0;
-        if (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost())
-            engine_.sampleLiveCpu();
-        else
+        engine_.sampleLiveCpu();
+        if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))
             engine_.pollDeviceStats();
         engine_.maintainSession();
     }
@@ -2678,6 +2927,16 @@ void MainComponent::refresh()
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
+    markersButton_.setToggleState(markersWindow_ != nullptr && markersWindow_->isVisible(), juce::dontSendNotification);
+    if (engine_.markerRevision() != markerRevisionSeen_)
+    {
+        markerRevisionSeen_ = engine_.markerRevision();
+        std::vector<std::pair<std::int64_t, juce::String>> marks;
+        marks.reserve(static_cast<std::size_t>(engine_.markerCount()));
+        for (int index = 0; index < engine_.markerCount(); ++index)
+            marks.emplace_back(engine_.markerSample(index), engine_.markerName(index));
+        timeline_.setMarkers(marks);
+    }
     latencyReadout_.setAlignGroup(engine_.alignGroup());
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);
     allButton_.setToggleState(engine_.groupsAreExpanded(), juce::dontSendNotification);
@@ -2689,7 +2948,7 @@ void MainComponent::refresh()
     layoutMeters();
     pluginPage_.setMeterMode(showPeak_, rmsReferenceDb_);
     pluginPage_.refresh();
-    const int cpuNow = juce::jlimit(0, 100, juce::roundToInt(engine_.cpuUsage() * 100.0f));
+    const int cpuNow = engine_.pluginCpuPercent();
     std::string statusKey = engine_.missingCardStatus().isNotEmpty() ? engine_.missingCardStatus().toStdString()
                                                                      : engine_.deviceName().toStdString();
     statusKey += "|";
@@ -2744,7 +3003,7 @@ void MainComponent::paint(juce::Graphics& graphics)
     graphics.fillRect(scanTick_);
     graphics.setColour(theme::text);
     graphics.setFont(juce::Font(juce::FontOptions(18.0f)));
-    graphics.drawText("YouHost", titleArea_, juce::Justification::centredLeft, false);
+    graphics.drawText(versionLabel(), titleArea_, juce::Justification::centredLeft, false);
 
     const auto numbers = engine_.latencyNumbers();
     const auto cardStatus = engine_.missingCardStatus();
@@ -2767,7 +3026,7 @@ void MainComponent::paint(juce::Graphics& graphics)
     if (engine_.sessionIsOnInternalDisk())
         session += " disk";
     const auto line = formatStatusLine(device, io, rate, engine_.wavBitDepthLabel().toStdString(),
-                                       juce::jlimit(0, 100, juce::roundToInt(engine_.cpuUsage() * 100.0f)),
+                                       engine_.pluginCpuPercent(),
                                        session);
 
     graphics.setColour(theme::dim);
@@ -2787,16 +3046,23 @@ void MainComponent::paint(juce::Graphics& graphics)
                                 2);
     }
 
-    if (engine_.deviceLost())
+    if (engine_.syncLostVisible())
     {
         graphics.setColour(juce::Colour(0xff5a1e28));
         graphics.fillRoundedRectangle(deviceLostArea_.toFloat(), 8.0f);
         graphics.setColour(theme::red);
         graphics.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
-        graphics.drawFittedText("Audio device lost. YouHost will reopen it when it comes back. The take was saved.",
+        graphics.drawFittedText("SYNC LOST. YouHost will reopen the card when it comes back. The take was saved.",
                                 deviceLostArea_.reduced(12, 4),
                                 juce::Justification::centredLeft,
                                 2);
+        if (syncLostBlink(juce::Time::getMillisecondCounter()))
+        {
+            graphics.setFont(juce::Font(juce::FontOptions(42.0f).withStyle("Bold")));
+            graphics.drawText("SYNC LOST", getLocalBounds(), juce::Justification::centred, false);
+            graphics.setFont(juce::Font(juce::FontOptions(16.0f).withStyle("Bold")));
+            graphics.drawText("SYNC LOST", 16, getHeight() - 36, 160, 24, juce::Justification::centredLeft, false);
+        }
     }
 
     if (! recordLockArea_.isEmpty())
@@ -2894,7 +3160,9 @@ void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(12);
     auto title = area.removeFromTop(22);
-    titleArea_ = title.removeFromLeft(90);
+    const auto titleFont = juce::Font(juce::FontOptions(18.0f));
+    const int titleWidth = std::max(90, static_cast<int>(std::ceil(juce::GlyphArrangement::getStringWidth(titleFont, versionLabel()))) + 12);
+    titleArea_ = title.removeFromLeft(std::min(titleWidth, title.getWidth() / 2));
     statusArea_ = title;
     layoutStatusLine();
     area.removeFromTop(6);
@@ -2915,6 +3183,8 @@ void MainComponent::resized()
     allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
+    markersButton_.setBounds(views.removeFromRight(118).reduced(0, 2));
+    views.removeFromRight(4);
     latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
     views.removeFromRight(4);
     cpuButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
@@ -2931,6 +3201,7 @@ void MainComponent::resized()
     auto fileGap = area.removeFromTop(4);
     fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
     auto transport = area.removeFromTop(kRecordLockRowHeight);
+    markerButton_.setBounds(transport.removeFromRight(96).reduced(2, kTransportControlInsetY));
     constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + kRecordLockButtonWidth + 8 + 148 + 96;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
     prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
@@ -2979,10 +3250,12 @@ void MainComponent::resized()
         bannerArea_ = {};
     }
 
-    if (engine_.deviceLost())
+    syncOk_.setVisible(engine_.syncLostVisible());
+    if (engine_.syncLostVisible())
     {
         area.removeFromTop(8);
         deviceLostArea_ = area.removeFromTop(44);
+        syncOk_.setBounds(deviceLostArea_.removeFromRight(72).reduced(8, 8));
     }
     else
     {

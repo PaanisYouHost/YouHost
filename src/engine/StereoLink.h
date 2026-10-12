@@ -34,6 +34,53 @@ inline bool canStereoLink(int channel, int channelCount) noexcept
     return left + 1 < limit;
 }
 
+// A group may use LINK only when its members are exactly one adjacent pair.
+inline bool groupMembersAreAdjacentPair(const int* channels, int count) noexcept
+{
+    if (channels == nullptr || count != 2)
+        return false;
+    int first = channels[0];
+    int second = channels[1];
+    if (first > second)
+    {
+        const int swap = first;
+        first = second;
+        second = swap;
+    }
+    return first >= 0 && (first & 1) == 0 && second == first + 1 && second < kMaxChannels;
+}
+
+inline const char* stereoLinkBlockedTip() noexcept
+{
+    return "LINK joins an adjacent pair (1-2, 3-4, and so on). It is off because this channel is in a group whose members are not that pair.";
+}
+
+// `groupOf[i]` is the group id, or -1. Members are scanned across `storedChannels`,
+// so a channel past the card still counts. Ungrouped adjacent pairs stay linkable.
+inline bool stereoLinkBlockedByGroups(int channel, int visibleChannels, const int* groupOf, int storedChannels) noexcept
+{
+    if (! canStereoLink(channel, visibleChannels) || groupOf == nullptr)
+        return false;
+    const int left = stereoLeftIndex(channel);
+    const int right = left + 1;
+    const int limit = storedChannels < kMaxChannels ? storedChannels : kMaxChannels;
+    auto blocks = [&](int channelIndex)
+    {
+        if (channelIndex < 0 || channelIndex >= limit)
+            return false;
+        const int group = groupOf[channelIndex];
+        if (group < 0)
+            return false;
+        int members[kMaxChannels];
+        int count = 0;
+        for (int index = 0; index < limit; ++index)
+            if (groupOf[index] == group)
+                members[count++] = index;
+        return ! groupMembersAreAdjacentPair(members, count);
+    };
+    return blocks(left) || blocks(right);
+}
+
 // Right-click on a HOST strip. N is the odd channel's number, so ch 1 says
 // "Stereo link with ch 2". The same words are used from either strip of the pair.
 inline std::string stereoLinkMenuLabel(int channel)

@@ -36,6 +36,10 @@ enum class ShortcutId
     goToChannel,
     makeGroup,
     selectAll,
+    undo,
+    redo,
+    marker,
+    markers,
     count
 };
 
@@ -74,6 +78,14 @@ struct Binding
 };
 
 inline constexpr Binding kBindings[] = {
+    { ShortcutId::redo, KeyKind::character, 'z', 1, 1, 0, "Cmd+Shift+Z",
+      "Put back the mix edit that Cmd+Z removed", true, 'z' },
+    { ShortcutId::undo, KeyKind::character, 'z', 0, 1, 0, "Cmd+Z",
+      "Undo the last mix edit. A take and its WAV files stay", true, 'z' },
+    { ShortcutId::marker, KeyKind::character, 'm', 0, 0, 0, "M",
+      "Drop a marker at the playhead. Recording keeps going", false, 0 },
+    { ShortcutId::markers, KeyKind::character, '6', 0, 0, -1, "6",
+      "Open or close MARKERS", false, 0 },
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
       "Select every visible channel on the REC page and the HOST page", true, 'a' },
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 0, 0, "A",
@@ -180,6 +192,8 @@ inline constexpr int kSaveCommandId = 0x2101;
 inline constexpr int kSaveAsCommandId = 0x2102;
 inline constexpr int kSelectAllCommandId = 0x2103;
 inline constexpr int kMakeGroupCommandId = 0x2104;
+inline constexpr int kUndoCommandId = 0x2105;
+inline constexpr int kRedoCommandId = 0x2106;
 
 // Play/Stop and Record are the only keys that ask the transport to start or
 // stop. While a take is recording and the padlock is on, both are refused.
@@ -199,6 +213,10 @@ inline int commandIdFor(ShortcutId id) noexcept
         return kSelectAllCommandId;
     if (id == ShortcutId::makeGroup)
         return kMakeGroupCommandId;
+    if (id == ShortcutId::undo)
+        return kUndoCommandId;
+    if (id == ShortcutId::redo)
+        return kRedoCommandId;
     return 0;
 }
 
@@ -212,6 +230,10 @@ inline std::optional<ShortcutId> shortcutIdForCommand(int commandId) noexcept
         return ShortcutId::selectAll;
     if (commandId == kMakeGroupCommandId)
         return ShortcutId::makeGroup;
+    if (commandId == kUndoCommandId)
+        return ShortcutId::undo;
+    if (commandId == kRedoCommandId)
+        return ShortcutId::redo;
     return std::nullopt;
 }
 
@@ -316,6 +338,8 @@ inline bool commandApplies(ShortcutId id, int page, bool textFieldFocused) noexc
         return makeGroupShortcutApplies(page, textFieldFocused);
     if (id == ShortcutId::fit)
         return fitShortcutApplies(page, textFieldFocused);
+    if ((id == ShortcutId::undo || id == ShortcutId::redo) && textFieldFocused)
+        return false;
     return true;
 }
 
@@ -376,9 +400,34 @@ inline const char* shortcutMeaning(ShortcutId id)
     return "";
 }
 
+inline constexpr const char* kGigPerformanceCard =
+    "\u00a7 Before a gig / for best performance\n"
+    "Quit other apps. Pause cloud sync. Turn Wi-Fi and Bluetooth off. Turn notifications off, or turn Focus on. "
+    "Plug in the power adapter. Disable sleep. Close unused plugin servers. Set the buffer to 32. "
+    "Raise the buffer to 64 if dropouts appear.\n"
+    "\u00a7 Ennen keikkaa / paras suorituskyky\n"
+    "Sulje muut ohjelmat. Keskeyt\u00e4 pilvisynkronointi. Sammuta Wi-Fi ja Bluetooth. Sammuta ilmoitukset tai laita Focus p\u00e4\u00e4lle. "
+    "Kytke virtal\u00e4hde. Est\u00e4 nukkuminen. Sulje k\u00e4ytt\u00e4m\u00e4tt\u00f6m\u00e4t plugin-palvelimet. Aseta puskuriksi 32. "
+    "Nosta puskuri 64:\u00e4\u00e4n, jos katkoja tulee.\n";
+
 inline constexpr const char* kShortcutNotes =
+    "\u00a7 Before a gig / for best performance\n"
+    "Quit other apps. Pause cloud sync. Turn Wi-Fi and Bluetooth off. Turn notifications off, or turn Focus on. "
+    "Plug in the power adapter. Disable sleep. Close unused plugin servers. Set the buffer to 32. "
+    "Raise the buffer to 64 if dropouts appear.\n"
+    "\u00a7 Ennen keikkaa / paras suorituskyky\n"
+    "Sulje muut ohjelmat. Keskeyt\u00e4 pilvisynkronointi. Sammuta Wi-Fi ja Bluetooth. Sammuta ilmoitukset tai laita Focus p\u00e4\u00e4lle. "
+    "Kytke virtal\u00e4hde. Est\u00e4 nukkuminen. Sulje k\u00e4ytt\u00e4m\u00e4tt\u00f6m\u00e4t plugin-palvelimet. Aseta puskuriksi 32. "
+    "Nosta puskuri 64:\u00e4\u00e4n, jos katkoja tulee.\n"
+    "\n"
     "YouHost — ASENNUSOHJE\n"
     "=====================\n"
+    "\n"
+    "Ennen keikkaa / paras suorituskyky\n"
+    "\n"
+    "Sulje muut ohjelmat. Keskeyt\u00e4 pilvisynkronointi. Sammuta Wi-Fi ja Bluetooth. Sammuta ilmoitukset tai laita Focus p\u00e4\u00e4lle. "
+    "Kytke virtal\u00e4hde. Est\u00e4 nukkuminen. Sulje k\u00e4ytt\u00e4m\u00e4tt\u00f6m\u00e4t plugin-palvelimet. Aseta puskuriksi 32. "
+    "Nosta puskuri 64:\u00e4\u00e4n, jos katkoja tulee.\n"
     "\n"
     "1. Pura zip kaksoisklikkauksella.\n"
     "\n"
@@ -394,6 +443,12 @@ inline constexpr const char* kShortcutNotes =
     "\n"
     "YouHost — INSTALL\n"
     "=================\n"
+    "\n"
+    "Before a gig / for best performance\n"
+    "\n"
+    "Quit other apps. Pause cloud sync. Turn Wi-Fi and Bluetooth off. Turn notifications off, or turn Focus on. "
+    "Plug in the power adapter. Disable sleep. Close unused plugin servers. Set the buffer to 32. "
+    "Raise the buffer to 64 if dropouts appear.\n"
     "\n"
     "1. Unzip the file (double-click).\n"
     "\n"
@@ -459,7 +514,10 @@ inline constexpr const char* kShortcutNotes =
     "Quit asks you to unlock first. Only another click on the padlock unlocks it. There is no keyboard shortcut. "
     "The padlock is red and the banner says RECORDING LOCKED. Unlocked, the padlock is a calm teal. "
     "While recording, HOST stays usable: plugins, editors, bypass, output gain, groups, names, and colours. "
-    "The recording copies the raw input before the plugins.\n"
+    "The recording copies the raw input before the plugins. "
+    "M drops a marker at the playhead while recording or playing and does not stop the take. "
+    "6 opens the marker list. Cmd+Z undoes a mix edit such as a group. Cmd+Shift+Z puts that edit back. "
+    "Undo never deletes a take or a WAV file.\n"
     "New, Open, Open Recent, and quit ask Save, Save As, Don't Save, or Cancel when the session has unsaved changes. "
     "A take that is still recording has to be stopped before the session can close.\n"
     "Record arms the take and the button blinks red. While REC is armed and not recording, the transport shows REC ARMED - press PLAY (or Cmd+Space). "
@@ -522,7 +580,8 @@ inline constexpr const char* kShortcutNotes =
     "write session.youhost once, skip the Backups folder, then continue in that copy. Audio keeps running. "
     "Save As does not run while recording; YouHost asks to stop first. "
     "A progress bar shows the copy.\n"
-    "3, D, 4, 5, and S open that window, or close it when it is already open, including when that window is in front.\n"
+    "3, D, 4, 5, and S open that window, or close it when it is already open, including when that window is in front. "
+    "Opening DROPOUTS, CPU, or LATENCY leaves the others open. The mouse button does the same as 3, 4, and 5.\n"
     "DROPOUTS lists CPU only for channels that have a plugin, and the list scrolls.\n"
     "If YouHost quits unexpectedly, the next launch names the plugin that was loading. "
     "Notes are in youhost.log and crash-journal.txt under Application Support, Ambient Audio, YouHost.\n"

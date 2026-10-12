@@ -17,6 +17,10 @@
 #include "SessionChannels.h"
 #include "SessionDocument.h"
 #include "TimelineLanes.h"
+#include "EditHistory.h"
+#include "EditSnapshot.h"
+#include "Markers.h"
+#include "SyncLost.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -106,6 +110,9 @@ public:
     void drainDropoutLog();
     DropoutSnapshot dropoutSnapshot() const;
     float cpuUsage() const noexcept { return cpuUsage_.load(std::memory_order_relaxed); }
+    int pluginCpuPercent() const noexcept { return pluginCpuPercent_.load(std::memory_order_relaxed); }
+    int callbackCpuPercent() const noexcept { return callbackCpuPercent_.load(std::memory_order_relaxed); }
+    float outputPeakFor(int channel) const noexcept;
 
     PluginCatalogue& pluginCatalogue() noexcept { return *catalogue_; }
     ChannelSnapshot channelSnapshot(int channel) const;
@@ -115,6 +122,7 @@ public:
     void setSlotBypassed(int channel, int slot, bool bypassed);
     void setStereoFold(int channel, int slot, int fold);
     bool stereoLinked(int channel) const noexcept;
+    bool stereoLinkTurnBlocked(int channel) const;
     void setStereoLinked(int channel, bool linked);
     void toggleStereoLink(int channel);
     void setChannelExcluded(int channel, bool excluded);
@@ -149,6 +157,8 @@ public:
     void setChannelColor(int channel, int color);
     int channelGroup(int channel) const;
     void assignChannelsToGroup(const std::vector<int>& channels, int group);
+    void addChannelsToGroup(const std::vector<int>& channels, int group);
+    void removeChannelsFromGroup(const std::vector<int>& channels);
     void clearGroup(int group);
     void setGroupName(int group, const juce::String& name);
     void setGroupColor(int group, int color);
@@ -180,6 +190,17 @@ public:
     void openNamedDevice(const juce::String& name);
     void noteUserChoseDevice(const juce::String& name);
     void transportLocate(std::int64_t sample);
+    void dropMarker();
+    int markerCount() const noexcept { return static_cast<int>(markers_.size()); }
+    std::int64_t markerSample(int index) const;
+    juce::String markerName(int index) const;
+    void setMarkerName(int index, const juce::String& name);
+    int markerRevision() const noexcept { return markerRevision_; }
+    void beginEdit();
+    void endEdit();
+    bool undoEdit();
+    bool redoEdit();
+    void clearEdits();
     void transportJump(int direction);
     void transportNudge(double seconds);
     TransportView transportView() const;
@@ -230,6 +251,8 @@ public:
     void setGlobalKeyListener(juce::KeyListener* listener);
 
     bool deviceLost() const noexcept { return deviceLostBanner_; }
+    bool syncLostVisible() const noexcept { return syncLost_.showAlarm(); }
+    void acknowledgeSyncLost() noexcept { syncLost_.acknowledge(); }
     juce::String rateWarning() const { return rateWarning_; }
     juce::String startupDeviceNote() const { return startupDeviceNote_; }
     bool takeUncleanShutdown();
@@ -277,6 +300,11 @@ private:
     void bumpDisplay();
     void armChannelReset(int channel);
     bool stereoRightIsLinked(int channel) const noexcept;
+    bool openOwnEdit(bool plugins);
+    void closeOwnEdit(bool own);
+    MixSnapshot captureMixSnapshot(bool plugins);
+    void applyMixSnapshot(const MixSnapshot& snapshot);
+    void restorePluginSnapshot(const SessionData& saved);
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void handleDeviceDown();
@@ -310,6 +338,9 @@ private:
     std::atomic<bool> deviceOpen_ { false };
     std::atomic<bool> deviceError_ { false };
     std::atomic<float> cpuUsage_ { 0.0f };
+    std::atomic<int> pluginCpuPercent_ { 0 };
+    std::atomic<int> callbackCpuPercent_ { 0 };
+    std::array<std::atomic<float>, kMaxChannels> outputPeak_ {};
 
     std::unique_ptr<PluginCatalogue> catalogue_;
     std::unique_ptr<PluginRack> rack_;
@@ -361,6 +392,13 @@ private:
     int selectionAnchor_ = 0;
     std::function<void(int)> selectionHandler_;
     int displayRevision_ = 0;
+    std::vector<MarkerPoint> markers_;
+    int markerRevision_ = 0;
+    struct EditStack;
+    std::unique_ptr<EditStack> edits_;
+    int editNest_ = 0;
+    bool applyingEdit_ = false;
+    bool editCapturePlugins_ = false;
 
     juce::String deviceName_ { "No device" };
     juce::String openError_;
@@ -380,6 +418,13 @@ private:
     std::string deviceInventorySignature_;
     std::atomic<bool> closingDevice_ { false };
     bool deviceLostBanner_ = false;
+    SyncLostState syncLost_ {};
+    std::int64_t lastDropoutLogNs_ = 0;
+    int dropoutCoalesceCount_ = 0;
+    int dropoutCoalesceBuffer_ = 0;
+    int dropoutCoalesceDsp_ = 0;
+    int dropoutCoalescePlugins_ = 0;
+    std::int64_t dropoutCoalesceTake_ = -1;
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool awaitingSavedDevice_ = false;

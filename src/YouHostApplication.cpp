@@ -1,4 +1,5 @@
 #include "YouHostApplication.h"
+#include "engine/VersionLabel.h"
 #include "engine/PluginCatalogue.h"
 #include "ui/MainComponent.h"
 #include "ui/Theme.h"
@@ -10,7 +11,7 @@ class YouHostApplication::MainWindow : public juce::DocumentWindow
 {
 public:
     MainWindow(AudioEngine& engine, AppSettings& settings)
-        : DocumentWindow("YouHost", theme::background, DocumentWindow::allButtons),
+        : DocumentWindow(versionLabel(), theme::background, DocumentWindow::allButtons),
           settings_(settings)
     {
         setUsingNativeTitleBar(true);
@@ -54,7 +55,7 @@ const juce::String YouHostApplication::getApplicationName()
 
 const juce::String YouHostApplication::getApplicationVersion()
 {
-    return YOUHOST_VERSION;
+    return juce::String("Beta ") + YOUHOST_VERSION;
 }
 
 bool YouHostApplication::moreThanOneInstanceAllowed()

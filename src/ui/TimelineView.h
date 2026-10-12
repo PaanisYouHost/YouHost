@@ -8,6 +8,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace youhost
 {
@@ -29,6 +31,7 @@ public:
     using LaneProvider = std::function<void(const LanePaint&)>;
 
     void setTransport(const TransportView& view);
+    void setMarkers(const std::vector<std::pair<std::int64_t, juce::String>>& markers);
     void setLaneProvider(LaneProvider provider);
     void setLocateHandler(std::function<void(std::int64_t)> handler);
     void setHeightHandler(std::function<void(int)> handler);
@@ -116,6 +119,7 @@ private:
     std::function<void(float)> onWaveformGain_;
     std::function<int()> selectedChannel_;
     std::vector<std::vector<int>> laneMembers_;
+    std::vector<std::pair<std::int64_t, juce::String>> rulerMarkers_;
 };
 
 } // namespace youhost

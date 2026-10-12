@@ -100,6 +100,14 @@ TimelineView::~TimelineView()
     laneScrollBar_.removeListener(this);
 }
 
+void TimelineView::setMarkers(const std::vector<std::pair<std::int64_t, juce::String>>& markers)
+{
+    if (rulerMarkers_ == markers)
+        return;
+    rulerMarkers_ = markers;
+    repaint();
+}
+
 void TimelineView::setTransport(const TransportView& view)
 {
     const bool moving = view.mode == TransportMode::playing || view.mode == TransportMode::recording;
@@ -741,6 +749,23 @@ void TimelineView::paint(juce::Graphics& graphics)
         graphics.setColour(juce::Colour(0xff141414));
         const auto label = juce::String::fromUTF8(takeRulerLabelText(takeMarks[markIndex].number, room).c_str());
         graphics.drawText(label, pill, juce::Justification::centred, true);
+    }
+
+    for (const auto& marker : rulerMarkers_)
+    {
+        const float markX = sampleToX(marker.first);
+        if (markX < inner.getX() - 1.0f || markX > inner.getRight() + 1.0f)
+            continue;
+        graphics.setColour(theme::green);
+        graphics.drawLine(markX, header.getBottom(), markX, inner.getBottom(), 1.5f);
+        const auto placed = takeRulerLabelRect(inner.getX(), header.getY(), inner.getWidth(), header.getHeight(), markX, markX + 72.0f);
+        if (placed.width < 8.0f || placed.height < 8.0f)
+            continue;
+        auto pill = juce::Rectangle<float>(placed.x, placed.y, placed.width, placed.height);
+        graphics.setColour(theme::green.withAlpha(0.85f));
+        graphics.fillRoundedRectangle(pill, 3.0f);
+        graphics.setColour(juce::Colour(0xff141414));
+        graphics.drawText(marker.second.isEmpty() ? "MARK" : marker.second, pill, juce::Justification::centred, true);
     }
 
     graphics.setColour(theme::panelEdge);

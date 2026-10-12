@@ -1,6 +1,10 @@
 YouHost — ASENNUSOHJE
 =====================
 
+Ennen keikkaa / paras suorituskyky
+
+Sulje muut ohjelmat. Keskeytä pilvisynkronointi. Sammuta Wi-Fi ja Bluetooth. Sammuta ilmoitukset tai laita Focus päälle. Kytke virtalähde. Estä nukkuminen. Sulje käyttämättömät plugin-palvelimet. Aseta puskuriksi 32. Nosta puskuri 64:ään, jos katkoja tulee.
+
 1. Pura zip kaksoisklikkauksella.
 
 2. Siirrä YouHost.app kansioon Ohjelmat (Applications).
@@ -15,6 +19,10 @@ YouHost — ASENNUSOHJE
 
 YouHost — INSTALL
 =================
+
+Before a gig / for best performance
+
+Quit other apps. Pause cloud sync. Turn Wi-Fi and Bluetooth off. Turn notifications off, or turn Focus on. Plug in the power adapter. Disable sleep. Close unused plugin servers. Set the buffer to 32. Raise the buffer to 64 if dropouts appear.
 
 1. Unzip the file (double-click).
 

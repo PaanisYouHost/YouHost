@@ -17,6 +17,14 @@
 #include "engine/DisplayLayout.h"
 #include "engine/DropoutDetect.h"
 #include "engine/DropoutLog.h"
+#include "engine/CpuMeter.h"
+#include "engine/PlaybackRoute.h"
+#include "engine/SyncLost.h"
+#include "engine/Markers.h"
+#include "engine/GroupEdit.h"
+#include "engine/EditHistory.h"
+#include "engine/MeterClip.h"
+#include "engine/VersionLabel.h"
 #include "engine/LatencyCompensation.h"
 #include "engine/X32Colours.h"
 #include "engine/LatencyCard.h"
@@ -3859,7 +3867,9 @@ void testReleaseChecklist()
     item("status line keeps fixed columns and pads CPU",
          youhost::formatCpuField(7) == "CPU   7%" && youhost::formatCpuField(42) == "CPU  42%"
              && youhost::formatCpuField(100) == "CPU 100%" && youhost::formatCpuField(-4) == "CPU   0%"
-             && youhost::formatCpuField(140) == "CPU 100%"
+             && youhost::formatCpuField(140) == "CPU 140%"
+             && youhost::formatCpuField(999) == "CPU 999%"
+             && youhost::formatCpuField(1400) == "CPU 999%"
              && shortLine.size() == longLine.size()
              && shortLine.size() == static_cast<std::size_t>(youhost::statusLineChars())
              && offlineSeparated && cutKeepsGap);
@@ -3938,12 +3948,14 @@ void testReleaseChecklist()
              && youhost::chooseStartupDevice("", "", virtualOnly).empty()
              && youhost::chooseStartupDevice("", "Pro Tools Audio Bridge 32", virtualOnly) == "Pro Tools Audio Bridge 32");
 
-    const auto lockedPath = mainUi.find("if (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost())");
-    const auto sampleCpu = mainUi.find("engine_.sampleLiveCpu()");
+    const auto sampleCpu = mainUi.find("engine_.sampleLiveCpu();");
+    const auto lockedSkip = mainUi.find("if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))");
+    const auto pollAfterSkip = lockedSkip == std::string::npos ? std::string::npos : mainUi.find("engine_.pollDeviceStats();", lockedSkip);
     const auto gateAt = engineSrc.find("if (! deviceInventoryQueryAllowed");
     const auto scanAfterGate = gateAt == std::string::npos ? std::string::npos : engineSrc.find("type->scanForDevices()", gateAt);
     item("background timers do not scan a locked card",
-         lockedPath != std::string::npos && sampleCpu != std::string::npos && lockedPath < sampleCpu
+         sampleCpu != std::string::npos && lockedSkip != std::string::npos && pollAfterSkip != std::string::npos
+             && sampleCpu < lockedSkip
              && gateAt != std::string::npos && scanAfterGate != std::string::npos);
 
     youhost::RawKey menuA;
@@ -4084,12 +4096,14 @@ void testReleaseChecklist()
              && columns.name.x < columns.delay.x
              && columns.delay.x < columns.plugins.x
              && columns.plugins.x < columns.gain.x
+             && columns.gain.x < columns.output.x
              && std::string(youhost::kHostColumnChannel) == "CH"
              && std::string(youhost::kHostColumnMode) == "MODE"
              && std::string(youhost::kHostColumnName) == "NAME"
              && std::string(youhost::kHostColumnDelay) == "DELAY COMP"
              && std::string(youhost::kHostColumnPlugins) == "PLUGINS"
              && std::string(youhost::kHostColumnGain) == "GAIN"
+             && std::string(youhost::kHostColumnOutput) == "OUT"
              && hostUi.find("columnHeader_") != std::string::npos
              && hostUi.find("rebuildCache") != std::string::npos
              && hostUi.find("drawImageAt") != std::string::npos
@@ -4298,6 +4312,148 @@ void testReleaseChecklist()
              && moveKeys.find("stop()") == std::string::npos
              && help.find("No keyboard shortcut stops that take.") != std::string::npos
              && checklistDoc.find("Locked recording ignores keys") != std::string::npos);
+
+    const auto monitorToggles = sliceBetween(mainUi,
+                                            "void MainComponent::toggleDropouts()",
+                                            "void MainComponent::saveSession()");
+    const auto monitorRaise = sliceBetween(mainUi,
+                                          "void MainComponent::raiseMonitorWindows",
+                                          "void MainComponent::keepMonitorWindowsOpen");
+    int keepOpenCalls = 0;
+    for (std::size_t pos = 0; (pos = monitorToggles.find("keepMonitorWindowsOpen", pos)) != std::string::npos; pos += 1)
+        ++keepOpenCalls;
+    item("DROPOUTS, CPU, and LATENCY stay open together",
+         keepOpenCalls == 3
+             && monitorToggles.find("toggleDropouts") != std::string::npos
+             && monitorRaise.find("setVisible") == std::string::npos
+             && monitorRaise.find("&dropouts_") != std::string::npos
+             && monitorRaise.find("&cpu_") != std::string::npos
+             && monitorRaise.find("latencyWindow_") != std::string::npos
+             && mainUi.find("dropoutsButton_.onClick = [this] { toggleDropouts(); };") != std::string::npos
+             && mainUi.find("cpuButton_.onClick = [this] { toggleCpu(); };") != std::string::npos
+             && mainUi.find("latencyButton_.onClick = [this] { toggleLatency(); };") != std::string::npos
+             && runKeys.find("toggleDropouts()") != std::string::npos
+             && runKeys.find("toggleCpu()") != std::string::npos
+             && runKeys.find("toggleLatency()") != std::string::npos
+             && help.find("Opening DROPOUTS, CPU, or LATENCY leaves the others open.") != std::string::npos
+             && checklistDoc.find("DROPOUTS, CPU, and LATENCY stay open together") != std::string::npos);
+
+    const auto callbackSlice = sliceBetween(engineSrc,
+                                           "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                           "void AudioEngine::audioDeviceAboutToStart");
+    const auto memberSlice = sliceBetween(engineSrc,
+                                         "void AudioEngine::addChannelsToGroup",
+                                         "void AudioEngine::setGroupName");
+    const auto undoBody = sliceBetween(engineSrc, "bool AudioEngine::undoEdit()", "bool AudioEngine::redoEdit()");
+    const auto markerBody = sliceBetween(engineSrc, "void AudioEngine::dropMarker()", "std::int64_t AudioEngine::markerSample");
+    const auto dspLoad = sliceBetween(rackSrc, "DspLoad PluginRack::dspLoad()", "void PluginRack::deliverOffThreadInstance");
+    const auto helpWindow = sliceBetween(mainUi, "class HelpWindow", "void MainComponent::setPeakMode");
+    const bool membershipVisual = ! memberSlice.empty()
+                                  && memberSlice.find("syncCompensation") == std::string::npos
+                                  && memberSlice.find("setChannelGroups") == std::string::npos
+                                  && memberSlice.find("publishUnlocked") == std::string::npos
+                                  && memberSlice.find("loadPlugin") == std::string::npos
+                                  && memberSlice.find("addMembersToGroup") != std::string::npos
+                                  && memberSlice.find("removeMembersFromGroups") != std::string::npos;
+    const auto outColumns = youhost::layoutHostColumns(960);
+    const auto delayHeader = youhost::delayCompHeaderBox(outColumns);
+    youhost::SyncLostState sync;
+    sync.deviceLost();
+    const bool alarmOn = sync.showAlarm() && sync.keepReattaching();
+    sync.acknowledge();
+    const bool alarmHidden = ! sync.showAlarm() && sync.keepReattaching();
+    sync.deviceReturned();
+    const bool alarmClear = ! sync.showAlarm() && ! sync.keepReattaching();
+    const auto helpText = youhost::shortcutHelpText();
+    const auto gigAt = helpText.find("Before a gig / for best performance");
+    const auto installSteps = helpText.find("1. Unzip the file");
+    item("Real CPU meter",
+         youhost::formatCpuField(140) == "CPU 140%"
+             && youhost::blockCpuPercent(21333333, 512, 48000.0) == 200
+             && youhost::clampCpuPercent(1400) == 999
+             && rackSrc.find("gate->shownPercent.store") != std::string::npos
+             && dspLoad.find("shownPercent.load") != std::string::npos
+             && dspLoad.find("shownPercent.exchange") == std::string::npos
+             && mainUi.find("engine_.pluginCpuPercent()") != std::string::npos
+             && readWorkspaceFile("src/ui/CpuWindow.cpp").find("\"plugins\"") != std::string::npos
+             && checklistDoc.find("Real CPU meter") != std::string::npos);
+    item("Dropout log",
+         youhost::formatDropoutHostLine(3, 48000, 32, 180, 15) == "dropout x3  take 48000  buffer 32  dsp 180%  plugins 15"
+             && youhost::dropoutLogDue(0, 0, 1)
+             && ! youhost::dropoutLogDue(1000, 1, 1)
+             && callbackSlice.find("formatDropoutHostLine") == std::string::npos
+             && engineSrc.find("formatDropoutHostLine") != std::string::npos
+             && checklistDoc.find("Dropout log") != std::string::npos);
+    item("Playback through host",
+         youhost::callbackInput(true) == youhost::CallbackInput::playback
+             && youhost::callbackInput(false) == youhost::CallbackInput::live
+             && youhost::playbackFeedsHostChain(true)
+             && youhost::stopReturnsLiveInput(false)
+             && callbackSlice.find("processPlayback") != std::string::npos
+             && callbackSlice.find("rack_->process") != std::string::npos
+             && checklistDoc.find("Playback through host") != std::string::npos);
+    item("SYNC LOST",
+         alarmOn && alarmHidden && alarmClear
+             && youhost::syncLostBlink(0)
+             && ! youhost::syncLostBlink(400)
+             && mainUi.find("acknowledgeSyncLost") != std::string::npos
+             && mainUi.find("SYNC LOST") != std::string::npos
+             && checklistDoc.find("SYNC LOST") != std::string::npos);
+    item("HOST OUT meter",
+         outColumns.gain.x + outColumns.gain.width == outColumns.output.x
+             && delayHeader.x == outColumns.exclude.x
+             && hostUi.find("outputPeakFor") != std::string::npos
+             && hostUi.find("kHostColumnOutput") != std::string::npos
+             && callbackSlice.find("outputPeak_") != std::string::npos
+             && checklistDoc.find("HOST OUT meter") != std::string::npos);
+    item("Bigger CLIP",
+         youhost::clipBandHeight(200.0f) == 22.0f
+             && youhost::clipBandHeight(100.0f) == 16.0f
+             && readWorkspaceFile("src/ui/MeterGrid.cpp").find("\"CLIP\"") != std::string::npos
+             && checklistDoc.find("Bigger CLIP") != std::string::npos);
+    item("Undo and redo",
+         youhost::commandApplies(youhost::ShortcutId::undo, 2, true) == false
+             && youhost::dispatchRawKey(macLetter('z', false, true, false), 2, false) == youhost::ShortcutId::undo
+             && youhost::dispatchRawKey(macLetter('z', true, true, false), 2, false) == youhost::ShortcutId::redo
+             && ! youhost::dispatchRawKey(macLetter('z', false, true, false), 2, true).has_value()
+             && undoBody.find("recorder_->stop") == std::string::npos
+             && undoBody.find("deleteFile") == std::string::npos
+             && checklistDoc.find("Undo and redo") != std::string::npos);
+    item("Add and remove group members",
+         membershipVisual && checklistDoc.find("Adding channels to an existing group") != std::string::npos);
+    item("Channel name outline",
+         readWorkspaceFile("src/ui/MeterGrid.cpp").find("editingChannel_ != cell.channel") != std::string::npos
+             && hostUi.find("! name_.isBeingEdited()") != std::string::npos
+             && checklistDoc.find("Channel name outline") != std::string::npos);
+    item("LINK greyed when the group is not a pair",
+         youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, 0, -1 }.data(), 4)
+             && ! youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, -1, -1 }.data(), 4)
+             && hostUi.find("stereoLinkBlockedTip") != std::string::npos
+             && checklistDoc.find("LINK is grey") != std::string::npos);
+    item("Before a gig",
+         gigAt != std::string::npos && installSteps != std::string::npos && gigAt < installSteps
+             && helpWindow.find("kGigPerformanceCard") != std::string::npos
+             && readWorkspaceFile("INSTALL.md").find("Ennen keikkaa / paras suorituskyky") != std::string::npos
+             && checklistDoc.find("Before a gig") != std::string::npos);
+    item("Version label",
+         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.0"
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.0") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-${VERSION}-macOS.zip") != std::string::npos
+             && engineSrc.find("savedWith") != std::string::npos
+             && checklistDoc.find("Version label") != std::string::npos);
+    item("Markers",
+         ! youhost::markerDropAffectsTransport()
+             && youhost::markerDropAllowedWhileLocked()
+             && youhost::dispatchRawKey(macLetter('m', false, false, false), 1, false) == youhost::ShortcutId::marker
+             && ! youhost::shortcutAsksTransport(youhost::ShortcutId::marker)
+             && markerBody.find("stop(") == std::string::npos
+             && mainUi.find("markerButton_") != std::string::npos
+             && checklistDoc.find("| Markers |") != std::string::npos);
+    item("Mono fold stays 2/2",
+         youhost::pluginProcessCallsForPair(true, true) == 1
+             && std::string(youhost::stereoFoldToken(youhost::StereoFold::left)) == "L"
+             && youhost::stereoFoldFromInt(0) == youhost::StereoFold::left
+             && checklistDoc.find("Mono fold stays 2/2") != std::string::npos);
 
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
@@ -4574,6 +4730,149 @@ void testNaNStereoAndColumns()
     CHECK(header.plugins.x + header.plugins.width == header.gain.x);
 }
 
+void testBeta090()
+{
+    const double periodNs = (512.0 / 48000.0) * 1.0e9;
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs), 512, 48000.0) == 100);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 2.0), 512, 48000.0) == 200);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 20.0), 512, 48000.0) == 999);
+    CHECK(youhost::blockCpuPercent(0, 512, 48000.0) == 0);
+    CHECK(youhost::smoothCpuPercent(0, 100) == 50);
+    CHECK(youhost::smoothCpuPercent(50, 100) == 75);
+    CHECK(youhost::smoothCpuPercent(2000, -4) == 499);
+
+    const auto started = std::chrono::steady_clock::now();
+    int shown = 0;
+    for (int block = 0; block < 1000000; ++block)
+        shown = youhost::smoothCpuPercent(shown, youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs), 512, 48000.0));
+    const auto cpuUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+    std::cout << "cpu meter arithmetic 1000000 blocks in " << cpuUs << " us, settled " << shown << "\n";
+    CHECK(shown == 100);
+    CHECK(cpuUs < 250000);
+
+    CHECK(youhost::formatDropoutHostLine(1, -1, 64, 40, 15) == "dropout x1  buffer 64  dsp 40%  plugins 15");
+    CHECK(youhost::dropoutLogDue(500000001, 1, 2));
+    int falling = 1;
+    for (int step = 0; step < 8; ++step)
+        falling = youhost::smoothCpuPercent(falling, 0);
+    CHECK(falling == 0);
+    CHECK(! youhost::dropoutLogDue(10, 1, 0));
+
+    audioAllocations.store(0);
+    inAudioCallback = true;
+    youhost::DropoutRing ring;
+    for (int index = 0; index < 600; ++index)
+        ring.push(index + 1, 48000, true, 32, 180, 15);
+    youhost::DropoutMark drained[8];
+    const int got = ring.drain(drained, 8);
+    int groupOf[youhost::kMaxChannels];
+    for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+        groupOf[channel] = -1;
+    bool used[youhost::kMaxDisplayGroups] {};
+    const auto editStarted = std::chrono::steady_clock::now();
+    for (int pass = 0; pass < 10000; ++pass)
+    {
+        int channels[8] = { 0, 1, 2, 3, 10, 11, 40, 41 };
+        youhost::addMembersToGroup(groupOf, youhost::kMaxChannels, 2, channels, 8, used);
+        int emptied[youhost::kMaxDisplayGroups];
+        youhost::removeMembersFromGroups(groupOf, youhost::kMaxChannels, channels, 8, emptied, youhost::kMaxDisplayGroups);
+    }
+    const auto editUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - editStarted).count();
+    const int allocations = audioAllocations.load();
+    inAudioCallback = false;
+    std::cout << "group membership 10000 add/remove passes in " << editUs << " us, audio allocations " << allocations << "\n";
+    CHECK(got == 8);
+    CHECK(drained[0].bufferSamples == 32);
+    CHECK(drained[0].dspPercent == 180);
+    CHECK(drained[0].pluginCount == 15);
+    CHECK(allocations == 0);
+    CHECK(editUs < 250000);
+    CHECK(groupOf[0] == -1);
+    CHECK(used[2]);
+
+    int wide[4] = { 0, 1, 2, -1 };
+    CHECK(youhost::stereoLinkBlockedByGroups(0, 16, wide, 4));
+    int pair[4] = { 0, 0, -1, -1 };
+    CHECK(! youhost::stereoLinkBlockedByGroups(0, 16, pair, 4));
+    int none[4] = { -1, -1, -1, -1 };
+    CHECK(! youhost::stereoLinkBlockedByGroups(0, 16, none, 4));
+    CHECK(! youhost::groupMembersAreAdjacentPair(wide, 3));
+    int adjacent[2] = { 2, 3 };
+    CHECK(youhost::groupMembersAreAdjacentPair(adjacent, 2));
+
+    CHECK(youhost::playbackFeedsHostChain(true));
+    CHECK(! youhost::playbackFeedsHostChain(false));
+    CHECK(youhost::stopReturnsLiveInput(false));
+    CHECK(! youhost::stopReturnsLiveInput(true));
+
+    const auto marker = youhost::makeMarker(96000, 3);
+    CHECK(marker.sample == 96000);
+    CHECK(marker.name == "Marker 3");
+    CHECK(youhost::makeMarker(-8, 0).sample == 0);
+    CHECK(youhost::markerRulerText("") == "MARK");
+    CHECK(youhost::markerRulerText("Verse") == "Verse");
+    CHECK(! youhost::markerDropAffectsTransport());
+    CHECK(youhost::markerDropAllowedWhileLocked());
+
+    youhost::SessionDocumentModel model;
+    model.savedWith = "YouHost Beta 0.9.0";
+    youhost::SessionMarkerRecord stored;
+    stored.sample = 96000;
+    stored.name = "Verse";
+    model.markers.push_back(stored);
+    youhost::SessionTakeRecord take;
+    take.start = 0;
+    take.length = 192000;
+    model.takes.push_back(take);
+    const auto written = youhost::writeSessionModel(model);
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(written, round));
+    CHECK(round.savedWith == "YouHost Beta 0.9.0");
+    CHECK(round.markers.size() == 1);
+    CHECK(round.markers[0].name == "Verse");
+    CHECK(round.markers[0].sample == 96000);
+    CHECK(round.takes.size() == 1);
+    CHECK(round.takes[0].length == 192000);
+
+    struct MixStep
+    {
+        int group = -1;
+        std::string name;
+    };
+    youhost::EditHistory<MixStep> history;
+    history.push(MixStep { -1, "Kick" });
+    MixStep restored;
+    CHECK(history.undo(MixStep { 3, "Kick" }, restored));
+    CHECK(restored.group == -1);
+    CHECK(restored.name == "Kick");
+    MixStep redone;
+    CHECK(history.redo(restored, redone));
+    CHECK(redone.group == 3);
+    CHECK(history.undoDepth() == 1);
+    CHECK(! history.canRedo());
+
+    const auto markerKey = youhost::dispatchRawKey(macLetter('m', false, false, false), 1, false);
+    CHECK(markerKey == youhost::ShortcutId::marker);
+    CHECK(! youhost::dispatchRawKey(macLetter('m', false, false, false), 1, true).has_value());
+    CHECK(! youhost::shortcutAsksTransport(youhost::ShortcutId::marker));
+    CHECK(youhost::dispatchRawKey(macLetter('6', false, false, false), 1, false) == youhost::ShortcutId::markers);
+
+    const auto columns = youhost::layoutHostColumns(960);
+    CHECK(columns.output.x >= columns.gain.x + columns.gain.width);
+    CHECK(youhost::delayCompHeaderBox(columns).x == columns.exclude.x);
+    CHECK(youhost::delayCompHeaderBox(columns).width > columns.delay.width);
+    CHECK(youhost::clipBandHeight(10.0f) == 10.0f);
+    CHECK(youhost::clipBandHeight(0.0f) == 0.0f);
+
+    const auto guide = readWorkspaceFile("INSTALL.md");
+    const auto finnish = guide.find("Ennen keikkaa / paras suorituskyky");
+    const auto english = guide.find("Before a gig / for best performance");
+    const auto step = guide.find("1. Pura zip");
+    CHECK(finnish != std::string::npos && english != std::string::npos && step != std::string::npos);
+    CHECK(finnish < step && english < guide.find("1. Unzip"));
+    CHECK(youhost::shortcutHelpText().find(youhost::kGigPerformanceCard) != std::string::npos);
+}
+
 } // namespace
 
 int main()
@@ -4631,6 +4930,7 @@ int main()
     testDeviceListGrouping();
     testStartupAndSetupShareTheDeviceMenu();
     testScratchSilenceAndRepaint();
+    testBeta090();
     testReleaseChecklist();
 
     if (failures != 0)

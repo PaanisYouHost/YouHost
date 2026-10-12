@@ -16,6 +16,9 @@
 #include "SessionFiles.h"
 #include "SessionNames.h"
 #include "StallWatch.h"
+#include "CpuMeter.h"
+#include "GroupEdit.h"
+#include "VersionLabel.h"
 #include "TakeImport.h"
 
 #include <algorithm>
@@ -233,6 +236,13 @@ juce::String recordingCloseText(bool locked)
     return locked ? juce::String("Unlock recording first.") : juce::String("Stop recording first.");
 }
 
+struct AudioEngine::EditStack
+{
+    EditHistory<MixSnapshot> history;
+    MixSnapshot before;
+    bool haveBefore = false;
+};
+
 AudioEngine::AudioEngine(AppSettings& settings)
     : settings_(settings)
 {
@@ -372,6 +382,7 @@ void AudioEngine::pollDeviceStats()
     if (userChoseThis)
     {
         deviceLostBanner_ = false;
+        syncLost_.deviceReturned();
         lossFinalized_ = false;
         downSinceMs_ = 0;
         deviceDown_.store(false, std::memory_order_relaxed);
@@ -386,6 +397,7 @@ void AudioEngine::pollDeviceStats()
         startupDeviceNote_.clear();
         startupFallbackName_.clear();
         deviceLostBanner_ = false;
+        syncLost_.deviceReturned();
         lossFinalized_ = false;
         downSinceMs_ = 0;
         deviceDown_.store(false, std::memory_order_relaxed);
@@ -402,6 +414,7 @@ void AudioEngine::pollDeviceStats()
     }
 
     deviceLostBanner_ = false;
+        syncLost_.deviceReturned();
     lossFinalized_ = false;
     awaitingSavedDevice_ = false;
     startupDeviceNote_.clear();
@@ -670,6 +683,8 @@ void AudioEngine::silenceLiveState()
 {
     for (auto& strip : strips_)
         clearMeterBallistics(strip);
+    for (auto& peak : outputPeak_)
+        peak.store(0.0f, std::memory_order_relaxed);
     if (playbackScratch_.size() > 0
         && (recorder_ == nullptr || recorder_->view().mode != TransportMode::playing))
         std::fill(playbackScratch_.begin(), playbackScratch_.end(), 0.0f);
@@ -707,9 +722,12 @@ void AudioEngine::noteDropout(int events)
     const bool recording = recorder_ != nullptr && recorder_->isRecording();
     const auto sample = recording ? recorder_->playhead() : static_cast<std::int64_t>(-1);
     const auto stamp = steadyNowNs();
+    const int buffer = bufferSamples_.load(std::memory_order_relaxed);
+    const int dsp = rack_ != nullptr ? rack_->livePluginPercent() : 0;
+    const int plugins = StallClock::get().activePlugins.load(std::memory_order_relaxed);
     const int marks = std::min(events, 8);
     for (int index = 0; index < marks; ++index)
-        dropoutRing_.push(stamp, sample, recording);
+        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins);
 }
 
 void AudioEngine::drainDropoutLog()
@@ -744,6 +762,28 @@ void AudioEngine::drainDropoutLog()
                             + juce::String(batch[index].timelineSample) + ","
                             + juce::String(batch[index].recording ? 1 : 0) + "\n");
         }
+    }
+
+    if (count > 0)
+    {
+        dropoutCoalesceCount_ += count;
+        const auto& last = batch[count - 1];
+        dropoutCoalesceBuffer_ = last.bufferSamples;
+        dropoutCoalesceDsp_ = last.dspPercent;
+        dropoutCoalescePlugins_ = last.pluginCount;
+        if (last.recording)
+            dropoutCoalesceTake_ = last.timelineSample;
+    }
+    if (dropoutLogDue(nowSteady, lastDropoutLogNs_, dropoutCoalesceCount_))
+    {
+        appendHostLog(settings_, juce::String::fromUTF8(formatDropoutHostLine(dropoutCoalesceCount_,
+                                                                              dropoutCoalesceTake_,
+                                                                              dropoutCoalesceBuffer_,
+                                                                              dropoutCoalesceDsp_,
+                                                                              dropoutCoalescePlugins_).c_str()));
+        lastDropoutLogNs_ = nowSteady;
+        dropoutCoalesceCount_ = 0;
+        dropoutCoalesceTake_ = -1;
     }
 
     if (lastCpuSampleNs_ == 0 || nowSteady - lastCpuSampleNs_ >= 200000000)
@@ -857,7 +897,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         for (int channel = 0; channel < sessionChannels; ++channel)
         {
             if (! channelIsOn(enabledLow, enabledHigh, channel))
+            {
+                outputPeak_[static_cast<std::size_t>(channel)].store(0.0f, std::memory_order_relaxed);
                 continue;
+            }
             const float gain = finiteTrimGain(outputGain_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed));
             const int packed = config.routing.outputPacked[static_cast<std::size_t>(channel)];
             if (packed < 0 || packed >= numOutputChannels)
@@ -868,6 +911,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             if (! sameFloatBits(gain, 1.0f))
                 applyOutputTrim(output, numSamples, gain);
             sanitizeAudioBlock(output, numSamples);
+            float peak = 0.0f;
+            for (int index = 0; index < numSamples; ++index)
+            {
+                const float sample = output[index];
+                const float absolute = sample < 0.0f ? -sample : sample;
+                if (absolute > peak)
+                    peak = absolute;
+            }
+            const float previous = outputPeak_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
+            const float held = previous * 0.9f;
+            outputPeak_[static_cast<std::size_t>(channel)].store(peak > held ? peak : held, std::memory_order_relaxed);
         }
     }
 
@@ -1070,7 +1124,6 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (deviceName_ != live->getName())
         revealUnsupported_ = false;
     deviceName_ = live->getName();
-    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
 
     const double rate = live->getCurrentSampleRate();
     const int buffer = live->getCurrentBufferSizeSamples();
@@ -1130,6 +1183,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (remember && live->getName() == wantedName_)
     {
         deviceLostBanner_ = false;
+        syncLost_.deviceReturned();
         lossFinalized_ = false;
         awaitingSavedDevice_ = false;
         startupDeviceNote_.clear();
@@ -1156,6 +1210,8 @@ void AudioEngine::handleDeviceDown()
 {
     deviceOpen_.store(false, std::memory_order_relaxed);
     cpuUsage_.store(0.0f, std::memory_order_relaxed);
+    pluginCpuPercent_.store(0, std::memory_order_relaxed);
+    callbackCpuPercent_.store(0, std::memory_order_relaxed);
     deviceName_ = "No device";
     publishSessionChannelLimit();
     if (closingDevice_.load(std::memory_order_acquire) || ! started_)
@@ -1172,6 +1228,7 @@ void AudioEngine::handleDeviceDown()
     {
         lossFinalized_ = true;
         deviceLostBanner_ = true;
+        syncLost_.deviceLost();
         removeOverloadListener();
         if (recorder_ != nullptr)
             recorder_->stop();
@@ -1519,33 +1576,41 @@ void AudioEngine::loadPlugin(int channel, int slot, const juce::PluginDescriptio
 {
     if (stereoRightIsLinked(channel))
         return;
+    const bool ownEdit = openOwnEdit(true);
     if (rack_ != nullptr)
         rack_->loadPlugin(channel, slot, description, {}, false, true, openEditor);
     armChannelReset(channel);
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::removePlugin(int channel, int slot)
 {
+    const bool ownEdit = openOwnEdit(true);
     if (rack_ != nullptr)
         rack_->removePlugin(channel, slot);
     armChannelReset(channel);
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy)
 {
     if (stereoRightIsLinked(toChannel))
         return;
+    const bool ownEdit = openOwnEdit(true);
     if (rack_ != nullptr)
         rack_->transferPlugin(fromChannel, fromSlot, toChannel, toSlot, copy);
     armChannelReset(fromChannel);
     armChannelReset(toChannel);
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setStereoFold(int channel, int slot, int fold)
 {
+    const bool ownEdit = openOwnEdit(true);
     if (rack_ != nullptr)
         rack_->setStereoFold(channel, slot, fold);
     armChannelReset(channel);
+    closeOwnEdit(ownEdit);
 }
 
 bool AudioEngine::stereoLinked(int channel) const noexcept
@@ -1561,9 +1626,16 @@ void AudioEngine::toggleStereoLink(int channel)
     setStereoLinked(channel, ! stereoLinked(channel));
 }
 
+bool AudioEngine::stereoLinkTurnBlocked(int channel) const
+{
+    return stereoLinkBlockedByGroups(channel, visibleChannels(), channelGroup_.data(), kMaxChannels);
+}
+
 void AudioEngine::setStereoLinked(int channel, bool linked)
 {
     if (! canStereoLink(channel, kMaxChannels))
+        return;
+    if (linked && stereoLinkTurnBlocked(channel))
         return;
     const int left = stereoLeftIndex(channel);
     const int right = stereoRightIndex(channel);
@@ -1571,6 +1643,7 @@ void AudioEngine::setStereoLinked(int channel, bool linked)
         return;
     if (stereoLinked_[static_cast<std::size_t>(left)] == linked)
         return;
+    const bool ownEdit = openOwnEdit(false);
     if (linked && rack_ != nullptr)
     {
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
@@ -1583,13 +1656,16 @@ void AudioEngine::setStereoLinked(int channel, bool linked)
     armChannelReset(left);
     armChannelReset(right);
     bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
 {
+    const bool ownEdit = openOwnEdit(true);
     if (rack_ != nullptr)
         rack_->setBypassed(channel, slot, bypassed);
     armChannelReset(channel);
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setChannelExcluded(int channel, bool excluded)
@@ -1637,9 +1713,11 @@ void AudioEngine::setChannelListen(int channel, ChannelListen mode)
         return;
     if (listen_[static_cast<std::size_t>(channel)] == mode)
         return;
+    const bool ownEdit = openOwnEdit(false);
     listen_[static_cast<std::size_t>(channel)] = mode;
     storeChannelOn(channel, channelListenAudible(mode));
     listenFlush_ = true;
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::flushListenEdits()
@@ -1681,15 +1759,21 @@ void AudioEngine::setOutputDb(int channel, float db)
     const float snapped = snapOutputDb(db);
     if (sameFloatBits(snapped, outputDb_[static_cast<std::size_t>(channel)]))
         return;
+    const bool ownEdit = openOwnEdit(false);
     outputDb_[static_cast<std::size_t>(channel)] = snapped;
     outputGain_[static_cast<std::size_t>(channel)].store(outputDbToLinear(snapped), std::memory_order_relaxed);
     noteSessionEdit();
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setBypassAll(bool bypass)
 {
+    if (bypassAll() == bypass)
+        return;
+    const bool ownEdit = openOwnEdit(false);
     if (rack_ != nullptr)
         rack_->setBypassAll(bypass);
+    closeOwnEdit(ownEdit);
 }
 
 bool AudioEngine::bypassAll() const
@@ -1716,9 +1800,11 @@ void AudioEngine::setAlignGroup(int perGroup)
     const int mode = perGroup == 1 ? 1 : 0;
     if (alignGroup_ == mode)
         return;
+    const bool ownEdit = openOwnEdit(false);
     alignGroup_ = mode;
     syncCompensation();
     noteSessionEdit();
+    closeOwnEdit(ownEdit);
 }
 
 int AudioEngine::copyGroupLatency(GroupLatencyLine* out, int capacity) const
@@ -1775,8 +1861,14 @@ bool AudioEngine::isRecordArmed(int channel) const
 
 void AudioEngine::setChannelName(int channel, const juce::String& name)
 {
-    if (recorder_ != nullptr)
-        recorder_->setChannelName(channel, name);
+    if (recorder_ == nullptr)
+        return;
+    if (recorder_->channelName(channel) == name)
+        return;
+    const bool ownEdit = openOwnEdit(false);
+    recorder_->setChannelName(channel, name);
+    noteSessionEdit();
+    closeOwnEdit(ownEdit);
 }
 
 juce::String AudioEngine::channelName(int channel) const
@@ -2059,12 +2151,20 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
 
 void AudioEngine::sampleLiveCpu()
 {
-    if (offlineTemplate_ || ! deviceOpen_.load(std::memory_order_relaxed))
+    if (offlineTemplate_ || ! deviceOpen_.load(std::memory_order_relaxed) || rack_ == nullptr)
     {
         cpuUsage_.store(0.0f, std::memory_order_relaxed);
+        pluginCpuPercent_.store(0, std::memory_order_relaxed);
+        callbackCpuPercent_.store(0, std::memory_order_relaxed);
         return;
     }
-    cpuUsage_.store(static_cast<float>(deviceManager_.getCpuUsage()), std::memory_order_relaxed);
+    const auto load = rack_->dspLoad();
+    const int plugins = clampCpuPercent(rack_->livePluginPercent());
+    const int callback = clampCpuPercent(juce::roundToInt(load.callbackPercent));
+    pluginCpuPercent_.store(plugins, std::memory_order_relaxed);
+    callbackCpuPercent_.store(callback, std::memory_order_relaxed);
+    const float graph = load.callbackPercent / 100.0f;
+    cpuUsage_.store(graph > 0.0f ? graph : 0.0f, std::memory_order_relaxed);
 }
 
 void AudioEngine::openNamedDevice(const juce::String& name)
@@ -2229,6 +2329,9 @@ void AudioEngine::resetToCleanSession()
     if (timelineHandler_ != nullptr)
         timelineHandler_({});
     syncCompensation();
+    markers_.clear();
+    ++markerRevision_;
+    clearEdits();
     ++displayRevision_;
     sessionMessage_ = "New session. Choose a name and a folder.";
 }
@@ -2519,6 +2622,15 @@ SessionData AudioEngine::captureSessionData()
     data.preserved = preservedSession_;
     if (timelineProvider_)
         data.timeline = timelineProvider_();
+    data.savedWith = juce::String(versionLabel());
+    data.markers.clear();
+    for (const auto& marker : markers_)
+    {
+        SessionMarker stored;
+        stored.sample = marker.sample;
+        stored.name = juce::String::fromUTF8(marker.name.c_str());
+        data.markers.push_back(std::move(stored));
+    }
     return data;
 }
 
@@ -2698,6 +2810,16 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     lastBackupMs_ = 0;
     restoringSession_ = false;
     dropoutHeaderWritten_ = false;
+    markers_.clear();
+    for (const auto& marker : data.markers)
+    {
+        MarkerPoint point;
+        point.sample = marker.sample;
+        point.name = marker.name.toStdString();
+        markers_.push_back(std::move(point));
+    }
+    ++markerRevision_;
+    clearEdits();
     if (rack_ != nullptr)
         rack_->pumpSessionLoads();
     return true;
@@ -3037,6 +3159,7 @@ void AudioEngine::setChannelColor(int channel, int color)
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
+    const bool ownEdit = openOwnEdit(false);
     const auto index = static_cast<std::size_t>(channel);
     const int group = channelGroup_[index];
     const int groupHue = (group >= 0 && group < kMaxDisplayGroups)
@@ -3047,6 +3170,7 @@ void AudioEngine::setChannelColor(int channel, int color)
     channelColor_[index] = paint.color;
     channelColorOwn_[index] = paint.own;
     bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 int AudioEngine::channelGroup(int channel) const
@@ -3060,6 +3184,7 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
 {
     if (group >= kMaxDisplayGroups)
         return;
+    const bool ownEdit = openOwnEdit(false);
     if (group >= 0)
     {
         auto& stored = groups_[static_cast<std::size_t>(group)];
@@ -3088,12 +3213,14 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
     }
     // Groups are visual only. Membership does not publish a graph or recompute delay.
     bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::clearGroup(int group)
 {
     if (group < 0 || group >= kMaxDisplayGroups)
         return;
+    const bool ownEdit = openOwnEdit(false);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
         const auto index = static_cast<std::size_t>(channel);
@@ -3108,23 +3235,86 @@ void AudioEngine::clearGroup(int group)
     // Removing a group leaves every plugin instance, delay line, and scratch buffer alone.
     groups_[static_cast<std::size_t>(group)] = {};
     bumpDisplay();
+    closeOwnEdit(ownEdit);
+}
+
+void AudioEngine::addChannelsToGroup(const std::vector<int>& channels, int group)
+{
+    if (group < 0 || group >= kMaxDisplayGroups || channels.empty())
+        return;
+    const bool ownEdit = openOwnEdit(false);
+    bool used[kMaxDisplayGroups] {};
+    for (int index = 0; index < kMaxDisplayGroups; ++index)
+        used[index] = groups_[static_cast<std::size_t>(index)].used;
+    addMembersToGroup(channelGroup_.data(), kMaxChannels, group, channels.data(), static_cast<int>(channels.size()), used);
+    groups_[static_cast<std::size_t>(group)].used = used[group];
+    const int hue = groups_[static_cast<std::size_t>(group)].color;
+    for (int channel : channels)
+    {
+        if (channel < 0 || channel >= kMaxChannels)
+            continue;
+        if (channelGroup_[static_cast<std::size_t>(channel)] != group)
+            continue;
+        ChannelPaint paint { channelColor_[static_cast<std::size_t>(channel)], channelColorOwn_[static_cast<std::size_t>(channel)] };
+        followGroupColor(paint, hue);
+        channelColor_[static_cast<std::size_t>(channel)] = paint.color;
+        channelColorOwn_[static_cast<std::size_t>(channel)] = paint.own;
+    }
+    bumpDisplay();
+    closeOwnEdit(ownEdit);
+}
+
+void AudioEngine::removeChannelsFromGroup(const std::vector<int>& channels)
+{
+    if (channels.empty())
+        return;
+    const bool ownEdit = openOwnEdit(false);
+    int previous[kMaxChannels];
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        previous[channel] = -1;
+    for (int channel : channels)
+        if (channel >= 0 && channel < kMaxChannels)
+            previous[channel] = channelGroup_[static_cast<std::size_t>(channel)];
+    int emptied[kMaxDisplayGroups] {};
+    const int emptiedCount = removeMembersFromGroups(channelGroup_.data(),
+                                                     kMaxChannels,
+                                                     channels.data(),
+                                                     static_cast<int>(channels.size()),
+                                                     emptied,
+                                                     kMaxDisplayGroups);
+    for (int channel : channels)
+    {
+        if (channel < 0 || channel >= kMaxChannels || previous[channel] < 0)
+            continue;
+        ChannelPaint paint { channelColor_[static_cast<std::size_t>(channel)], channelColorOwn_[static_cast<std::size_t>(channel)] };
+        leaveGroupColor(paint);
+        channelColor_[static_cast<std::size_t>(channel)] = paint.color;
+        channelColorOwn_[static_cast<std::size_t>(channel)] = paint.own;
+    }
+    for (int index = 0; index < emptiedCount; ++index)
+        groups_[static_cast<std::size_t>(emptied[index])] = {};
+    bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setGroupName(int group, const juce::String& name)
 {
     if (group < 0 || group >= kMaxDisplayGroups)
         return;
+    const bool ownEdit = openOwnEdit(false);
     auto& stored = groups_[static_cast<std::size_t>(group)];
     stored.used = true;
     const auto trimmed = name.trim().substring(0, 40);
     stored.name = trimmed.isEmpty() ? "Group " + juce::String(group + 1) : trimmed;
     bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 void AudioEngine::setGroupColor(int group, int color)
 {
     if (group < 0 || group >= kMaxDisplayGroups)
         return;
+    const bool ownEdit = openOwnEdit(false);
     auto& stored = groups_[static_cast<std::size_t>(group)];
     stored.used = true;
     stored.color = normaliseX32Colour(color);
@@ -3139,6 +3329,7 @@ void AudioEngine::setGroupColor(int group, int color)
         channelColorOwn_[index] = paint.own;
     }
     bumpDisplay();
+    closeOwnEdit(ownEdit);
 }
 
 juce::String AudioEngine::groupName(int group) const
@@ -3285,6 +3476,254 @@ bool AudioEngine::isChannelSelected(int channel) const
 std::vector<int> AudioEngine::selectedChannels() const
 {
     return selection_;
+}
+
+float AudioEngine::outputPeakFor(int channel) const noexcept
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return 0.0f;
+    return outputPeak_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed);
+}
+
+void AudioEngine::dropMarker()
+{
+    const std::int64_t sample = recorder_ != nullptr ? recorder_->playhead() : static_cast<std::int64_t>(0);
+    markers_.push_back(makeMarker(sample, markerCount() + 1));
+    ++markerRevision_;
+    noteSessionEdit();
+}
+
+std::int64_t AudioEngine::markerSample(int index) const
+{
+    if (index < 0 || index >= markerCount())
+        return 0;
+    return markers_[static_cast<std::size_t>(index)].sample;
+}
+
+juce::String AudioEngine::markerName(int index) const
+{
+    if (index < 0 || index >= markerCount())
+        return {};
+    return juce::String::fromUTF8(markers_[static_cast<std::size_t>(index)].name.c_str());
+}
+
+void AudioEngine::setMarkerName(int index, const juce::String& name)
+{
+    if (index < 0 || index >= markerCount())
+        return;
+    const auto trimmed = name.trim().substring(0, 40);
+    markers_[static_cast<std::size_t>(index)].name = (trimmed.isEmpty() ? "Marker " + juce::String(index + 1) : trimmed).toStdString();
+    ++markerRevision_;
+    noteSessionEdit();
+}
+
+bool AudioEngine::openOwnEdit(bool plugins)
+{
+    if (applyingEdit_ || editNest_ > 0)
+        return false;
+    if (plugins)
+        editCapturePlugins_ = true;
+    beginEdit();
+    return true;
+}
+
+void AudioEngine::closeOwnEdit(bool own)
+{
+    if (own)
+        endEdit();
+}
+
+MixSnapshot AudioEngine::captureMixSnapshot(bool plugins)
+{
+    MixSnapshot snapshot;
+    snapshot.align = alignGroup_;
+    snapshot.bypassAll = bypassAll();
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        snapshot.names[index] = channelName(channel).toStdString();
+        snapshot.color[index] = channelColor_[index];
+        snapshot.colorOwn[index] = channelColorOwn_[index] ? 1 : 0;
+        snapshot.group[index] = channelGroup_[index];
+        snapshot.listen[index] = static_cast<int>(listen_[index]);
+        snapshot.outputDb[index] = outputDb_[index];
+        snapshot.linked[index] = stereoLinked_[index] ? 1 : 0;
+        snapshot.exclude[index] = strips_[index].excludeFromCompensation ? 1 : 0;
+    }
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+    {
+        const auto index = static_cast<std::size_t>(group);
+        snapshot.groups[index].used = groups_[index].used;
+        snapshot.groups[index].collapsed = groups_[index].collapsed;
+        snapshot.groups[index].color = groups_[index].color;
+        snapshot.groups[index].name = groups_[index].name.toStdString();
+    }
+    if (plugins && rack_ != nullptr)
+    {
+        snapshot.hasPlugins = true;
+        rack_->captureSession(snapshot.plugins);
+    }
+    return snapshot;
+}
+
+void AudioEngine::applyMixSnapshot(const MixSnapshot& snapshot)
+{
+    applyingEdit_ = true;
+    alignGroup_ = snapshot.align == 1 ? 1 : 0;
+    bool listenChanged = false;
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        const auto index = static_cast<std::size_t>(channel);
+        const auto name = juce::String::fromUTF8(snapshot.names[index].c_str());
+        if (recorder_ != nullptr && recorder_->channelName(channel) != name)
+            recorder_->setChannelName(channel, name);
+        channelColor_[index] = snapshot.color[index];
+        channelColorOwn_[index] = snapshot.colorOwn[index] != 0;
+        channelGroup_[index] = snapshot.group[index];
+        const auto mode = static_cast<ChannelListen>(snapshot.listen[index]);
+        if (listen_[index] != mode)
+        {
+            listen_[index] = mode;
+            storeChannelOn(channel, channelListenAudible(mode));
+            if (recorder_ != nullptr)
+                recorder_->setArmed(channel, channelListenRecords(mode));
+            listenChanged = true;
+        }
+        if (! sameFloatBits(outputDb_[index], snapshot.outputDb[index]))
+        {
+            outputDb_[index] = snapshot.outputDb[index];
+            outputGain_[index].store(outputDbToLinear(snapshot.outputDb[index]), std::memory_order_relaxed);
+        }
+        const bool wantLink = snapshot.linked[index] != 0;
+        if (stereoLinked_[index] != wantLink)
+            stereoLinked_[index] = wantLink;
+        const bool wantExclude = snapshot.exclude[index] != 0;
+        if (strips_[index].excludeFromCompensation != wantExclude)
+        {
+            strips_[index].excludeFromCompensation = wantExclude;
+            if (rack_ != nullptr)
+                rack_->setExcluded(channel, wantExclude);
+        }
+    }
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+    {
+        const auto index = static_cast<std::size_t>(group);
+        groups_[index].used = snapshot.groups[index].used;
+        groups_[index].collapsed = snapshot.groups[index].collapsed;
+        groups_[index].color = snapshot.groups[index].color;
+        groups_[index].name = juce::String::fromUTF8(snapshot.groups[index].name.c_str());
+    }
+    if (rack_ != nullptr)
+    {
+        for (int channel = 0; channel < kMaxChannels; channel += 2)
+            rack_->setStereoLink(channel, stereoLinked_[static_cast<std::size_t>(channel)]);
+    }
+    if (bypassAll() != snapshot.bypassAll && rack_ != nullptr)
+        rack_->setBypassAll(snapshot.bypassAll);
+    juce::ignoreUnused(listenChanged);
+    applyingEdit_ = false;
+    bumpDisplay();
+    if (snapshot.hasPlugins)
+        restorePluginSnapshot(snapshot.plugins);
+}
+
+void AudioEngine::restorePluginSnapshot(const SessionData& saved)
+{
+    if (rack_ == nullptr)
+        return;
+    const bool wasApplying = applyingEdit_;
+    applyingEdit_ = true;
+    SessionData now;
+    rack_->captureSession(now);
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& want = saved.channels[static_cast<std::size_t>(channel)].slots[static_cast<std::size_t>(slot)];
+            const auto& have = now.channels[static_cast<std::size_t>(channel)].slots[static_cast<std::size_t>(slot)];
+            if (have.occupied && ! want.occupied)
+                rack_->removePlugin(channel, slot);
+            else if (want.occupied && ! have.occupied)
+                rack_->loadPlugin(channel, slot, want.description, want.state, want.bypassed, false, false, want.stereoFold);
+            else if (want.occupied && have.occupied)
+            {
+                if (want.bypassed != have.bypassed)
+                    rack_->setBypassed(channel, slot, want.bypassed);
+                if (want.stereoFold != have.stereoFold)
+                    rack_->setStereoFold(channel, slot, want.stereoFold);
+            }
+        }
+    }
+    applyingEdit_ = wasApplying;
+}
+
+void AudioEngine::beginEdit()
+{
+    if (applyingEdit_)
+        return;
+    if (edits_ == nullptr)
+        edits_ = std::make_unique<EditStack>();
+    if (editNest_++ == 0)
+    {
+        edits_->before = captureMixSnapshot(editCapturePlugins_);
+        edits_->haveBefore = true;
+    }
+}
+
+void AudioEngine::endEdit()
+{
+    if (applyingEdit_)
+        return;
+    if (editNest_ <= 0)
+        return;
+    if (--editNest_ != 0)
+        return;
+    editCapturePlugins_ = false;
+    if (edits_ == nullptr || ! edits_->haveBefore)
+        return;
+    const auto after = captureMixSnapshot(false);
+    if (edits_->before.hasPlugins || ! mixFieldsEqual(edits_->before, after))
+        edits_->history.push(std::move(edits_->before));
+    edits_->haveBefore = false;
+}
+
+bool AudioEngine::undoEdit()
+{
+    if (edits_ == nullptr || ! edits_->history.canUndo())
+        return false;
+    const auto* top = edits_->history.undoTop();
+    const bool plugins = top != nullptr && top->hasPlugins;
+    auto current = captureMixSnapshot(plugins);
+    MixSnapshot restored;
+    if (! edits_->history.undo(std::move(current), restored))
+        return false;
+    applyMixSnapshot(restored);
+    return true;
+}
+
+bool AudioEngine::redoEdit()
+{
+    if (edits_ == nullptr || ! edits_->history.canRedo())
+        return false;
+    const auto* top = edits_->history.redoTop();
+    const bool plugins = top != nullptr && top->hasPlugins;
+    auto current = captureMixSnapshot(plugins);
+    MixSnapshot restored;
+    if (! edits_->history.redo(std::move(current), restored))
+        return false;
+    applyMixSnapshot(restored);
+    return true;
+}
+
+void AudioEngine::clearEdits()
+{
+    editNest_ = 0;
+    editCapturePlugins_ = false;
+    if (edits_ != nullptr)
+    {
+        edits_->history.clear();
+        edits_->haveBefore = false;
+    }
 }
 
 } // namespace youhost

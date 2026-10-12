@@ -52,6 +52,15 @@ private:
     void toggleDropouts();
     void toggleCpu();
     void toggleLatency();
+    void toggleMarkers();
+    enum class MonitorWindow
+    {
+        dropouts,
+        cpu,
+        latency
+    };
+    void raiseMonitorWindows(MonitorWindow front);
+    void keepMonitorWindowsOpen(MonitorWindow front);
     void ensureLogo();
     class BrandMark;
     void openSession();
@@ -84,7 +93,9 @@ private:
         saveCommand = kSaveCommandId,
         saveAsCommand = kSaveAsCommandId,
         selectAllCommand = kSelectAllCommandId,
-        makeGroupCommand = kMakeGroupCommandId
+        makeGroupCommand = kMakeGroupCommandId,
+        undoCommand = kUndoCommandId,
+        redoCommand = kRedoCommandId
     };
 
     AudioEngine& engine_;
@@ -124,6 +135,9 @@ private:
     juce::TextButton cpuButton_ { "4 CPU" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "5 LATENCY" };
+    juce::TextButton markersButton_ { "6 MARKERS" };
+    juce::TextButton markerButton_ { "MARKER" };
+    juce::TextButton syncOk_ { "OK" };
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
@@ -143,6 +157,8 @@ private:
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
     std::unique_ptr<juce::DocumentWindow> helpWindow_;
+    std::unique_ptr<juce::DocumentWindow> markersWindow_;
+    int markerRevisionSeen_ = -1;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;

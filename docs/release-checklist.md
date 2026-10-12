@@ -49,6 +49,7 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Cmd+Q hook | Quit goes through the unsaved-changes prompt. |
 | Record lock | The padlock is the only control that arms the lock. |
 | Locked recording ignores keys | While a take is recording and the padlock is on, Space, Cmd+Space, and every other shortcut leave the take running. Play, Stop, Space, and Cmd+Space do not stop it and do not start another take. Save As and quit ask to unlock and do not stop the take. Arrow keys do not stop it. |
+| DROPOUTS, CPU, and LATENCY stay open together | Clicking 3 DROPOUTS, 4 CPU, or 5 LATENCY opens that window and leaves the others open, the same as the number keys. Each one closes only from its own button, its own key, or its close box. |
 | Device menu flicker | The audio card menu is rebuilt when the device list changes, not on every timer tick. |
 | Show Backups | There is no Show Backups control. Backups still run on their own. |
 | REC lane click | Clicking a channel on the REC page scrolls to that lane and makes it tall enough to read. |
@@ -66,13 +67,25 @@ Per-group latency compensation still reads group membership when the LATENCY swi
 | Mode change while recording | REC, INPUT, and OFF, for one channel and for ALL, on REC and HOST, ask twice while recording. The first warning shows Switch in red. The second is Are you sure? Cancel changes nothing. When not recording there is no dialog. The record lock still blocks the change. |
 | RMS 0 reference | The RMS ruler stays from -60 dBFS to 0 dBFS. Choosing -20, -18, or -14 moves the 0 line and the green/yellow boundary. The top number is the headroom up to 0 dBFS. |
 | Save As speed | Save As writes session.youhost once, copies WAV files on the background disk thread with a fast copy (clonefile when the volume allows), skips Backups, and shows the progress bar. The original folder is not saved first. |
-| HOST column header | The HOST channel list has a fixed header, drawn once into a cache: CH, MODE, NAME, DELAY COMP, PLUGINS, GAIN. It stays put while the channels scroll. |
+| HOST column header | The HOST channel list has a fixed header, drawn once into a cache: CH, MODE, NAME, DELAY COMP, PLUGINS, GAIN, OUT. DELAY COMP starts at the EX button. OUT sits after GAIN. The header stays put while the channels scroll. |
 | Plugin NaN | A plugin that emits NaN or a huge value is replaced with silence or a hard ceiling before it reaches the USB output. Removing the plugin clears that channel's delay line, scratch, and meter, including a latched clip. An empty chain is the dry input. |
-| Stereo link | HOST only. Right-click Stereo link with ch N+1, or LINK, joins 1-2, 3-4, and so on. The even channel's slots are hidden. One stereo plugin processes the pair. Unlink keeps the chain on the odd channel. REC, INPUT, OFF, name, colour, and group stay per channel. The REC page menu has no Stereo link. The recorder still writes one mono WAV per channel. |
+| Stereo link | HOST only. Right-click Stereo link with ch N+1, or LINK, joins 1-2, 3-4, and so on. The even channel's slots are hidden. One stereo plugin processes the pair. Unlink keeps the chain on the odd channel. REC, INPUT, OFF, name, colour, and group stay per channel. The REC page menu has no Stereo link. The recorder still writes one mono WAV per channel. LINK is grey and does nothing when the channel sits in a group whose members are not exactly one adjacent pair. |
 | Plugin list M/ST | Each plugin row shows M, ST, or M/ST from the scanned bus layouts. |
 | Message heartbeat | The 30 Hz timer beats the watchdog before the card-open branch. An open card no longer looks like a growing stall while the message thread is idle. |
 | New, Open, and Offline clear DSP | New, Open, and Offline zero every meter, clip latch, delay line, and per-slot scratch. A poisoned stereo scratch fed silence stays bit-zero, and a cleared meter sits at the -160 dB floor. Parameter and latency callbacks do not paint the whole window. |
-| Groups stay visual | Create, edit, recolour, and Remove group do not call compensation sync or rebuild the plugin graph. Channels that already have plugins keep those instances. A hammer of those edits beside a running callback reports zero xruns. |
+| Groups stay visual | Create, edit, recolour, and Remove group do not call compensation sync or rebuild the plugin graph. Channels that already have plugins keep those instances. A hammer of those edits beside a running callback reports zero xruns. Adding channels to an existing group, or removing them, is the same kind of edit: membership and colour only. |
+| Real CPU meter | The status line and the CPU window hero show the sum of each plugin's own block time, up to 999%. The Audio bar is the callback wall-clock. Each plugin's shown percent is an audio-thread average updated with a plain load and store. |
+| Dropout log | A dropout is written to youhost.log with the take position, buffer, dsp percent, and the full plugin count. Events inside 500 ms share one line. The audio thread only pushes a fixed ring. |
+| Playback through host | Play sends the take through the same plugin chain as the live input. Stop returns the callback to the live input and leaves that chain running. |
+| SYNC LOST | When the card disappears, SYNC LOST blinks in the centre and at the bottom left, and YouHost keeps trying to reopen the card. OK hides the alarm. The reopen continues until the card is back. |
+| HOST OUT meter | Each HOST row has an OUT meter after GAIN. It reads the level after the output trim. New and Offline clear it. |
+| Bigger CLIP | A latched clip on the REC page is a full-width band, at least 16 px tall on a normal strip, with white CLIP text. |
+| Undo and redo | Cmd+Z and Cmd+Shift+Z undo and redo mix edits: names, colours, groups, modes, gain, link, and plugins. A focused text field keeps its own undo. Undo never stops a take or deletes a WAV file. |
+| Channel name outline | REC and HOST draw a thin white outline around a channel name while it is not being edited. |
+| Before a gig | Help opens with Before a gig / for best performance, in English and Finnish, before the shortcut list body. INSTALL.md has the same section before step 1 in both languages. |
+| Version label | The window title, Help, and About say YouHost Beta 0.9.0. A saved session stores that in savedWith. The Mac zip is YouHost-Beta-0.9.0-macOS.zip. |
+| Markers | The MARKER button sits at the right of the transport. M and that button drop a marker at the playhead and do not start, stop, or move the take, including while the record lock is on. 6 opens the marker list. Markers live in the session file only. |
+| Mono fold stays 2/2 | A stereo plugin on a linked pair stays one 2-in/2-out process. Fold L remains the mono fold. Mono 1/1 is not switched on in this build. |
 
 ## Windows to photograph on a Mac release
 

@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 0.1.0
+    VERSION 0.9.0
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -59,6 +59,7 @@ target_compile_definitions(YouHost PRIVATE
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_PLUGINHOST_VST3=1
     YOUHOST_VERSION="${PROJECT_VERSION}"
+    YOUHOST_VERSION_LABEL="YouHost Beta ${PROJECT_VERSION}"
     YOUHOST_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources")
 
 if(APPLE)

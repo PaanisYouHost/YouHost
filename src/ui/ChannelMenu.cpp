@@ -202,6 +202,12 @@ public:
           freeSlot_(freeSlot),
           done_(std::move(done))
     {
+        addAndMakeVisible(target_);
+        target_.addItem("New group", 1);
+        target_.setSelectedId(1, juce::dontSendNotification);
+        for (int group = 0; group < kMaxDisplayGroups; ++group)
+            if (engine_.groupHasMembers(group))
+                target_.addItem(engine_.groupName(group), 100 + group);
         addAndMakeVisible(editor_);
         addAndMakeVisible(ok_);
         addAndMakeVisible(cancel_);
@@ -237,6 +243,8 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(16, 12);
+        target_.setBounds(area.removeFromTop(28));
+        area.removeFromTop(8);
         editor_.setBounds(area.removeFromTop(28));
         area.removeFromTop(8);
         auto swatchRow = area.removeFromTop(28);
@@ -303,15 +311,25 @@ private:
                                        freeSlot_,
                                        editor_.getText().toStdString(),
                                        normaliseX32Colour(color_));
+        if (target_.getSelectedId() >= 100)
+        {
+            finished_ = true;
+            engine_.addChannelsToGroup(selected, target_.getSelectedId() - 100);
+            if (done_ != nullptr)
+                done_(true);
+            return;
+        }
         if (! plan.created)
         {
             dismiss();
             return;
         }
         finished_ = true;
+        engine_.beginEdit();
         engine_.setGroupColor(plan.group, plan.color);
         engine_.setGroupName(plan.group, juce::String::fromUTF8(plan.name.c_str()));
         engine_.assignChannelsToGroup(selected, plan.group);
+        engine_.endEdit();
         if (done_ != nullptr)
             done_(true);
     }
@@ -326,6 +344,7 @@ private:
     }
 
     AudioEngine& engine_;
+    juce::ComboBox target_;
     int freeSlot_ = 0;
     int color_ = 0;
     std::function<void(bool)> done_;
@@ -416,9 +435,18 @@ void showChannelMenu(AudioEngine& engine,
         groups.addItem(20 + group, engine.groupName(group), true, oneGroup == group);
     menu.addSubMenu("Group", groups);
 
+    juce::PopupMenu addToGroup;
+    for (int group = 0; group < kMaxDisplayGroups; ++group)
+        if (engine.groupHasMembers(group))
+            addToGroup.addItem(600 + group, engine.groupName(group));
+    menu.addSubMenu("Add selected to group...", addToGroup);
+    menu.addItem(650, "Remove from group");
+
     const bool offerLink = hostPage && canStereoLink(channel, engine.visibleChannels());
+    const bool linkOn = offerLink && engine.stereoLinked(channel);
+    const bool linkBlocked = offerLink && engine.stereoLinkTurnBlocked(channel) && ! linkOn;
     if (offerLink)
-        menu.addItem(510, stereoLinkMenuLabel(channel), true, engine.stereoLinked(channel));
+        menu.addItem(510, stereoLinkMenuLabel(channel), ! linkBlocked, linkOn);
 
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&target),
                        [&engine, channels, channel, offerLink, beginRename = std::move(beginRename)](int result)
@@ -449,8 +477,18 @@ void showChannelMenu(AudioEngine& engine,
                            else if (result >= 200 && result < 200 + kX32ColourCount)
                            {
                                const int color = result - 200;
+                               engine.beginEdit();
                                for (int chosen : channels)
                                    engine.setChannelColor(chosen, color);
+                               engine.endEdit();
+                           }
+                           else if (result >= 600 && result < 600 + kMaxDisplayGroups)
+                           {
+                               engine.addChannelsToGroup(channels, result - 600);
+                           }
+                           else if (result == 650)
+                           {
+                               engine.removeChannelsFromGroup(channels);
                            }
                            else if (result == 510 && offerLink)
                            {

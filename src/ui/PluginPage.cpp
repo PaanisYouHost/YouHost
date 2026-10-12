@@ -671,6 +671,8 @@ public:
             return;
         }
         dragging_ = true;
+        dragEdit_ = true;
+        engine_.beginEdit();
         startDb_ = engine_.outputDb(channel_);
     }
 
@@ -685,6 +687,9 @@ public:
 
     void mouseUp(const juce::MouseEvent&) override
     {
+        if (dragEdit_)
+            engine_.endEdit();
+        dragEdit_ = false;
         dragging_ = false;
     }
 
@@ -728,6 +733,7 @@ private:
     int channel_ = 0;
     float startDb_ = 0.0f;
     bool dragging_ = false;
+    bool dragEdit_ = false;
     juce::TextEditor editor_;
 };
 
@@ -905,12 +911,17 @@ public:
         const auto snap = engine_.channelSnapshot(channel_);
         const bool canLink = canStereoLink(channel_, std::max(0, engine_.visibleChannels()));
         const bool linked = canLink && engine_.stereoLinked(channel_);
+        const bool linkBlocked = canLink && engine_.stereoLinkTurnBlocked(channel_) && ! linked;
         const bool showSlots = hostPluginSlotsVisible(channel_, linked);
         link_.setVisible(canLink && (channel_ & 1) == 0);
-        link_.setColour(juce::TextButton::buttonColourId, linked ? theme::buttonOn : theme::button);
-        link_.setColour(juce::TextButton::textColourOffId, theme::text);
-        link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
-                         + ". One plugin row for the pair. REC, INPUT, OFF, name, colour, and group stay per channel. Recording stays one mono WAV per channel.");
+        link_.setEnabled(! linkBlocked);
+        link_.setColour(juce::TextButton::buttonColourId, linkBlocked ? theme::panelEdge : linked ? theme::buttonOn : theme::button);
+        link_.setColour(juce::TextButton::textColourOffId, linkBlocked ? theme::fainter : theme::text);
+        if (linkBlocked)
+            link_.setTooltip(stereoLinkBlockedTip());
+        else
+            link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
+                             + ". One plugin row for the pair. REC, INPUT, OFF, name, colour, and group stay per channel. Recording stays one mono WAV per channel.");
         linkedNote_.setVisible(linked && ! showSlots);
         if (linked && ! showSlots)
             linkedNote_.setText("Linked to ch " + juce::String(channel_), juce::dontSendNotification);
@@ -980,6 +991,13 @@ public:
             if (! meterArea_.isEmpty())
                 repaint(meterArea_);
         }
+        const int outputMilli = static_cast<int>(engine_.outputPeakFor(channel_) * 1000.0f);
+        if (outputMilli != outputMilli_)
+        {
+            outputMilli_ = outputMilli;
+            if (! outputMeterArea_.isEmpty())
+                repaint(outputMeterArea_);
+        }
     }
 
     void setListenHandler(std::function<void(int)> handler)
@@ -998,6 +1016,8 @@ public:
                                           std::max(0, columns.meter.width - 6), std::max(0, row.getHeight() - 6));
         exclude_.setBounds(columns.exclude.x, row.getY() + 2, std::max(0, columns.exclude.width - 4), std::max(0, row.getHeight() - 4));
         gain_.setBounds(columns.gain.x + 2, row.getY() + 2, std::max(0, columns.gain.width - 4), std::max(0, row.getHeight() - 4));
+        outputMeterArea_ = juce::Rectangle<int>(columns.output.x + 2, row.getY() + 3,
+                                                std::max(0, columns.output.width - 4), std::max(0, row.getHeight() - 6));
         const int linkWidth = (channel_ & 1) == 0 ? 50 : 0;
         pdc_.setBounds(columns.delay.x, row.getY(), std::max(0, columns.delay.width - linkWidth), row.getHeight());
         link_.setBounds(columns.delay.x + std::max(0, columns.delay.width - 48), row.getY() + 8, 46, 22);
@@ -1053,6 +1073,24 @@ public:
         }
         graphics.setColour(! on ? theme::panelEdge : engine_.clipFor(channel_) ? theme::red : theme::panelEdge);
         graphics.fillRect(meterArea_.getX(), meterArea_.getY(), meterArea_.getWidth(), 3);
+
+        if (! name_.isBeingEdited())
+        {
+            graphics.setColour(juce::Colours::white);
+            graphics.drawRoundedRectangle(name_.getBounds().toFloat().reduced(1.0f), 3.0f, 1.0f);
+        }
+
+        graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
+        graphics.fillRoundedRectangle(outputMeterArea_.toFloat(), 2.0f);
+        const float outputLevel = engine_.outputPeakFor(channel_);
+        if (on && outputLevel > 0.0f && outputMeterArea_.getHeight() > 1)
+        {
+            const float filled = normaliseDb(gainToDb(outputLevel), span) * static_cast<float>(outputMeterArea_.getHeight());
+            auto bar = outputMeterArea_.toFloat();
+            bar.setTop(bar.getBottom() - filled);
+            graphics.setColour(meterLevelColour(outputLevel, referenceDb_));
+            graphics.fillRoundedRectangle(bar, 2.0f);
+        }
     }
 
     void mouseDown(const juce::MouseEvent& event) override
@@ -1183,6 +1221,8 @@ private:
     OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
     juce::Rectangle<int> meterArea_;
+    juce::Rectangle<int> outputMeterArea_;
+    int outputMilli_ = -1;
     std::function<void(int)> onListen_;
 };
 
@@ -1243,9 +1283,12 @@ private:
         draw(kHostColumnChannel, columns.channel);
         draw(kHostColumnMode, columns.mode);
         draw(kHostColumnName, columns.name);
-        draw(kHostColumnDelay, columns.delay);
+        const auto delayHeader = delayCompHeaderBox(columns);
+        graphics.drawFittedText(kHostColumnDelay, delayHeader.x, 0, std::max(0, delayHeader.width), height - 1,
+                                juce::Justification::centredLeft, 1);
         draw(kHostColumnPlugins, columns.plugins);
         draw(kHostColumnGain, columns.gain);
+        draw(kHostColumnOutput, columns.output);
         cachedLayout_ = layoutWidth;
     }
 
