@@ -10,6 +10,14 @@ The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so t
 
 `testReleaseChecklist` is the report for this file. The other tests in that binary stay part of the same gate. A Mac build of the app still has to open every window below, once with no saved size and once with an old small saved size, and the text must be on screen. This test checks that open size instead of a screenshot: there is no display in the unit-test run.
 
+## Groups are purely visual
+
+Groups store a name, a colour, which channels are members, and whether the strips are folded. Create, edit, recolour, and remove — including Remove group while those channels have plugins loaded — must not touch plugin instances, the live graph, compensation delay, or the audio thread. No lock the callback takes, no allocation, no `publish` / graph rebuild, no `prepareToPlay`.
+
+Only plugins, output gain, and stereo link may change audio processing.
+
+Per-group latency compensation still reads group membership when the LATENCY switch is set to Per group, and when a session is loaded or started. A group edit does not refresh that plan. See the release notes for how that switch is wired. Mika decides whether Per group stays.
+
 ## Rules
 
 | Rule | What the test checks |
@@ -63,6 +71,7 @@ The macOS workflow builds this same `YouHostTests` target without `NDEBUG`, so t
 | Plugin list M/ST | Each plugin row shows M, ST, or M/ST from the scanned bus layouts. |
 | Message heartbeat | The 30 Hz timer beats the watchdog before the card-open branch. An open card no longer looks like a growing stall while the message thread is idle. |
 | New, Open, and Offline clear DSP | New, Open, and Offline zero every meter, clip latch, delay line, and per-slot scratch. A poisoned stereo scratch fed silence stays bit-zero, and a cleared meter sits at the -160 dB floor. Parameter and latency callbacks do not paint the whole window. |
+| Groups stay visual | Create, edit, recolour, and Remove group do not call compensation sync or rebuild the plugin graph. Channels that already have plugins keep those instances. A hammer of those edits beside a running callback reports zero xruns. |
 
 ## Windows to photograph on a Mac release
 

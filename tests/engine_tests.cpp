@@ -4152,6 +4152,90 @@ void testReleaseChecklist()
              && rackSrc.find("kRepaintParameter") != std::string::npos
              && rackSrc.find("kRepaintLatency") != std::string::npos);
 
+    const auto sliceBetween = [](const std::string& source, const char* begin, const char* end)
+    {
+        const auto start = source.find(begin);
+        const auto stop = start == std::string::npos ? std::string::npos : source.find(end, start + 1);
+        if (start == std::string::npos || stop == std::string::npos || stop < start)
+            return std::string();
+        return source.substr(start, stop - start);
+    };
+    const auto groupEdits = sliceBetween(engineSrc, "void AudioEngine::assignChannelsToGroup", "bool AudioEngine::groupsAreExpanded");
+    const char* audioWords[] = {
+        "syncCompensation", "setChannelGroups", "publishUnlocked", "prepareToPlay",
+        "buildGraph", "loadPlugin", "removePlugin", "lifeLock_"
+    };
+    bool groupEditsStayVisual = ! groupEdits.empty();
+    for (const char* word : audioWords)
+        groupEditsStayVisual = groupEditsStayVisual && groupEdits.find(word) == std::string::npos;
+
+    // Remove group while plugins are loaded, beside a running callback.
+    // The edit thread only rewrites membership. The callback watches the instances.
+    constexpr int kChannels = 48;
+    constexpr int kSlots = 4;
+    std::array<std::array<int, kSlots>, kChannels> plugins {};
+    for (int channel = 0; channel < kChannels; ++channel)
+        plugins[static_cast<std::size_t>(channel)][0] = 1;
+    std::array<int, youhost::kMaxChannels> membership {};
+    membership.fill(-1);
+    struct VisualGroup
+    {
+        bool used = false;
+        int color = 0;
+        bool collapsed = false;
+    };
+    std::array<VisualGroup, youhost::kMaxDisplayGroups> visual {};
+    std::atomic<int> prepares { 0 };
+    std::atomic<int> publishes { 0 };
+    std::atomic<int> overruns { 0 };
+    std::atomic<int> callbacks { 0 };
+    std::atomic<bool> runCallback { true };
+    std::thread callback([&]
+    {
+        while (runCallback.load(std::memory_order_acquire))
+        {
+            const auto started = std::chrono::steady_clock::now();
+            int loaded = 0;
+            for (int channel = 0; channel < kChannels; ++channel)
+                loaded += plugins[static_cast<std::size_t>(channel)][0];
+            if (loaded != kChannels || prepares.load(std::memory_order_relaxed) != 0
+                || publishes.load(std::memory_order_relaxed) != 0)
+                overruns.fetch_add(1, std::memory_order_relaxed);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+            if (youhost::dropoutOverrunCount(elapsed, 20000000) != 0)
+                overruns.fetch_add(1, std::memory_order_relaxed);
+            callbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    for (int step = 0; step < 300; ++step)
+    {
+        const int group = step % youhost::kMaxDisplayGroups;
+        visual[static_cast<std::size_t>(group)].used = true;
+        visual[static_cast<std::size_t>(group)].color = step % 8;
+        visual[static_cast<std::size_t>(group)].collapsed = true;
+        for (int channel = 0; channel < kChannels; ++channel)
+            if ((channel % youhost::kMaxDisplayGroups) == group)
+                membership[static_cast<std::size_t>(channel)] = group;
+        for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+            if (membership[static_cast<std::size_t>(channel)] == group)
+                membership[static_cast<std::size_t>(channel)] = -1;
+        visual[static_cast<std::size_t>(group)] = {};
+    }
+    runCallback.store(false, std::memory_order_release);
+    callback.join();
+    const auto checklistDoc = readWorkspaceFile("docs/release-checklist.md");
+    item("Groups stay visual",
+         groupEditsStayVisual
+             && groupEdits.find("Removing a group leaves every plugin instance") != std::string::npos
+             && callbacks.load() > 0
+             && overruns.load() == 0
+             && prepares.load() == 0
+             && publishes.load() == 0
+             && checklistDoc.find("Groups are purely visual") != std::string::npos
+             && checklistDoc.find("prepareToPlay") != std::string::npos);
+
     std::cout << "release checklist " << passed << "/" << listed << "\n";
     CHECK(passed == listed);
 }

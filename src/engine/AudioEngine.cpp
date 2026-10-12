@@ -3086,7 +3086,7 @@ void AudioEngine::assignChannelsToGroup(const std::vector<int>& channels, int gr
         channelColor_[index] = paint.color;
         channelColorOwn_[index] = paint.own;
     }
-    syncCompensation();
+    // Groups are visual only. Membership does not publish a graph or recompute delay.
     bumpDisplay();
 }
 
@@ -3105,7 +3105,7 @@ void AudioEngine::clearGroup(int group)
         channelColorOwn_[index] = paint.own;
         channelGroup_[index] = -1;
     }
-    syncCompensation();
+    // Removing a group leaves every plugin instance, delay line, and scratch buffer alone.
     groups_[static_cast<std::size_t>(group)] = {};
     bumpDisplay();
 }
