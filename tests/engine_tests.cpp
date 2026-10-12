@@ -4415,14 +4415,35 @@ void testReleaseChecklist()
              && callbackSlice.find("formatDropoutHostLine") == std::string::npos
              && engineSrc.find("formatDropoutHostLine") != std::string::npos
              && checklistDoc.find("Dropout log") != std::string::npos);
+    const auto recordAt = callbackSlice.find("recorder_->processRecord(inputChannelData");
+    const auto playAt = callbackSlice.find("recorder_->processPlayback(playbackPtrs_");
+    const auto playCopyAt = callbackSlice.find("processPassthrough(playbackPtrs_");
+    const auto liveCopyAt = callbackSlice.find("processPassthrough(inputChannelData");
+    const auto pluginsAt = callbackSlice.find("rack_->process(");
+    const auto gainAt = callbackSlice.find("applyOutputTrim(");
     item("Playback through host",
-         youhost::callbackInput(true) == youhost::CallbackInput::playback
+         youhost::callbackStageOrder(youhost::CallbackStage::recordRawInput)
+                 < youhost::callbackStageOrder(youhost::CallbackStage::replaceWithPlayback)
+             && youhost::callbackStageOrder(youhost::CallbackStage::replaceWithPlayback)
+                    < youhost::callbackStageOrder(youhost::CallbackStage::pluginsLinkAndDelay)
+             && youhost::callbackStageOrder(youhost::CallbackStage::pluginsLinkAndDelay)
+                    < youhost::callbackStageOrder(youhost::CallbackStage::outputGain)
+             && youhost::callbackInput(true) == youhost::CallbackInput::playback
              && youhost::callbackInput(false) == youhost::CallbackInput::live
              && youhost::playbackFeedsHostChain(true)
              && youhost::stopReturnsLiveInput(false)
-             && callbackSlice.find("processPlayback") != std::string::npos
-             && callbackSlice.find("rack_->process") != std::string::npos
-             && checklistDoc.find("Playback through host") != std::string::npos);
+             && youhost::recorderSample(0.25f) == 0.25f
+             && youhost::hostDrySample(true, 0.25f, -0.5f) == -0.5f
+             && youhost::hostDrySample(false, 0.25f, -0.5f) == 0.25f
+             && recordAt != std::string::npos && playAt != std::string::npos
+             && playCopyAt != std::string::npos && liveCopyAt != std::string::npos
+             && pluginsAt != std::string::npos && gainAt != std::string::npos
+             && recordAt < playAt && playAt < playCopyAt && playCopyAt < pluginsAt
+             && pluginsAt < gainAt && playCopyAt < liveCopyAt
+             && callbackSlice.find("processRecord(playbackPtrs_") == std::string::npos
+             && callbackSlice.find("delayInPlace") == std::string::npos
+             && readWorkspaceFile("src/engine/PluginRack.cpp").find("delayInPlace") != std::string::npos
+             && checklistDoc.find("The recorder copies the device input before the swap") != std::string::npos);
     item("SYNC LOST",
          alarmOn && alarmHidden && alarmClear
              && youhost::syncLostBlink(0)
