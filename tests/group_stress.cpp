@@ -185,6 +185,14 @@ int countWallOverruns(const std::vector<Sample>& samples, std::int64_t periodNs)
     return count;
 }
 
+std::int64_t maxColumn(const std::vector<Sample>& samples, bool cpu)
+{
+    std::int64_t peak = 0;
+    for (const auto& sample : samples)
+        peak = std::max(peak, cpu ? sample.cpuNs : sample.wallNs);
+    return peak;
+}
+
 bool pushSample(std::vector<Sample>& dest, Sample sample, std::atomic<int>& overflow)
 {
     if (dest.size() == dest.capacity())
@@ -330,7 +338,7 @@ int run()
                 continue;
             nextTick += periodTicks;
             const auto nowTick = mach_absolute_time();
-            if (nowTick + periodTicks < nextTick)
+            if (nowTick < nextTick)
                 mach_wait_until(nextTick);
             else
                 nextTick = nowTick;
@@ -410,6 +418,12 @@ int run()
     std::cout << "wall samples over period (preemptions, not the deadline count) " << wallOverruns << "\n";
     std::cout << "median CPU ns baseline " << baseCpu << " edit " << editCpu << " after " << afterCpu << "\n";
     std::cout << "median wall ns baseline " << baseWall << " edit " << editWall << " after " << afterWall << "\n";
+    std::cout << "max CPU ns baseline " << maxColumn(baseline, true)
+              << " edit " << maxColumn(during, true)
+              << " after " << maxColumn(after, true) << "\n";
+    std::cout << "cpu overruns baseline " << countCpuOverruns(baseline, periodNs)
+              << " edit " << countCpuOverruns(during, periodNs)
+              << " after " << countCpuOverruns(after, periodNs) << "\n";
     std::cout << "graph publishes during edits " << publishes << "\n";
     std::cout << "plugins still loaded " << stillLoaded << "\n";
 
