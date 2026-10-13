@@ -306,6 +306,8 @@ private:
     void publishConfig(juce::AudioIODevice& device);
     void publishSessionChannelLimit();
     void reconcileStartupDevice();
+    void pollStartupDeviceList();
+    void noteUserDeviceChange() noexcept;
     RecordAttempt makeRecordAttempt();
     void logTransport(const juce::String& line);
     SessionChannelView currentChannelView() const;
@@ -508,6 +510,9 @@ private:
     juce::uint32 deviceInventoryMs_ = 0;
     juce::String startupFallbackName_;
     juce::String startupDeviceNote_;
+    juce::String startupSavedName_;
+    StartupListWatch startupList_ {};
+    juce::uint32 startupListLastMs_ = 0;
     juce::String rateWarning_;
     juce::BigInteger lastInputMask_;
     juce::BigInteger lastOutputMask_;

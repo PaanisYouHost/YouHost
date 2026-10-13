@@ -21,6 +21,7 @@
 #include "engine/PlaybackRoute.h"
 #include "engine/DeviceLoss.h"
 #include "engine/ClockSync.h"
+#include "engine/DeviceSwitch.h"
 #include "engine/SyncLost.h"
 #include "engine/Markers.h"
 #include "engine/GroupEdit.h"
@@ -4647,13 +4648,16 @@ void testReleaseChecklist()
              && mainUi.find("drawText(\"SYNC LOST\"") == std::string::npos
              && mainUi.find("syncOverlay_.repaint()") == std::string::npos
              && paintBody.find("syncLostBlink") == std::string::npos
-             && choseOther.find("dismiss()") != std::string::npos
+             && choseOther.find("noteUserDeviceChange") != std::string::npos
              && choseOther.find("deviceReturned") == std::string::npos
              && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
              && checklistDoc.find("SYNC LOST") != std::string::npos
              && checklistDoc.find("does not appear at startup") != std::string::npos
              && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("openNamedDevice") == std::string::npos
-             && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("decideStartupCard") != std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("beginStartupListWatch") != std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::reconcileStartupDevice()", "void AudioEngine::transportLocate").find("pollStartupDeviceList") != std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::pollStartupDeviceList()", "void AudioEngine::reconcileStartupDevice()").find("pollStartupList") != std::string::npos
+             && syncHeader.find("decideStartupCard") != std::string::npos
              && sliceBetween(engineSrc, "void AudioEngine::setOfflineTemplate", "void AudioEngine::setPreferredSampleRate").find("clearSyncLost") != std::string::npos
              && checklistDoc.find("not from a timer scan") != std::string::npos
              && checklistDoc.find("bottom-left") != std::string::npos
@@ -4792,6 +4796,108 @@ void testReleaseChecklist()
              && helpText.find("SoundGrid driver buffer") != std::string::npos
              && helpText.find("LV1") != std::string::npos
              && checklistDoc.find("SoundGrid, Dante, and AVB") != std::string::npos);
+    auto switchQuiet = [](youhost::ShowCard& show, const char* name, std::int64_t atNs)
+    {
+        youhost::showOpen(show, name, atNs);
+        youhost::showCallback(show, atNs + 50000000, true);
+        show.propertyFault = true;
+        youhost::showCallback(show, atNs + 200000000, true);
+        show.propertyFault = false;
+        youhost::showSilence(show, atNs + 450000000);
+        return ! show.overlay.showAlarm() && ! show.hung && show.recording && show.open;
+    };
+    youhost::ShowCard panic;
+    panic.recording = true;
+    const bool switchA = switchQuiet(panic, "MacBook Pro Speakers", 0);
+    const bool switchB = switchQuiet(panic, "Waves SoundGrid", 500000000);
+    const bool switchC = switchQuiet(panic, "WING", 1000000000);
+    const bool abcClear = switchA && switchB && switchC && panic.name == "WING" && panic.opens == 3;
+    const bool switchD = switchQuiet(panic, "Dante", 1500000000);
+    const bool switchE = switchQuiet(panic, "AVB", 2000000000);
+    const bool fiveInsideThree = panic.opens == 5 && (2000000000 - 0) <= 3000000000;
+    youhost::showOffline(panic, 2200000000);
+    const bool offlineClear = panic.offline && ! panic.open && ! panic.overlay.showAlarm() && panic.recording && ! panic.hung;
+    youhost::showOpen(panic, "WING", 2400000000);
+    youhost::showCallback(panic, 3000000000, true);
+    youhost::showSilence(panic, 3300000000);
+    youhost::showCallback(panic, 3400000000, false);
+    const bool finalReady = panic.name == "WING" && panic.open && ! panic.offline && panic.callbacks > 0
+                            && ! panic.overlay.showAlarm() && ! panic.hung && panic.recording
+                            && panic.clock.grace;
+    const int stepsBeforeArm = panic.watchSteps;
+    const bool graceEnded = youhost::showRunSteady(panic, 4400000000, 4700000000, 50000000)
+                            && ! panic.clock.grace && ! panic.overlay.showAlarm() && ! panic.hung
+                            && panic.watchSteps > stepsBeforeArm;
+    youhost::showSilence(panic, panic.nowNs + 250000000);
+    const bool clockLost = panic.overlay.isMissing()
+                           && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::center
+                           && panic.recording;
+    panic.overlay.acknowledge();
+    const bool okKeepsCenter = panic.overlay.isMissing()
+                               && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::center;
+    const auto lostAtNs = panic.nowNs;
+    const bool clockBack = youhost::showRunSteady(panic, lostAtNs + 50000000, lostAtNs + 1200000000, 50000000)
+                           && panic.overlay.showRestored() && ! panic.overlay.isMissing()
+                           && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::corner
+                           && panic.recording;
+    panic.overlay.acknowledge();
+    const bool okClearsRestored = ! panic.overlay.showAlarm();
+    youhost::ShowCard earlyLoss;
+    earlyLoss.recording = true;
+    youhost::showOpen(earlyLoss, "WING", 0);
+    youhost::showHotUnplug(earlyLoss);
+    const bool graceUnplugIgnored = earlyLoss.recording && ! earlyLoss.overlay.showAlarm();
+    youhost::ShowCard unplugged;
+    unplugged.recording = true;
+    youhost::showOpen(unplugged, "WING", 0);
+    const bool hotArmed = youhost::showRunSteady(unplugged, 2000000000, 2300000000, 50000000) && ! unplugged.clock.grace;
+    youhost::showHotUnplug(unplugged);
+    unplugged.overlay.acknowledge();
+    const bool hotLost = ! unplugged.recording && unplugged.resumeRecording && unplugged.overlay.isMissing()
+                         && youhost::syncLostChrome(unplugged.overlay) == youhost::SyncLostChrome::center;
+    youhost::showHotReturn(unplugged);
+    const bool hotResumed = unplugged.recording && ! unplugged.resumeRecording && unplugged.overlay.showRestored()
+                            && youhost::syncLostChrome(unplugged.overlay) == youhost::SyncLostChrome::corner;
+    unplugged.overlay.acknowledge();
+    const bool hotCleared = ! unplugged.overlay.showAlarm() && unplugged.recording;
+    youhost::StartupListWatch lateWing;
+    youhost::beginStartupListWatch(lateWing);
+    bool earlyNotice = false;
+    for (int attempt = 0; attempt < youhost::kStartupDeviceListTries - 1; ++attempt)
+        earlyNotice = youhost::pollStartupList(lateWing, "WING", false) || earlyNotice;
+    const bool wingWaits = ! earlyNotice && lateWing.pending && lateWing.notice.empty();
+    const bool wingFound = ! youhost::pollStartupList(lateWing, "WING", true)
+                           && lateWing.listed && lateWing.notice.empty() && ! lateWing.pending;
+    youhost::StartupListWatch missingWing;
+    youhost::beginStartupListWatch(missingWing);
+    int wingNotices = 0;
+    for (int attempt = 0; attempt < youhost::kStartupDeviceListTries; ++attempt)
+    {
+        if (youhost::pollStartupList(missingWing, "WING", false))
+            ++wingNotices;
+    }
+    const bool wingOffline = wingNotices == 1 && ! missingWing.pending
+                             && missingWing.notice == "Saved card WING not found - Offline";
+    const auto openBody = sliceBetween(engineSrc, "void AudioEngine::openNamedDevice", "void AudioEngine::noteUserChoseDevice");
+    const auto userChange = sliceBetween(engineSrc, "void AudioEngine::noteUserDeviceChange()", "void AudioEngine::pollStartupDeviceList()");
+    const auto downBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
+    item("Fast device switching",
+         abcClear && switchD && switchE && fiveInsideThree && offlineClear && finalReady
+             && graceEnded && clockLost && okKeepsCenter && clockBack && okClearsRestored
+             && graceUnplugIgnored && hotArmed && hotLost && hotResumed && hotCleared
+             && wingWaits && wingFound && wingOffline
+             && youhost::kDeviceOpenGraceNs == 2000000000
+             && youhost::kStartupDeviceListTries == 8
+             && youhost::kStartupDeviceListGapMs == 250
+             && openBody.find("noteUserDeviceChange") != std::string::npos
+             && userChange.find("beginDeviceOpenGrace") != std::string::npos
+             && userChange.find("clearSyncLost") != std::string::npos
+             && downBody.find("clockMemory_.grace") != std::string::npos
+             && engineSrc.find("pollStartupDeviceList();") != std::string::npos
+             && helpText.find("OK does not close that window while sync is still lost") != std::string::npos
+             && checklistDoc.find("Fast device switching") != std::string::npos
+             && checklistDoc.find("Five device changes inside 3 s") != std::string::npos
+             && checklistDoc.find("no SYNC LOST, no hang, and no stuck window") != std::string::npos);
     const auto lossBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
     const auto listBody = sliceBetween(engineSrc, "void AudioEngine::noteHardwareDeviceList()", "void AudioEngine::rejectForeignDevice()");
     const auto reopenBody = sliceBetween(engineSrc, "void AudioEngine::tryReopenWanted()", "bool AudioEngine::deviceNameListed");
@@ -4897,11 +5003,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.1"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0"
+             && std::string(youhost::versionNumber()) == "1.0.1"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.1") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -4910,8 +5016,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0") != std::string::npos
-             && checklistDoc.find("YouHost-1.0-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.1") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.1-macOS.zip") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
@@ -5457,6 +5563,13 @@ void testBeta090()
     youhost::SessionDocumentModel legacyRound;
     CHECK(youhost::readSessionModelLegacy(youhost::writeSessionModel(current), legacyRound));
     CHECK(legacyRound.savedWith == "YouHost 1.0");
+    youhost::SessionDocumentModel next;
+    next.savedWith = "YouHost 1.0.1";
+    next.version = youhost::kSessionFormatVersion;
+    youhost::SessionDocumentModel nextRound;
+    CHECK(youhost::readSessionModel(youhost::writeSessionModel(next), nextRound));
+    CHECK(nextRound.savedWith == "YouHost 1.0.1");
+    CHECK(nextRound.version == 7);
     CHECK(youhost::kSessionFormatVersion == 7);
     CHECK(round.markers.size() == 1);
     CHECK(round.markers[0].name == "Verse");

@@ -402,6 +402,16 @@ void AudioEngine::pollDeviceStats()
         return;
     }
 
+    if (openingChosenDevice_)
+    {
+        if (auto* opening = deviceManager_.getCurrentAudioDevice())
+        {
+            if (opening->isOpen())
+                applyOpenDevice(*opening, true);
+        }
+        return;
+    }
+
     auto* device = deviceManager_.getCurrentAudioDevice();
     const bool open = device != nullptr && device->isOpen();
     if (reopenInProgress_)
@@ -424,11 +434,7 @@ void AudioEngine::pollDeviceStats()
                                && ! awaitingSavedDevice_ && ! setupLocked_;
     if (userChoseThis)
     {
-        deviceLostBanner_ = false;
-        syncLost_.dismiss();
-        lossFinalized_ = false;
-        downSinceMs_ = 0;
-        deviceDown_.store(false, std::memory_order_relaxed);
+        noteUserDeviceChange();
         wantedName_ = device->getName();
         applyOpenDevice(*device, true);
         return;
@@ -498,6 +504,7 @@ void AudioEngine::setOfflineTemplate(bool offline)
     if (offline)
     {
         hostWasRunning_.store(false, std::memory_order_release);
+        startupList_.pending = false;
         clearSyncLost();
     }
     if (offlineTemplate_ == offline && ! missingCard_)
@@ -1286,7 +1293,7 @@ void AudioEngine::resetClockWatch() noexcept
 
 void AudioEngine::noteClockLost()
 {
-    if (openingChosenDevice_)
+    if (openingChosenDevice_ || clockMemory_.grace)
         return;
     if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
         return;
@@ -1314,11 +1321,19 @@ void AudioEngine::noteClockRestored()
 
 void AudioEngine::watchClockSync()
 {
-    if (offlineTemplate_ || openingChosenDevice_
-        || ! deviceOpen_.load(std::memory_order_relaxed)
+    pollStartupDeviceList();
+    if (offlineTemplate_)
+    {
+        resetClockWatch();
+        return;
+    }
+    if (openingChosenDevice_)
+        return;
+    if (! deviceOpen_.load(std::memory_order_relaxed)
         || ! hostWasRunning_.load(std::memory_order_acquire))
     {
-        if (offlineTemplate_ || ! hostWasRunning_.load(std::memory_order_acquire))
+        // A user open keeps its grace across the close/open gap.
+        if (! clockMemory_.grace && ! hostWasRunning_.load(std::memory_order_acquire))
             resetClockWatch();
         return;
     }
@@ -1522,6 +1537,9 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
             pressTransport(TransportPress::commandSpace);
         const bool resumed = resumeTake && recorder_ != nullptr && recorder_->isRecording();
         appendHostLog(settings_, juce::String::fromUTF8(deviceLossLogLine(live->getName().toStdString(), duration, resumed).c_str()));
+        // The reopen gap is not a new loss. The restored box stays up.
+        beginDeviceOpenGrace(clockMemory_, steadyNowNs());
+        clockSyncMissing_ = false;
     }
     const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
     rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
@@ -1565,7 +1583,7 @@ void AudioEngine::parkOfflineAfterFailedOpen(const juce::String& name)
 
 void AudioEngine::noteSyncLost()
 {
-    if (openingChosenDevice_)
+    if (openingChosenDevice_ || clockMemory_.grace)
         return;
     if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
         return;
@@ -1597,7 +1615,7 @@ void AudioEngine::handleDeviceDown()
     clearDisplayedCpu();
     deviceName_ = "No device";
     publishSessionChannelLimit();
-    if (closingDevice_.load(std::memory_order_acquire) || ! started_ || openingChosenDevice_)
+    if (closingDevice_.load(std::memory_order_acquire) || ! started_ || openingChosenDevice_ || clockMemory_.grace)
         return;
 
     if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
@@ -2681,6 +2699,7 @@ void AudioEngine::openNamedDevice(const juce::String& name)
         sessionMessage_ = juce::String(deviceSwitchBlockedReason(isRecording(), recordLockArmed_));
         return;
     }
+    noteUserDeviceChange();
     offlineTemplate_ = false;
     revealUnsupported_ = false;
     juce::AudioDeviceManager::AudioDeviceSetup setup;
@@ -2732,6 +2751,30 @@ void AudioEngine::noteUserChoseDevice(const juce::String& name)
     settings_.saveUserChosenDevice(name);
 }
 
+void AudioEngine::noteUserDeviceChange() noexcept
+{
+    startupList_.pending = false;
+    clearSyncLost();
+    beginDeviceOpenGrace(clockMemory_, steadyNowNs());
+}
+
+void AudioEngine::pollStartupDeviceList()
+{
+    if (! startupList_.pending || startupSavedName_.isEmpty())
+        return;
+    const auto now = juce::Time::getMillisecondCounter();
+    if (startupList_.tries > 0 && now - startupListLastMs_ < kStartupDeviceListGapMs)
+        return;
+    startupListLastMs_ = now;
+    inventoryForce_ = true;
+    const bool listed = deviceNameListed(startupSavedName_);
+    if (! pollStartupList(startupList_, startupSavedName_.toStdString(), listed))
+        return;
+    startupDeviceNote_ = juce::String::fromUTF8(startupList_.notice.c_str());
+    sessionMessage_ = startupDeviceNote_;
+    appendHostLog(settings_, startupDeviceNote_);
+}
+
 void AudioEngine::reconcileStartupDevice()
 {
     const auto saved = wantedName_;
@@ -2744,14 +2787,9 @@ void AudioEngine::reconcileStartupDevice()
     publishSessionChannelLimit();
     if (saved.isEmpty() || startupOpensSavedDevice())
         return;
-    inventoryForce_ = true;
-    const auto decision = decideStartupCard(saved.toStdString(), deviceNameListed(saved));
-    if (! decision.notice.empty())
-    {
-        startupDeviceNote_ = juce::String::fromUTF8(decision.notice.c_str());
-        sessionMessage_ = startupDeviceNote_;
-        appendHostLog(settings_, startupDeviceNote_);
-    }
+    startupSavedName_ = saved;
+    beginStartupListWatch(startupList_);
+    pollStartupDeviceList();
 }
 
 void AudioEngine::transportLocate(std::int64_t sample)

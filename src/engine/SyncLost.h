@@ -38,6 +38,25 @@ struct StartupCardDecision
     std::string notice;
 };
 
+// The device list can still be empty on the first look after launch.
+// Ask this many times, with a gap between them, before the Offline notice.
+inline constexpr int kStartupDeviceListTries = 8;
+inline constexpr std::uint32_t kStartupDeviceListGapMs = 250;
+
+struct StartupListWatch
+{
+    int tries = 0;
+    bool pending = false;
+    bool listed = false;
+    std::string notice;
+};
+
+inline void beginStartupListWatch(StartupListWatch& watch) noexcept
+{
+    watch = {};
+    watch.pending = true;
+}
+
 // A missing saved card stays Offline with the same notice as a session whose
 // card is gone. The overlay stays down.
 inline StartupCardDecision decideStartupCard(std::string_view savedName, bool savedListed) noexcept
@@ -53,6 +72,28 @@ inline StartupCardDecision decideStartupCard(std::string_view savedName, bool sa
         decision.notice += " not found - Offline";
     }
     return decision;
+}
+
+// One look. A hit ends the watch with no notice. The Offline notice is
+// published only on the last miss. Earlier misses stay quiet.
+inline bool pollStartupList(StartupListWatch& watch, std::string_view savedName, bool listedNow)
+{
+    if (! watch.pending)
+        return false;
+    ++watch.tries;
+    if (listedNow)
+    {
+        watch.pending = false;
+        watch.listed = true;
+        watch.notice.clear();
+        return false;
+    }
+    if (watch.tries < kStartupDeviceListTries)
+        return false;
+    watch.pending = false;
+    watch.listed = false;
+    watch.notice = decideStartupCard(savedName, false).notice;
+    return ! watch.notice.empty();
 }
 
 // The notice and the reopen are separate. While the card is gone a large
@@ -90,6 +131,8 @@ struct SyncLostState
         gapMs = durationMs < 0 ? 0 : durationMs;
     }
 
+    // OK dismisses the restored dialog only. The centered window stays
+    // while sync is still lost.
     void acknowledge() noexcept
     {
         if (missing)
