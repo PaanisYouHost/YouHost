@@ -46,9 +46,9 @@ void paintChip(juce::Graphics& graphics, juce::Rectangle<int> bounds, const juce
 
 } // namespace
 
-YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& processor)
-    : AudioProcessorEditor(&processor),
-      processor_(processor)
+YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plugin)
+    : AudioProcessorEditor(&plugin),
+      processor_(plugin)
 {
     setOpaque(true);
     styleButton(bypassButton_);

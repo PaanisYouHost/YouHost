@@ -43,9 +43,9 @@ void styleButton(juce::TextButton& button)
 
 } // namespace
 
-PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& processor)
-    : AudioProcessorEditor(&processor),
-      processor_(processor)
+PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
+    : AudioProcessorEditor(&plugin),
+      processor_(plugin)
 {
     setOpaque(true);
     styleButton(bypassButton_);

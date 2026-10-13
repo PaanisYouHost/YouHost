@@ -78,7 +78,7 @@ public:
                 if (data == nullptr)
                     continue;
                 const float sample = data[index];
-                if (sample != sample)
+                if (std::isnan(sample))
                     continue;
                 energy += sample * sample;
                 ++used;
@@ -118,13 +118,13 @@ public:
             const float applied = gain;
             // Exact unity leaves the buffer alone. A float one-pole stalls just
             // short of 1, so the last inaudible step snaps to the target.
-            if (applied == 1.0f && target == 1.0f)
+            if (floatBitsEqual(applied, 1.0f) && floatBitsEqual(target, 1.0f))
             {
                 gain = 1.0f;
             }
             else
             {
-                if (applied != 1.0f)
+                if (! floatBitsEqual(applied, 1.0f))
                 {
                     for (int channel = 0; channel < width; ++channel)
                     {
@@ -134,7 +134,8 @@ public:
                     }
                 }
                 const float delta = coeff * (target - gain);
-                gain = (gain + delta == gain) ? target : gain + delta;
+                const float stepped = gain + delta;
+                gain = floatBitsEqual(stepped, gain) ? target : stepped;
                 if (gain > 1.0f)
                     gain = 1.0f;
                 if (gain < 1.0e-8f && target < 1.0e-8f)

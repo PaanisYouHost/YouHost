@@ -134,9 +134,9 @@ void YouMixAudioProcessor::setStateInformation(const void* data, int sizeInBytes
 
 void YouMixAudioProcessor::updateTrackProperties(const TrackProperties& properties)
 {
-    if (slot_ < 0)
+    if (slot_ < 0 || ! properties.name.has_value())
         return;
-    youmix::youMixShared().setName(slot_, properties.name.toRawUTF8());
+    youmix::youMixShared().setName(slot_, properties.name->toRawUTF8());
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

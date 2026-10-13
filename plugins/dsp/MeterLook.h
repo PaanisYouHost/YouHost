@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 
 // Meter marks shared by the YouMix and PSE editors.
 // Same rule as YouHost: green below the line-level point, yellow up to but
@@ -12,6 +14,16 @@ namespace youmix
 inline constexpr float kMeterFloorDb = -60.0f;
 inline constexpr int kMeterReferenceDb = -20;
 inline constexpr float kGrMeterFullDb = 40.0f;
+
+inline bool floatBitsEqual(float left, float right) noexcept
+{
+    static_assert(sizeof(float) == sizeof(std::uint32_t));
+    std::uint32_t leftBits = 0;
+    std::uint32_t rightBits = 0;
+    std::memcpy(&leftBits, &left, sizeof(leftBits));
+    std::memcpy(&rightBits, &right, sizeof(rightBits));
+    return leftBits == rightBits;
+}
 
 inline float decibelsToGain(float db) noexcept
 {

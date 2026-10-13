@@ -7,7 +7,8 @@
 
 // Plate that matches the YouHost output-trim control: drag in 0.5-style steps,
 // option-click reset, double-click to type, scroll wheel ignored.
-class DragValue : public juce::Component
+class DragValue : public juce::Component,
+                  public juce::SettableTooltipClient
 {
 public:
     DragValue()
