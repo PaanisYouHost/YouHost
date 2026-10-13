@@ -4895,15 +4895,91 @@ void testReleaseChecklist()
              && readWorkspaceFile("INSTALL.md").find("Ennen keikkaa / paras suorituskyky") != std::string::npos
              && checklistDoc.find("Before a gig") != std::string::npos);
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.1"
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.1") != std::string::npos
+         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.2"
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.2") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-${VERSION}-macOS.zip") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
+    youhost::RawKey commandBackspace;
+    commandBackspace.token = youhost::RawToken::backspace;
+    commandBackspace.keyCode = 8;
+    commandBackspace.command = true;
+    youhost::RawKey plainBackspace = commandBackspace;
+    plainBackspace.command = false;
+    youhost::RawKey plainDelete;
+    plainDelete.keyCode = 127;
+    plainDelete.textCharacter = 127;
+    youhost::RawKey commandDelete = plainDelete;
+    commandDelete.command = true;
+    commandDelete.textCharacter = 0;
+    const auto deleteBody = sliceBetween(engineSrc, "bool AudioEngine::deleteMarker", "bool AudioEngine::openOwnEdit");
+    const auto deleteCase = sliceBetween(mainUi, "case ShortcutId::deleteMarker:", "case ShortcutId::undo:");
+    const auto timelineSrc = readWorkspaceFile("src/ui/TimelineView.cpp");
+    bool recordingHeld = true;
+    bool lockHeld = true;
+    std::vector<youhost::MarkerPoint> liveMarkers;
+    liveMarkers.push_back(youhost::deviceLossMarker(48000));
+    liveMarkers.push_back(youhost::makeMarker(96000, 2));
+    youhost::MarkerEdit eraseLost;
+    eraseLost.kind = youhost::MarkerEditKind::erase;
+    eraseLost.index = 0;
+    eraseLost.marker = liveMarkers[0];
+    const bool erasedLost = youhost::applyMarkerEdit(liveMarkers, eraseLost);
+    liveMarkers.push_back(youhost::makeMarker(144000, 3));
+    youhost::MarkerEdit restoreLost;
+    restoreLost.kind = youhost::MarkerEditKind::insert;
+    restoreLost.index = 0;
+    restoreLost.marker = youhost::deviceLossMarker(48000);
+    const bool restoredLost = youhost::applyMarkerEdit(liveMarkers, restoreLost);
+    youhost::MarkerBand band;
+    band.lineX = 100.0f;
+    band.lineTop = 20.0f;
+    band.lineBottom = 200.0f;
+    band.pillX = 103.0f;
+    band.pillY = 4.0f;
+    band.pillW = 70.0f;
+    band.pillH = 14.0f;
     item("Markers",
          ! youhost::markerDropAffectsTransport()
              && youhost::markerDropAllowedWhileLocked()
+             && ! youhost::markerDeleteAffectsTransport()
+             && youhost::markerDeleteAllowedWhileLocked()
+             && youhost::markerDeleteShortcut(true, true, false, false)
+             && ! youhost::markerDeleteShortcut(false, true, false, false)
+             && ! youhost::markerDeleteShortcut(false, false, true, false)
+             && ! youhost::markerDeleteShortcut(true, false, true, false)
+             && ! youhost::markerDeleteShortcut(true, true, false, true)
+             && youhost::dispatchRawKey(commandBackspace, 1, false) == youhost::ShortcutId::deleteMarker
+             && ! youhost::dispatchRawKey(plainBackspace, 1, false).has_value()
+             && ! youhost::dispatchRawKey(plainDelete, 1, false).has_value()
+             && ! youhost::dispatchRawKey(commandDelete, 1, false).has_value()
+             && ! youhost::dispatchRawKey(commandBackspace, 1, true).has_value()
+             && ! youhost::shortcutAsksTransport(youhost::ShortcutId::deleteMarker)
+             && erasedLost && recordingHeld && lockHeld && liveMarkers.size() == 3
+             && restoredLost && liveMarkers[0].name == "Device lost" && liveMarkers[1].name == "Marker 2"
+             && youhost::markerIndexAt(&band, 1, 110.0f, 10.0f) == 0
+             && youhost::markerIndexAt(&band, 1, 100.0f, 80.0f) == 0
+             && youhost::markerIndexAt(&band, 1, 140.0f, 80.0f) == -1
+             && youhost::markerIndexAfterDelete(2, 0, 3) == 1
+             && youhost::markerIndexAfterDelete(0, 0, 0) == -1
+             && ! deleteBody.empty()
+             && deleteBody.find("stop(") == std::string::npos
+             && deleteBody.find("transportStop") == std::string::npos
+             && deleteBody.find("recordingLocked") == std::string::npos
+             && deleteBody.find(".wav") == std::string::npos
+             && deleteBody.find("eraseMarker") != std::string::npos
+             && deleteBody.find("markersCaptured") != std::string::npos
+             && engineSrc.find("applyMarkerEdit") != std::string::npos
+             && engineSrc.find("stampInverseMarker") != std::string::npos
+             && deleteCase.find("deleteMarkerIndex") != std::string::npos
+             && deleteCase.find("transportStop") == std::string::npos
+             && mainUi.find("setButtonText(kMarkerDeleteItem)") != std::string::npos
+             && mainUi.find("showDeleteMenu") != std::string::npos
+             && mainUi.find("isPopupMenu()") != std::string::npos
+             && timelineSrc.find("kMarkerDeleteItem") != std::string::npos
+             && timelineSrc.find("isPopupMenu()") != std::string::npos
+             && timelineSrc.find("showMarkerMenu") != std::string::npos
              && youhost::toolWindowForwardsTransportKeys(false)
              && ! youhost::toolWindowForwardsTransportKeys(true)
              && fromMarker.has_value() && *fromMarker == 48000
@@ -4925,8 +5001,14 @@ void testReleaseChecklist()
              && mainUi.find("bindToolKeys(*this") != std::string::npos
              && mainUi.find("playSampleFromSelectedMarker") != std::string::npos
              && help.find("play from that marker") != std::string::npos
+             && help.find("Cmd+Backspace") != std::string::npos
+             && help.find("Delete the selected marker") != std::string::npos
              && checklistDoc.find("| Markers |") != std::string::npos
-             && checklistDoc.find("starts playback from that marker") != std::string::npos);
+             && checklistDoc.find("starts playback from that marker") != std::string::npos
+             && checklistDoc.find("Cmd+Backspace") != std::string::npos
+             && checklistDoc.find("Right-click") != std::string::npos
+             && checklistDoc.find("Plain Backspace") != std::string::npos
+             && checklistDoc.find("Device lost") != std::string::npos);
     item("WAV names",
          youhost::takeWaveName(1, 1, "BD") == "1_BD_1.wav"
              && youhost::takeWaveName(2, 1, "BD") == "1_BD_2.wav"
@@ -5355,6 +5437,26 @@ void testBeta090()
     CHECK(! youhost::dispatchRawKey(macLetter('m', false, false, false), 1, true).has_value());
     CHECK(! youhost::shortcutAsksTransport(youhost::ShortcutId::marker));
     CHECK(youhost::dispatchRawKey(macLetter('6', false, false, false), 1, false) == youhost::ShortcutId::markers);
+    youhost::RawKey commandBackspace;
+    commandBackspace.token = youhost::RawToken::backspace;
+    commandBackspace.keyCode = 8;
+    commandBackspace.command = true;
+    CHECK(youhost::dispatchRawKey(commandBackspace, 1, false) == youhost::ShortcutId::deleteMarker);
+    commandBackspace.command = false;
+    CHECK(! youhost::dispatchRawKey(commandBackspace, 1, false).has_value());
+    CHECK(! youhost::shortcutAsksTransport(youhost::ShortcutId::deleteMarker));
+    CHECK(! youhost::markerDeleteAffectsTransport());
+    std::vector<youhost::MarkerPoint> undoMarkers;
+    undoMarkers.push_back(youhost::deviceLossMarker(1000));
+    youhost::EditHistory<std::vector<youhost::MarkerPoint>> markerHistory;
+    markerHistory.push(undoMarkers);
+    CHECK(youhost::eraseMarker(undoMarkers, 0));
+    CHECK(undoMarkers.empty());
+    std::vector<youhost::MarkerPoint> broughtBack;
+    CHECK(markerHistory.undo(undoMarkers, broughtBack));
+    CHECK(broughtBack.size() == 1);
+    CHECK(broughtBack[0].name == "Device lost");
+    CHECK(broughtBack[0].sample == 1000);
 
     const auto columns = youhost::layoutHostColumns(960);
     CHECK(columns.output.x >= columns.gain.x + columns.gain.width);

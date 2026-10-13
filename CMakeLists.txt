@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 0.9.1
+    VERSION 0.9.2
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 

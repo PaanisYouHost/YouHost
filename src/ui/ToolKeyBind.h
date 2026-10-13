@@ -32,6 +32,8 @@ inline RawKey rawKeyFromPress(const juce::KeyPress& key)
         raw.token = RawToken::left;
     else if (key.isKeyCode(juce::KeyPress::rightKey))
         raw.token = RawToken::right;
+    else if (key.isKeyCode(juce::KeyPress::backspaceKey))
+        raw.token = RawToken::backspace;
     return raw;
 }
 

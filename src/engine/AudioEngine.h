@@ -209,6 +209,7 @@ public:
     std::int64_t markerSample(int index) const;
     juce::String markerName(int index) const;
     void setMarkerName(int index, const juce::String& name);
+    bool deleteMarker(int index);
     int markerRevision() const noexcept { return markerRevision_; }
     void beginEdit();
     void endEdit();
@@ -337,6 +338,7 @@ private:
     MixSnapshot captureMixSnapshot(bool plugins);
     void applyMixSnapshot(const MixSnapshot& snapshot);
     void restorePluginSnapshot(const SessionData& saved);
+    void stampInverseMarker(const MixSnapshot& from, MixSnapshot& to) const;
     void applyOpenDevice(juce::AudioIODevice& device, bool remember);
     void noteChannelMasks(juce::AudioIODevice& device);
     void noteSyncLost();

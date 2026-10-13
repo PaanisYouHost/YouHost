@@ -1509,6 +1509,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     });
     timeline_.setSelectedChannel([this] { return engine_.selectedChannel(); });
     timeline_.setLocateHandler([this](std::int64_t sample) { engine_.transportLocate(sample); });
+    timeline_.setMarkerHandlers([this](int index) { selectMarker(index); },
+                                [this](int index) { deleteMarkerIndex(index); });
     timeline_.setLaneProvider([this](const TimelineView::LanePaint& paint)
     {
         engine_.visitTimelineLanes(paint);
@@ -1666,6 +1668,9 @@ bool MainComponent::runShortcut(ShortcutId id)
         case ShortcutId::marker:
             engine_.dropMarker();
             refresh();
+            return true;
+        case ShortcutId::deleteMarker:
+            deleteMarkerIndex(selectedMarkerIndex_);
             return true;
         case ShortcutId::undo:
             engine_.undoEdit();
@@ -2226,11 +2231,14 @@ void MainComponent::toggleLatency()
 class MarkersWindow : public juce::DocumentWindow, private juce::Timer
 {
 public:
-    MarkersWindow(AudioEngine& engine, AppSettings& settings, juce::KeyListener* keys)
+    MarkersWindow(AudioEngine& engine, AppSettings& settings, juce::KeyListener* keys,
+                  std::function<void(int)> onSelect, std::function<void(int)> onDelete)
         : juce::DocumentWindow("MARKERS", theme::panel, juce::DocumentWindow::closeButton),
           engine_(engine),
           settings_(settings),
-          keys_(keys)
+          keys_(keys),
+          onSelect_(std::move(onSelect)),
+          onDelete_(std::move(onDelete))
     {
         setUsingNativeTitleBar(true);
         setContentOwned(new Body(*this), true);
@@ -2265,6 +2273,19 @@ public:
         if (auto* body = dynamic_cast<Body*>(getContentComponent()))
             return body->nameEditActive();
         return false;
+    }
+
+    void showSelected(int index)
+    {
+        selectedIndex_ = index;
+        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
+            body->showSelection(index);
+    }
+
+    void refreshNow()
+    {
+        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
+            body->refresh();
     }
 
 private:
@@ -2350,6 +2371,7 @@ private:
             {
                 addAndMakeVisible(jump_);
                 addAndMakeVisible(name_);
+                addAndMakeVisible(remove_);
                 addMouseListener(this, true);
                 const double rate = owner_.engine_.preferredSampleRate() > 0.0 ? owner_.engine_.preferredSampleRate() : 48000.0;
                 jump_.setButtonText(timecodeText(owner_.engine_.markerSample(index_), rate));
@@ -2363,6 +2385,10 @@ private:
                     owner_.engine_.setMarkerName(index_, name_.getText());
                 };
                 jump_.onClick = [this] { choose(); };
+                remove_.setButtonText(kMarkerDeleteItem);
+                remove_.setMouseClickGrabsKeyboardFocus(false);
+                remove_.setWantsKeyboardFocus(false);
+                remove_.onClick = [this] { owner_.askDelete(index_); };
             }
 
             void setChosen(bool chosen)
@@ -2383,6 +2409,8 @@ private:
                 auto area = getLocalBounds();
                 jump_.setBounds(area.removeFromLeft(96).reduced(0, 2));
                 area.removeFromLeft(6);
+                remove_.setBounds(area.removeFromRight(72).reduced(0, 2));
+                area.removeFromRight(6);
                 name_.setBounds(area);
             }
 
@@ -2394,15 +2422,23 @@ private:
                 graphics.fillRect(getLocalBounds());
             }
 
-            void mouseDown(const juce::MouseEvent&) override
+            void mouseDown(const juce::MouseEvent& event) override
             {
+                if (event.mods.isPopupMenu())
+                {
+                    owner_.selectFromRow(index_);
+                    owner_.showDeleteMenu(index_);
+                    return;
+                }
+                if (event.eventComponent == &remove_)
+                    return;
                 choose();
             }
 
         private:
             void choose()
             {
-                owner_.selectIndex(index_);
+                owner_.selectFromRow(index_);
                 owner_.engine_.transportLocate(owner_.engine_.markerSample(index_));
             }
 
@@ -2411,6 +2447,7 @@ private:
             bool chosen_ = false;
             juce::TextButton jump_;
             juce::Label name_;
+            juce::TextButton remove_;
         };
 
         MarkersWindow& owner_;
@@ -2429,18 +2466,68 @@ private:
             body->refresh();
     }
 
-    void selectIndex(int index)
+    void selectFromRow(int index)
     {
-        selectedIndex_ = index;
-        if (auto* body = dynamic_cast<Body*>(getContentComponent()))
-            body->showSelection(index);
+        showSelected(index);
+        if (onSelect_ != nullptr)
+            onSelect_(index);
+    }
+
+    void askDelete(int index)
+    {
+        if (onDelete_ == nullptr)
+            return;
+        juce::Component::SafePointer<MarkersWindow> safe(this);
+        juce::MessageManager::callAsync([safe, index]
+        {
+            if (safe != nullptr && safe->onDelete_ != nullptr)
+                safe->onDelete_(index);
+        });
+    }
+
+    void showDeleteMenu(int index)
+    {
+        juce::PopupMenu menu;
+        menu.addItem(1, kMarkerDeleteItem);
+        juce::Component::SafePointer<MarkersWindow> safe(this);
+        menu.showMenuAsync(juce::PopupMenu::Options().withMousePosition(),
+                           [safe, index](int result)
+                           {
+                               if (safe == nullptr || result != 1)
+                                   return;
+                               safe->askDelete(index);
+                           });
     }
 
     AudioEngine& engine_;
     AppSettings& settings_;
     juce::KeyListener* keys_ = nullptr;
+    std::function<void(int)> onSelect_;
+    std::function<void(int)> onDelete_;
     int selectedIndex_ = -1;
 };
+
+void MainComponent::selectMarker(int index)
+{
+    selectedMarkerIndex_ = index;
+    timeline_.setSelectedMarker(index);
+    if (auto* window = dynamic_cast<MarkersWindow*>(markersWindow_.get()))
+        window->showSelected(index);
+}
+
+void MainComponent::deleteMarkerIndex(int index)
+{
+    if (! engine_.deleteMarker(index))
+        return;
+    selectedMarkerIndex_ = markerIndexAfterDelete(selectedMarkerIndex_, index, engine_.markerCount());
+    timeline_.setSelectedMarker(selectedMarkerIndex_);
+    if (auto* window = dynamic_cast<MarkersWindow*>(markersWindow_.get()))
+    {
+        window->showSelected(selectedMarkerIndex_);
+        window->refreshNow();
+    }
+    refresh();
+}
 
 std::optional<std::int64_t> MainComponent::markerPlaySample() const
 {
@@ -2462,7 +2549,13 @@ std::optional<std::int64_t> MainComponent::markerPlaySample() const
 void MainComponent::toggleMarkers()
 {
     if (markersWindow_ == nullptr)
-        markersWindow_ = std::make_unique<MarkersWindow>(engine_, settings_, keys_.get());
+    {
+        markersWindow_ = std::make_unique<MarkersWindow>(engine_, settings_, keys_.get(),
+                                                         [this](int index) { selectMarker(index); },
+                                                         [this](int index) { deleteMarkerIndex(index); });
+        if (auto* window = dynamic_cast<MarkersWindow*>(markersWindow_.get()))
+            window->showSelected(selectedMarkerIndex_);
+    }
     const bool show = ! markersWindow_->isVisible();
     markersWindow_->setVisible(show);
     markersButton_.setToggleState(show, juce::dontSendNotification);
@@ -3036,6 +3129,7 @@ void MainComponent::refresh()
         for (int index = 0; index < engine_.markerCount(); ++index)
             marks.emplace_back(engine_.markerSample(index), engine_.markerName(index));
         timeline_.setMarkers(marks);
+        timeline_.setSelectedMarker(selectedMarkerIndex_);
     }
     latencyReadout_.setAlignGroup(engine_.alignGroup());
     setupButton_.setToggleState(setupWindow_ != nullptr && setupWindow_->isVisible(), juce::dontSendNotification);

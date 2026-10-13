@@ -4037,6 +4037,27 @@ void AudioEngine::setMarkerName(int index, const juce::String& name)
     noteSessionEdit();
 }
 
+bool AudioEngine::deleteMarker(int index)
+{
+    if (applyingEdit_ || index < 0 || index >= markerCount())
+        return false;
+    const auto removed = markers_[static_cast<std::size_t>(index)];
+    const bool own = openOwnEdit(false);
+    if (own && edits_ != nullptr && edits_->haveBefore)
+    {
+        edits_->before.markersCaptured = true;
+        edits_->before.markerErase = false;
+        edits_->before.markerIndex = index;
+        edits_->before.markerSample = removed.sample;
+        edits_->before.markerName = removed.name;
+    }
+    eraseMarker(markers_, index);
+    ++markerRevision_;
+    closeOwnEdit(own);
+    noteSessionEdit();
+    return true;
+}
+
 bool AudioEngine::openOwnEdit(bool plugins)
 {
     if (applyingEdit_ || editNest_ > 0)
@@ -4140,6 +4161,16 @@ void AudioEngine::applyMixSnapshot(const MixSnapshot& snapshot)
     }
     if (bypassAll() != snapshot.bypassAll && rack_ != nullptr)
         rack_->setBypassAll(snapshot.bypassAll);
+    if (snapshot.markersCaptured)
+    {
+        MarkerEdit edit;
+        edit.kind = snapshot.markerErase ? MarkerEditKind::erase : MarkerEditKind::insert;
+        edit.index = snapshot.markerIndex;
+        edit.marker.sample = snapshot.markerSample;
+        edit.marker.name = snapshot.markerName;
+        if (applyMarkerEdit(markers_, edit))
+            ++markerRevision_;
+    }
     juce::ignoreUnused(listenChanged);
     applyingEdit_ = false;
     bumpDisplay();
@@ -4207,6 +4238,17 @@ void AudioEngine::endEdit()
     edits_->haveBefore = false;
 }
 
+void AudioEngine::stampInverseMarker(const MixSnapshot& from, MixSnapshot& to) const
+{
+    if (! from.markersCaptured)
+        return;
+    to.markersCaptured = true;
+    to.markerErase = ! from.markerErase;
+    to.markerIndex = from.markerIndex;
+    to.markerSample = from.markerSample;
+    to.markerName = from.markerName;
+}
+
 bool AudioEngine::undoEdit()
 {
     if (edits_ == nullptr || ! edits_->history.canUndo())
@@ -4214,6 +4256,8 @@ bool AudioEngine::undoEdit()
     const auto* top = edits_->history.undoTop();
     const bool plugins = top != nullptr && top->hasPlugins;
     auto current = captureMixSnapshot(plugins);
+    if (top != nullptr)
+        stampInverseMarker(*top, current);
     MixSnapshot restored;
     if (! edits_->history.undo(std::move(current), restored))
         return false;
@@ -4228,6 +4272,8 @@ bool AudioEngine::redoEdit()
     const auto* top = edits_->history.redoTop();
     const bool plugins = top != nullptr && top->hasPlugins;
     auto current = captureMixSnapshot(plugins);
+    if (top != nullptr)
+        stampInverseMarker(*top, current);
     MixSnapshot restored;
     if (! edits_->history.redo(std::move(current), restored))
         return false;

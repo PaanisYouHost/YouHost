@@ -40,6 +40,7 @@ enum class ShortcutId
     redo,
     marker,
     markers,
+    deleteMarker,
     count
 };
 
@@ -51,7 +52,8 @@ enum class KeyKind
     right,
     bracketLeft,
     bracketRight,
-    letterR
+    letterR,
+    backspace
 };
 
 struct KeyQuery
@@ -84,6 +86,8 @@ inline constexpr Binding kBindings[] = {
       "Undo the last mix edit. A take and its WAV files stay", true, 'z' },
     { ShortcutId::marker, KeyKind::character, 'm', 0, 0, 0, "M",
       "Drop a marker at the playhead. Recording keeps going", false, 0 },
+    { ShortcutId::deleteMarker, KeyKind::backspace, 0, 0, 1, 0, "Cmd+Backspace",
+      "Delete the selected marker. Right-click a marker and choose Delete. Recording keeps going", false, 0 },
     { ShortcutId::markers, KeyKind::character, '6', 0, 0, -1, "6",
       "Open or close MARKERS", false, 0 },
     { ShortcutId::selectAll, KeyKind::character, 'a', 0, 1, 0, "Cmd+A",
@@ -244,7 +248,8 @@ enum class RawToken
     none,
     space,
     left,
-    right
+    right,
+    backspace
 };
 
 struct RawKey
@@ -281,6 +286,8 @@ inline KeyQuery keyQueryFromRaw(const RawKey& key) noexcept
         query.kind = KeyKind::left;
     else if (key.token == RawToken::right)
         query.kind = KeyKind::right;
+    else if (key.token == RawToken::backspace || key.keyCode == 8 || key.textCharacter == 8)
+        query.kind = KeyKind::backspace;
     else if (key.keyCode == '[' || textLetter == '[')
         query.kind = KeyKind::bracketLeft;
     else if (key.keyCode == ']' || textLetter == ']')

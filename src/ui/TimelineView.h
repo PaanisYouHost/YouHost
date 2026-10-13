@@ -32,6 +32,8 @@ public:
 
     void setTransport(const TransportView& view);
     void setMarkers(const std::vector<std::pair<std::int64_t, juce::String>>& markers);
+    void setSelectedMarker(int index);
+    void setMarkerHandlers(std::function<void(int)> select, std::function<void(int)> remove);
     void setLaneProvider(LaneProvider provider);
     void setLocateHandler(std::function<void(std::int64_t)> handler);
     void setHeightHandler(std::function<void(int)> handler);
@@ -72,6 +74,8 @@ private:
     juce::Rectangle<float> waveformArea() const;
     std::int64_t sampleAt(float x) const;
     void locateAt(float x);
+    int markerAt(juce::Point<float> position) const;
+    void showMarkerMenu(int index);
     int laneCount() const;
     int lanesShown() const;
     void clampLaneScroll();
@@ -79,7 +83,11 @@ private:
     TransportView view_;
     LaneProvider laneProvider_;
     std::function<void(std::int64_t)> onLocate_;
+    std::function<void(int)> onSelectMarker_;
+    std::function<void(int)> onDeleteMarker_;
     std::function<void(int)> onHeight_;
+    int selectedMarker_ = -1;
+    bool suppressDragLocate_ = false;
     int knownLanes_ = 0;
     int zoomStep_ = 0;
     int verticalStep_ = 0;

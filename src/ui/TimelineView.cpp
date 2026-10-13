@@ -1,6 +1,7 @@
 #include "TimelineView.h"
 #include "Theme.h"
 #include "X32Look.h"
+#include "engine/Markers.h"
 #include "engine/SignalPath.h"
 #include "engine/WaveformScale.h"
 
@@ -105,7 +106,27 @@ void TimelineView::setMarkers(const std::vector<std::pair<std::int64_t, juce::St
     if (rulerMarkers_ == markers)
         return;
     rulerMarkers_ = markers;
+    if (selectedMarker_ >= static_cast<int>(rulerMarkers_.size()))
+        selectedMarker_ = static_cast<int>(rulerMarkers_.size()) - 1;
     repaint();
+}
+
+void TimelineView::setSelectedMarker(int index)
+{
+    if (index < 0)
+        index = -1;
+    else if (! rulerMarkers_.empty() && index >= static_cast<int>(rulerMarkers_.size()))
+        index = -1;
+    if (selectedMarker_ == index)
+        return;
+    selectedMarker_ = index;
+    repaint();
+}
+
+void TimelineView::setMarkerHandlers(std::function<void(int)> select, std::function<void(int)> remove)
+{
+    onSelectMarker_ = std::move(select);
+    onDeleteMarker_ = std::move(remove);
 }
 
 void TimelineView::setTransport(const TransportView& view)
@@ -460,10 +481,26 @@ void TimelineView::mouseDown(const juce::MouseEvent& event)
         draggingHeight_ = true;
         dragStartY_ = event.getScreenY();
         dragStartHeight_ = getHeight();
+        suppressDragLocate_ = false;
         return;
     }
     if (event.position.y >= static_cast<float>(getHeight() - 32))
+    {
+        suppressDragLocate_ = false;
         return;
+    }
+    const int hit = markerAt(event.position);
+    if (hit >= 0 && event.mods.isPopupMenu())
+    {
+        suppressDragLocate_ = true;
+        if (onSelectMarker_ != nullptr)
+            onSelectMarker_(hit);
+        showMarkerMenu(hit);
+        return;
+    }
+    suppressDragLocate_ = false;
+    if (hit >= 0 && onSelectMarker_ != nullptr)
+        onSelectMarker_(hit);
     locateAt(event.position.x);
 }
 
@@ -475,6 +512,8 @@ void TimelineView::mouseDrag(const juce::MouseEvent& event)
             onHeight_(dragStartHeight_ + (event.getScreenY() - dragStartY_));
         return;
     }
+    if (suppressDragLocate_)
+        return;
     if (event.position.y >= static_cast<float>(getHeight() - 32))
         return;
     locateAt(event.position.x);
@@ -483,6 +522,49 @@ void TimelineView::mouseDrag(const juce::MouseEvent& event)
 void TimelineView::mouseUp(const juce::MouseEvent&)
 {
     draggingHeight_ = false;
+    suppressDragLocate_ = false;
+}
+
+int TimelineView::markerAt(juce::Point<float> position) const
+{
+    if (rulerMarkers_.empty())
+        return -1;
+    const auto inner = waveformArea();
+    auto header = getLocalBounds().toFloat().reduced(8.0f, 6.0f).removeFromTop(static_cast<float>(kTimelineRulerHeightPx));
+    const float width = std::max(1.0f, inner.getWidth());
+    const auto visible = std::max<std::int64_t>(1, visibleSamples());
+    std::vector<MarkerBand> bands;
+    bands.reserve(rulerMarkers_.size());
+    for (const auto& marker : rulerMarkers_)
+    {
+        const double ratio = static_cast<double>(marker.first - viewStart_) / static_cast<double>(visible);
+        const float markX = inner.getX() + static_cast<float>(ratio) * width;
+        const auto placed = takeRulerLabelRect(inner.getX(), header.getY(), inner.getWidth(), header.getHeight(), markX, markX + 72.0f);
+        MarkerBand band;
+        band.lineX = markX;
+        band.lineTop = header.getBottom();
+        band.lineBottom = inner.getBottom();
+        band.pillX = placed.x;
+        band.pillY = placed.y;
+        band.pillW = placed.width;
+        band.pillH = placed.height;
+        bands.push_back(band);
+    }
+    return markerIndexAt(bands.data(), static_cast<int>(bands.size()), position.x, position.y);
+}
+
+void TimelineView::showMarkerMenu(int index)
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, kMarkerDeleteItem);
+    juce::Component::SafePointer<TimelineView> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withMousePosition(),
+                       [safe, index](int result)
+                       {
+                           if (safe == nullptr || result != 1 || safe->onDeleteMarker_ == nullptr)
+                               return;
+                           safe->onDeleteMarker_(index);
+                       });
 }
 
 void TimelineView::setViewState(const SessionTimelineState& state)
@@ -751,8 +833,9 @@ void TimelineView::paint(juce::Graphics& graphics)
         graphics.drawText(label, pill, juce::Justification::centred, true);
     }
 
-    for (const auto& marker : rulerMarkers_)
+    for (int index = 0; index < static_cast<int>(rulerMarkers_.size()); ++index)
     {
+        const auto& marker = rulerMarkers_[static_cast<std::size_t>(index)];
         const float markX = sampleToX(marker.first);
         if (markX < inner.getX() - 1.0f || markX > inner.getRight() + 1.0f)
             continue;
@@ -764,6 +847,11 @@ void TimelineView::paint(juce::Graphics& graphics)
         auto pill = juce::Rectangle<float>(placed.x, placed.y, placed.width, placed.height);
         graphics.setColour(theme::green.withAlpha(0.85f));
         graphics.fillRoundedRectangle(pill, 3.0f);
+        if (index == selectedMarker_)
+        {
+            graphics.setColour(theme::text);
+            graphics.drawRoundedRectangle(pill, 3.0f, 1.5f);
+        }
         graphics.setColour(juce::Colour(0xff141414));
         graphics.drawText(marker.second.isEmpty() ? "MARK" : marker.second, pill, juce::Justification::centred, true);
     }

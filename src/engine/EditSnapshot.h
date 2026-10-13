@@ -7,6 +7,7 @@
 #include "SignalPath.h"
 
 #include <array>
+#include <cstdint>
 #include <string>
 
 namespace youhost
@@ -36,6 +37,13 @@ struct MixSnapshot
     bool bypassAll = false;
     bool hasPlugins = false;
     SessionData plugins;
+    // Set only for a marker delete. Undo inserts the marker. Redo erases it.
+    // Other mix edits leave this false and do not touch the marker list.
+    bool markersCaptured = false;
+    bool markerErase = false;
+    int markerIndex = -1;
+    std::int64_t markerSample = 0;
+    std::string markerName;
 };
 
 inline bool mixFieldsEqual(const MixSnapshot& left, const MixSnapshot& right) noexcept
@@ -60,6 +68,10 @@ inline bool mixFieldsEqual(const MixSnapshot& left, const MixSnapshot& right) no
             || left.groups[index].name != right.groups[index].name)
             return false;
     }
+    if (left.markersCaptured != right.markersCaptured || left.markerErase != right.markerErase
+        || left.markerIndex != right.markerIndex || left.markerSample != right.markerSample
+        || left.markerName != right.markerName)
+        return false;
     return true;
 }
 

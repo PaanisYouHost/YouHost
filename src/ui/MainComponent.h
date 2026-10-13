@@ -88,6 +88,8 @@ private:
     void startRecordingIfReady();
     bool shortcutBlocked(juce::Component* originating) const;
     std::optional<std::int64_t> markerPlaySample() const;
+    void selectMarker(int index);
+    void deleteMarkerIndex(int index);
 
     juce::ApplicationCommandTarget* getNextCommandTarget() override;
     void getAllCommands(juce::Array<juce::CommandID>& commands) override;
@@ -166,6 +168,7 @@ private:
     std::unique_ptr<juce::DocumentWindow> helpWindow_;
     std::unique_ptr<juce::DocumentWindow> markersWindow_;
     int markerRevisionSeen_ = -1;
+    int selectedMarkerIndex_ = -1;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;

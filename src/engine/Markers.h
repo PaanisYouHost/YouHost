@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace youhost
 {
@@ -16,6 +18,29 @@ inline bool markerDropAffectsTransport() noexcept
 
 inline bool markerDropAllowedWhileLocked() noexcept
 {
+    return true;
+}
+
+// Deleting a marker does not start, stop, or relocate the recorder, and the
+// record lock does not block it. The audio thread never reads the list.
+inline bool markerDeleteAffectsTransport() noexcept
+{
+    return false;
+}
+
+inline bool markerDeleteAllowedWhileLocked() noexcept
+{
+    return true;
+}
+
+inline constexpr const char* kMarkerDeleteItem = "Delete";
+
+// Cmd+Backspace deletes the selected marker. Plain Backspace, plain Delete,
+// and a text field do not. Recording is not an input: it never blocks this.
+inline bool markerDeleteShortcut(bool command, bool backspace, bool forwardDelete, bool textField) noexcept
+{
+    if (textField || forwardDelete || ! command || ! backspace)
+        return false;
     return true;
 }
 
@@ -59,6 +84,112 @@ inline std::optional<std::int64_t> playSampleFromSelectedMarker(bool markersOpen
     if (! markersOpen || nameEditing || ! rowSelected || ! startingPlayback)
         return std::nullopt;
     return sample < 0 ? std::int64_t { 0 } : sample;
+}
+
+inline bool eraseMarker(std::vector<MarkerPoint>& markers, int index)
+{
+    if (index < 0 || index >= static_cast<int>(markers.size()))
+        return false;
+    markers.erase(markers.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
+}
+
+inline int findMarkerPoint(const std::vector<MarkerPoint>& markers, const MarkerPoint& point)
+{
+    for (int index = 0; index < static_cast<int>(markers.size()); ++index)
+    {
+        const auto& marker = markers[static_cast<std::size_t>(index)];
+        if (marker.sample == point.sample && marker.name == point.name)
+            return index;
+    }
+    return -1;
+}
+
+enum class MarkerEditKind
+{
+    insert,
+    erase
+};
+
+// Undo stores the marker that was removed and puts it back. Redo erases that
+// same marker. Markers added afterwards stay in the list.
+struct MarkerEdit
+{
+    MarkerEditKind kind = MarkerEditKind::insert;
+    int index = -1;
+    MarkerPoint marker;
+};
+
+inline bool applyMarkerEdit(std::vector<MarkerPoint>& markers, const MarkerEdit& edit)
+{
+    if (edit.kind == MarkerEditKind::erase)
+    {
+        int at = edit.index;
+        if (at < 0 || at >= static_cast<int>(markers.size())
+            || markers[static_cast<std::size_t>(at)].sample != edit.marker.sample
+            || markers[static_cast<std::size_t>(at)].name != edit.marker.name)
+            at = findMarkerPoint(markers, edit.marker);
+        return eraseMarker(markers, at);
+    }
+
+    if (findMarkerPoint(markers, edit.marker) >= 0)
+        return false;
+    int at = edit.index < 0 ? 0 : edit.index;
+    if (at > static_cast<int>(markers.size()))
+        at = static_cast<int>(markers.size());
+    markers.insert(markers.begin() + static_cast<std::ptrdiff_t>(at), edit.marker);
+    return true;
+}
+
+inline int markerIndexAfterDelete(int selected, int deleted, int countAfter) noexcept
+{
+    if (countAfter <= 0 || selected < 0)
+        return -1;
+    if (selected > deleted)
+        return selected - 1;
+    if (selected >= countAfter)
+        return countAfter - 1;
+    return selected;
+}
+
+struct MarkerBand
+{
+    float lineX = 0.0f;
+    float lineTop = 0.0f;
+    float lineBottom = 0.0f;
+    float pillX = 0.0f;
+    float pillY = 0.0f;
+    float pillW = 0.0f;
+    float pillH = 0.0f;
+};
+
+inline bool markerBandContains(const MarkerBand& band, float x, float y, float slop = 5.0f) noexcept
+{
+    const bool pill = band.pillW > 0.0f && band.pillH > 0.0f
+                      && x >= band.pillX && x <= band.pillX + band.pillW
+                      && y >= band.pillY && y <= band.pillY + band.pillH;
+    const bool line = y >= band.lineTop && y <= band.lineBottom && std::fabs(x - band.lineX) <= slop;
+    return pill || line;
+}
+
+inline int markerIndexAt(const MarkerBand* bands, int count, float x, float y, float slop = 5.0f) noexcept
+{
+    if (bands == nullptr || count <= 0)
+        return -1;
+    int found = -1;
+    float best = 1.0e9f;
+    for (int index = 0; index < count; ++index)
+    {
+        if (! markerBandContains(bands[index], x, y, slop))
+            continue;
+        const float distance = std::fabs(x - bands[index].lineX);
+        if (distance < best)
+        {
+            best = distance;
+            found = index;
+        }
+    }
+    return found;
 }
 
 } // namespace youhost
