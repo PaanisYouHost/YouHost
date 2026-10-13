@@ -1,0 +1,83 @@
+name: Build YouMix and PSE
+
+# Standalone plugin CI. This does not build or release YouHost, and it does
+# not publish a GitHub Release.
+
+on:
+  push:
+    branches:
+      - cursor/youmix-pse-plugins-2a5a
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: youmix-pse-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS universal plugins
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S plugins -B plugins/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build
+        run: cmake --build plugins/build --config Release --parallel
+
+      - name: DSP tests
+        run: |
+          set -euo pipefail
+          TEST=plugins/build/YouMixPseTests
+          if [ ! -x "${TEST}" ]; then
+            echo "YouMixPseTests was not produced"
+            find plugins/build -name 'YouMixPseTests*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/YouMix-PSE-macOS"
+          rm -rf "${stage}"
+          mkdir -p "${stage}"
+          copy_bundle() {
+            local name="$1"
+            local found
+            found="$(find plugins/build -type d -name "${name}" -path '*_artefacts*' -print | head -n 1)"
+            if [ -z "${found}" ]; then
+              echo "missing ${name}"
+              find plugins/build \( -name '*.vst3' -o -name '*.component' \) -print
+              exit 1
+            fi
+            cp -R "${found}" "${stage}/"
+          }
+          copy_bundle YouMix.vst3
+          copy_bundle YouMix.component
+          copy_bundle PSE.vst3
+          copy_bundle PSE.component
+          for bundle in YouMix.vst3 YouMix.component PSE.vst3 PSE.component; do
+            binary="$(find "${stage}/${bundle}/Contents/MacOS" -maxdepth 1 -type f | head -n 1)"
+            echo "${bundle}: $(lipo -info "${binary}")"
+            lipo -info "${binary}" | grep -q arm64
+            lipo -info "${binary}" | grep -q x86_64
+          done
+          ditto -c -k --keepParent "${stage}" "${GITHUB_WORKSPACE}/YouMix-PSE-macOS.zip"
+
+      - name: Upload plugin build
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouMix-PSE-macOS
+          path: YouMix-PSE-macOS.zip
+          if-no-files-found: error
