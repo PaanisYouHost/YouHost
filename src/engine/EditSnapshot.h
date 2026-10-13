@@ -38,8 +38,10 @@ struct MixSnapshot
     bool hasPlugins = false;
     SessionData plugins;
     // Set only for a marker delete. Undo inserts the marker. Redo erases it.
-    // Other mix edits leave this false and do not touch the marker list.
+    // markerOnly means this step does not restore mix fields, so a later gain
+    // edit stays its own step above it.
     bool markersCaptured = false;
+    bool markerOnly = false;
     bool markerErase = false;
     int markerIndex = -1;
     std::int64_t markerSample = 0;
@@ -68,9 +70,9 @@ inline bool mixFieldsEqual(const MixSnapshot& left, const MixSnapshot& right) no
             || left.groups[index].name != right.groups[index].name)
             return false;
     }
-    if (left.markersCaptured != right.markersCaptured || left.markerErase != right.markerErase
-        || left.markerIndex != right.markerIndex || left.markerSample != right.markerSample
-        || left.markerName != right.markerName)
+    if (left.markersCaptured != right.markersCaptured || left.markerOnly != right.markerOnly
+        || left.markerErase != right.markerErase || left.markerIndex != right.markerIndex
+        || left.markerSample != right.markerSample || left.markerName != right.markerName)
         return false;
     return true;
 }

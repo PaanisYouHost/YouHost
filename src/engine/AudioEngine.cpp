@@ -4042,18 +4042,32 @@ bool AudioEngine::deleteMarker(int index)
     if (applyingEdit_ || index < 0 || index >= markerCount())
         return false;
     const auto removed = markers_[static_cast<std::size_t>(index)];
-    const bool own = openOwnEdit(false);
-    if (own && edits_ != nullptr && edits_->haveBefore)
+    const auto stamp = [&](MixSnapshot& snapshot)
     {
-        edits_->before.markersCaptured = true;
-        edits_->before.markerErase = false;
-        edits_->before.markerIndex = index;
-        edits_->before.markerSample = removed.sample;
-        edits_->before.markerName = removed.name;
+        snapshot.markerOnly = true;
+        snapshot.markersCaptured = true;
+        snapshot.markerErase = false;
+        snapshot.markerIndex = index;
+        snapshot.markerSample = removed.sample;
+        snapshot.markerName = removed.name;
+    };
+    if (editNest_ > 0)
+    {
+        if (edits_ == nullptr)
+            edits_ = std::make_unique<EditStack>();
+        MixSnapshot step;
+        stamp(step);
+        edits_->history.push(std::move(step));
+    }
+    else
+    {
+        const bool own = openOwnEdit(false);
+        if (own && edits_ != nullptr && edits_->haveBefore)
+            stamp(edits_->before);
+        closeOwnEdit(own);
     }
     eraseMarker(markers_, index);
     ++markerRevision_;
-    closeOwnEdit(own);
     noteSessionEdit();
     return true;
 }
@@ -4109,6 +4123,24 @@ MixSnapshot AudioEngine::captureMixSnapshot(bool plugins)
 
 void AudioEngine::applyMixSnapshot(const MixSnapshot& snapshot)
 {
+    if (snapshot.markerOnly)
+    {
+        applyingEdit_ = true;
+        if (snapshot.markersCaptured)
+        {
+            MarkerEdit edit;
+            edit.kind = snapshot.markerErase ? MarkerEditKind::erase : MarkerEditKind::insert;
+            edit.index = snapshot.markerIndex;
+            edit.marker.sample = snapshot.markerSample;
+            edit.marker.name = snapshot.markerName;
+            if (applyMarkerEdit(markers_, edit))
+                ++markerRevision_;
+        }
+        applyingEdit_ = false;
+        bumpDisplay();
+        return;
+    }
+
     applyingEdit_ = true;
     alignGroup_ = snapshot.align == 1 ? 1 : 0;
     bool listenChanged = false;
@@ -4243,6 +4275,7 @@ void AudioEngine::stampInverseMarker(const MixSnapshot& from, MixSnapshot& to) c
     if (! from.markersCaptured)
         return;
     to.markersCaptured = true;
+    to.markerOnly = from.markerOnly;
     to.markerErase = ! from.markerErase;
     to.markerIndex = from.markerIndex;
     to.markerSample = from.markerSample;

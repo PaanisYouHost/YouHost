@@ -55,7 +55,7 @@ const juce::String YouHostApplication::getApplicationName()
 
 const juce::String YouHostApplication::getApplicationVersion()
 {
-    return juce::String("Beta ") + YOUHOST_VERSION;
+    return juce::String(YOUHOST_VERSION);
 }
 
 bool YouHostApplication::moreThanOneInstanceAllowed()

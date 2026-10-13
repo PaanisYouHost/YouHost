@@ -166,8 +166,9 @@ jobs:
             echo "project VERSION was not found in CMakeLists.txt"
             exit 1
           fi
-          ZIP="YouHost-Beta-${VERSION}-macOS.zip"
+          ZIP="YouHost-${VERSION}-macOS.zip"
           echo "YOUHOST_ZIP=${ZIP}" >> "${GITHUB_ENV}"
+          echo "YOUHOST_RELEASE_NAME=YouHost ${VERSION}" >> "${GITHUB_ENV}"
           rm -f "${ZIP}"
           # --keepParent puts YouHost.app at the zip root. zip -g adds the notes beside it.
           ditto -c -k --keepParent "pack/YouHost.app" "${ZIP}"
@@ -199,6 +200,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: ${{ env.YOUHOST_ZIP }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

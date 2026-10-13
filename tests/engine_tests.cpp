@@ -4894,12 +4894,25 @@ void testReleaseChecklist()
              && helpWindow.find("kGigPerformanceCard") != std::string::npos
              && readWorkspaceFile("INSTALL.md").find("Ennen keikkaa / paras suorituskyky") != std::string::npos
              && checklistDoc.find("Before a gig") != std::string::npos);
+    const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
+    const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost Beta 0.9.2"
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 0.9.2") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-${VERSION}-macOS.zip") != std::string::npos
+         std::string(youhost::versionLabel()) == "YouHost 1.0"
+             && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
+             && std::string(youhost::versionNumber()) == "1.0"
+             && youhost::kSessionFormatVersion == 7
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("YOUHOST_RELEASE_NAME=YouHost ${VERSION}") != std::string::npos
+             && aboutVersion.find("Beta") == std::string::npos
+             && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
-             && checklistDoc.find("Version label") != std::string::npos);
+             && checklistDoc.find("Version label") != std::string::npos
+             && checklistDoc.find("YouHost 1.0") != std::string::npos
+             && checklistDoc.find("YouHost-1.0-macOS.zip") != std::string::npos
+             && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
     commandBackspace.token = youhost::RawToken::backspace;
@@ -4932,6 +4945,24 @@ void testReleaseChecklist()
     restoreLost.index = 0;
     restoreLost.marker = youhost::deviceLossMarker(48000);
     const bool restoredLost = youhost::applyMarkerEdit(liveMarkers, restoreLost);
+    youhost::UndoTape tape;
+    tape.recording = true;
+    tape.gain = 0.0f;
+    tape.markers.push_back(youhost::makeMarker(1000, 1));
+    youhost::undoTapeDeleteMarker(tape, 0);
+    youhost::undoTapeSetGain(tape, -6.0f);
+    const bool undoGain = youhost::undoTapeStep(tape, false);
+    const bool gainUndone = undoGain && tape.gain == 0.0f && tape.markers.empty() && tape.recording;
+    const bool undoMarker = youhost::undoTapeStep(tape, false);
+    const bool markerBack = undoMarker && tape.markers.size() == 1 && tape.markers[0].name == "Marker 1"
+                            && tape.gain == 0.0f && tape.recording;
+    const bool redoMarker = youhost::undoTapeStep(tape, true);
+    const bool markerGoneAgain = redoMarker && tape.markers.empty() && tape.gain == 0.0f && tape.recording;
+    const bool redoGain = youhost::undoTapeStep(tape, true);
+    const bool gainRedone = redoGain && tape.gain == -6.0f && tape.markers.empty() && tape.recording;
+    const auto applyBody = sliceBetween(engineSrc, "void AudioEngine::applyMixSnapshot", "void AudioEngine::restorePluginSnapshot");
+    const auto markerOnlyAt = applyBody.find("if (snapshot.markerOnly)");
+    const auto gainWriteAt = applyBody.find("outputGain_");
     youhost::MarkerBand band;
     band.lineX = 100.0f;
     band.lineTop = 20.0f;
@@ -4970,6 +5001,10 @@ void testReleaseChecklist()
              && deleteBody.find(".wav") == std::string::npos
              && deleteBody.find("eraseMarker") != std::string::npos
              && deleteBody.find("markersCaptured") != std::string::npos
+             && deleteBody.find("markerOnly = true") != std::string::npos
+             && gainUndone && markerBack && markerGoneAgain && gainRedone
+             && markerOnlyAt != std::string::npos && gainWriteAt != std::string::npos && markerOnlyAt < gainWriteAt
+             && engineSrc.find("to.markerOnly = from.markerOnly") != std::string::npos
              && engineSrc.find("applyMarkerEdit") != std::string::npos
              && engineSrc.find("stampInverseMarker") != std::string::npos
              && deleteCase.find("deleteMarkerIndex") != std::string::npos
@@ -5008,7 +5043,9 @@ void testReleaseChecklist()
              && checklistDoc.find("Cmd+Backspace") != std::string::npos
              && checklistDoc.find("Right-click") != std::string::npos
              && checklistDoc.find("Plain Backspace") != std::string::npos
-             && checklistDoc.find("Device lost") != std::string::npos);
+             && checklistDoc.find("Device lost") != std::string::npos
+             && checklistDoc.find("the first Cmd+Z undoes the gain") != std::string::npos
+             && checklistDoc.find("the second brings the marker back") != std::string::npos);
     item("WAV names",
          youhost::takeWaveName(1, 1, "BD") == "1_BD_1.wav"
              && youhost::takeWaveName(2, 1, "BD") == "1_BD_2.wav"
@@ -5409,6 +5446,18 @@ void testBeta090()
     youhost::SessionDocumentModel round;
     CHECK(youhost::readSessionModel(written, round));
     CHECK(round.savedWith == "YouHost Beta 0.9.0");
+    CHECK(round.version == youhost::kSessionFormatVersion);
+    youhost::SessionDocumentModel current;
+    current.savedWith = "YouHost 1.0";
+    current.version = youhost::kSessionFormatVersion;
+    youhost::SessionDocumentModel currentRound;
+    CHECK(youhost::readSessionModel(youhost::writeSessionModel(current), currentRound));
+    CHECK(currentRound.savedWith == "YouHost 1.0");
+    CHECK(currentRound.version == 7);
+    youhost::SessionDocumentModel legacyRound;
+    CHECK(youhost::readSessionModelLegacy(youhost::writeSessionModel(current), legacyRound));
+    CHECK(legacyRound.savedWith == "YouHost 1.0");
+    CHECK(youhost::kSessionFormatVersion == 7);
     CHECK(round.markers.size() == 1);
     CHECK(round.markers[0].name == "Verse");
     CHECK(round.markers[0].sample == 96000);

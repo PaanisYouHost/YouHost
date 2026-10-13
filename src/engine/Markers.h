@@ -1,5 +1,7 @@
 #pragma once
 
+#include "EditHistory.h"
+
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -170,6 +172,90 @@ inline bool markerBandContains(const MarkerBand& band, float x, float y, float s
                       && y >= band.pillY && y <= band.pillY + band.pillH;
     const bool line = y >= band.lineTop && y <= band.lineBottom && std::fabs(x - band.lineX) <= slop;
     return pill || line;
+}
+
+// One undo step touches either the gain or the marker list, never both, and
+// never the recorder. Delete, then change gain: the first undo restores the
+// gain and the second puts the marker back. Redo walks those steps backward.
+struct UndoTapeStep
+{
+    bool changesGain = false;
+    float gain = 0.0f;
+    bool changesMarker = false;
+    MarkerEdit marker {};
+};
+
+struct UndoTape
+{
+    float gain = 0.0f;
+    bool recording = false;
+    std::vector<MarkerPoint> markers;
+    EditHistory<UndoTapeStep> history;
+};
+
+inline void applyUndoTapeStep(UndoTape& tape, const UndoTapeStep& step)
+{
+    const bool recording = tape.recording;
+    if (step.changesGain)
+        tape.gain = step.gain;
+    if (step.changesMarker)
+        applyMarkerEdit(tape.markers, step.marker);
+    tape.recording = recording;
+}
+
+inline UndoTapeStep inverseUndoTapeStep(const UndoTapeStep& step, float currentGain)
+{
+    UndoTapeStep inverse;
+    if (step.changesMarker)
+    {
+        inverse.changesMarker = true;
+        inverse.marker = step.marker;
+        inverse.marker.kind = step.marker.kind == MarkerEditKind::erase ? MarkerEditKind::insert
+                                                                        : MarkerEditKind::erase;
+    }
+    if (step.changesGain)
+    {
+        inverse.changesGain = true;
+        inverse.gain = currentGain;
+    }
+    return inverse;
+}
+
+inline bool undoTapeStep(UndoTape& tape, bool redo)
+{
+    const UndoTapeStep* top = redo ? tape.history.redoTop() : tape.history.undoTop();
+    if (top == nullptr)
+        return false;
+    UndoTapeStep current = inverseUndoTapeStep(*top, tape.gain);
+    UndoTapeStep restored;
+    const bool moved = redo ? tape.history.redo(std::move(current), restored)
+                            : tape.history.undo(std::move(current), restored);
+    if (! moved)
+        return false;
+    applyUndoTapeStep(tape, restored);
+    return true;
+}
+
+inline void undoTapeDeleteMarker(UndoTape& tape, int index)
+{
+    if (index < 0 || index >= static_cast<int>(tape.markers.size()))
+        return;
+    UndoTapeStep before;
+    before.changesMarker = true;
+    before.marker.kind = MarkerEditKind::insert;
+    before.marker.index = index;
+    before.marker.marker = tape.markers[static_cast<std::size_t>(index)];
+    tape.history.push(std::move(before));
+    eraseMarker(tape.markers, index);
+}
+
+inline void undoTapeSetGain(UndoTape& tape, float gain)
+{
+    UndoTapeStep before;
+    before.changesGain = true;
+    before.gain = tape.gain;
+    tape.history.push(before);
+    tape.gain = gain;
 }
 
 inline int markerIndexAt(const MarkerBand* bands, int count, float x, float y, float slop = 5.0f) noexcept
