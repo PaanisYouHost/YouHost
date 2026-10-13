@@ -1,9 +1,11 @@
 #pragma once
 
 #include "engine/AudioEngine.h"
+#include "engine/HostColumns.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <functional>
 #include <memory>
 
 namespace youhost
@@ -11,6 +13,7 @@ namespace youhost
 
 class AppSettings;
 class PluginListWindow;
+class HostColumnHeader;
 
 class PluginPage : public juce::Component,
                    public juce::DragAndDropContainer
@@ -20,7 +23,9 @@ public:
     ~PluginPage() override;
 
     void setMeterMode(bool peak, int referenceDb);
+    void setListenHandler(std::function<void(int channel)> handler);
     void refresh();
+    void refreshChannel(int channel);
     void resized() override;
 
 private:
@@ -34,6 +39,7 @@ private:
     AudioEngine& engine_;
     AppSettings& settings_;
     juce::TextButton nullButton_ { "Null test" };
+    std::unique_ptr<HostColumnHeader> columnHeader_;
     juce::Component content_;
     juce::Label empty_;
     juce::Viewport viewport_;
@@ -44,6 +50,7 @@ private:
     std::unique_ptr<PluginListWindow> pluginList_;
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
+    std::function<void(int)> listenHandler_;
     int channels_ = -1;
     int revision_ = -1;
 };

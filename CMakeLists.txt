@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 0.1.0
+    VERSION 1.0.1
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -39,6 +39,7 @@ target_sources(YouHost PRIVATE
     src/engine/PluginCatalogue.cpp
     src/engine/PluginRack.cpp
     src/engine/Recorder.cpp
+    src/engine/SessionDisk.cpp
     src/engine/SessionDocument.cpp
     src/ui/ChannelMenu.cpp
     src/ui/CpuWindow.cpp
@@ -58,6 +59,7 @@ target_compile_definitions(YouHost PRIVATE
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_PLUGINHOST_VST3=1
     YOUHOST_VERSION="${PROJECT_VERSION}"
+    YOUHOST_VERSION_LABEL="YouHost ${PROJECT_VERSION}"
     YOUHOST_RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources")
 
 if(APPLE)
@@ -84,6 +86,137 @@ target_compile_features(YouHostTests PRIVATE cxx_std_20)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(YouHostTests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+# Release adds -DNDEBUG, which compiles out the lock-reentry checks. The
+# checklist builds this file without NDEBUG. -UNDEBUG has to follow -DNDEBUG.
+target_compile_options(YouHostTests PRIVATE -UNDEBUG)
 
 enable_testing()
 add_test(NAME YouHostTests COMMAND YouHostTests)
+
+# Paints SYNC LOST and fails if the Finnish line has no Ä/ä/ö glyph.
+add_executable(YouHostSyncLostGlyphs tests/sync_lost_glyphs.cpp)
+target_include_directories(YouHostSyncLostGlyphs PRIVATE src)
+target_compile_features(YouHostSyncLostGlyphs PRIVATE cxx_std_20)
+target_compile_definitions(YouHostSyncLostGlyphs PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(YouHostSyncLostGlyphs PRIVATE
+    juce::juce_gui_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+add_test(NAME YouHostSyncLostGlyphs COMMAND YouHostSyncLostGlyphs)
+
+# Focuses MARKERS, CPU, DROPOUTS, and LATENCY and sends keys through the
+# real ComponentPeer path. A marker name editor must keep Space.
+add_executable(YouHostToolKeys tests/tool_window_keys.cpp)
+target_include_directories(YouHostToolKeys PRIVATE src)
+target_compile_features(YouHostToolKeys PRIVATE cxx_std_20)
+target_compile_definitions(YouHostToolKeys PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(YouHostToolKeys PRIVATE
+    juce::juce_gui_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+add_test(NAME YouHostToolKeys COMMAND YouHostToolKeys)
+
+# Loads Apple AUDelay on macOS, feeds silence into both inputs, and fails if the
+# output is non-finite or nowhere near silence. The GitHub macOS job runs it.
+if(APPLE)
+    add_executable(YouHostAuDelayTest tests/audelay_silent.cpp)
+    target_compile_features(YouHostAuDelayTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostAuDelayTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostAuDelayTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostAuDelayTest COMMAND YouHostAuDelayTest)
+
+    # Stereo Apple AUs on a mono channel, offline, factory defaults left alone.
+    # Silence must stay silent. An impulse must decay below -60 dBFS in 10 s.
+    # Fails if the tail grows or the message thread does not return.
+    add_executable(YouHostAuChainTest tests/au_chain.cpp)
+    target_include_directories(YouHostAuChainTest PRIVATE src)
+    target_compile_features(YouHostAuChainTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostAuChainTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostAuChainTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostAuChainTest COMMAND YouHostAuChainTest)
+
+    # Real AudioEngine callback, realtime thread, 48 kHz / 32 samples, 16 Apple
+    # AUs. The message thread creates, edits, recolours, and removes groups for
+    # more than 30 s. Deadline misses are the callback thread's own CPU time.
+    add_executable(YouHostGroupStressTest
+        tests/group_stress.cpp
+        src/engine/AudioEngine.cpp
+        src/engine/PluginCatalogue.cpp
+        src/engine/PluginRack.cpp
+        src/engine/Recorder.cpp
+        src/engine/SessionDisk.cpp
+        src/engine/SessionDocument.cpp)
+    target_include_directories(YouHostGroupStressTest PRIVATE src)
+    target_compile_features(YouHostGroupStressTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostGroupStressTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostGroupStressTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostGroupStressTest COMMAND YouHostGroupStressTest)
+
+    # 1/1 versus Fold L 2/2 on Apple AUs. The product flag has to match the level.
+    add_executable(YouHostMonoNullTest tests/mono_null.cpp)
+    target_include_directories(YouHostMonoNullTest PRIVATE src)
+    target_compile_features(YouHostMonoNullTest PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostMonoNullTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=0)
+    target_link_libraries(YouHostMonoNullTest PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostMonoNullTest COMMAND YouHostMonoNullTest)
+endif()

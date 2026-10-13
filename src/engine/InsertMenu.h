@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PluginBuses.h"
 #include "ScanJobs.h"
 
 #include <algorithm>
@@ -15,6 +16,7 @@ struct CatalogPlugin
     std::string name;
     std::string manufacturer;
     std::string format;
+    std::string buses {};
 };
 
 struct InsertPluginRow
@@ -197,6 +199,8 @@ inline std::vector<InsertGroup> groupInsertPlugins(const std::vector<CatalogPlug
             row.label = plugin.name;
             if (pluginShowsFormat(plugins, static_cast<std::size_t>(source)))
                 row.label += " (" + shortPluginFormat(plugin.format) + ")";
+            if (isPluginBusMark(plugin.buses))
+                row.label += " " + plugin.buses;
             built.plugins.push_back(std::move(row));
         }
         groups.push_back(std::move(built));

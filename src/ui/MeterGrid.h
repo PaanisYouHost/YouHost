@@ -80,18 +80,22 @@ public:
     MeterGrid();
     ~MeterGrid() override;
 
-    void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb);
+    // repaintLevels false updates the stored cells and repaints only rows whose
+    // chrome changed. Meter levels are left as they are so a plugin load does
+    // not redraw the whole grid.
+    void setCells(std::vector<BridgeCell> cells, bool showPeak, int rmsReferenceDb, bool repaintLevels = true);
     void setFitWidth(int viewportWidth);
     int preferredWidth(int viewportWidth) const;
     int naturalContentWidth(int viewportWidth) const;
 
     void setClearHandler(std::function<void(int channel)> handler);
     void setRecordHandler(std::function<void(int channel)> handler);
+    void setListenChangesEnabled(bool enabled);
     void setChannelMenuHandler(std::function<void(int channel)> handler);
     void setGroupToggleHandler(std::function<void(int group)> handler);
     void setGroupMenuHandler(std::function<void(int group)> handler);
     void setGroupRenameHandler(std::function<void(int group)> handler);
-    void setSelectHandler(std::function<void(int channel, bool extend)> handler);
+    void setSelectHandler(std::function<void(int channel, bool extend, bool toggle)> handler);
     void setNameCommitHandler(std::function<void(int channel, juce::String name)> handler);
     void setNameStepHandler(std::function<int(int channel, int direction)> handler);
     void beginNameEdit(int channel);
@@ -112,6 +116,7 @@ private:
 
     std::vector<BridgeCell> cells_;
     bool showPeak_ = false;
+    bool listenChangesEnabled_ = true;
     int rmsReferenceDb_ = -20;
     int fitWidth_ = 0;
     std::function<void(int)> onClearClip_;
@@ -120,7 +125,7 @@ private:
     std::function<void(int)> onGroupToggle_;
     std::function<void(int)> onGroupMenu_;
     std::function<void(int)> onGroupRename_;
-    std::function<void(int, bool)> onSelect_;
+    std::function<void(int, bool, bool)> onSelect_;
     std::function<void(int, juce::String)> onNameCommit_;
     std::function<int(int, int)> onNameStep_;
     std::unique_ptr<juce::TextEditor> editor_;

@@ -1,4 +1,5 @@
 #include "DropoutWindow.h"
+#include "engine/WindowCatalog.h"
 #include "Theme.h"
 #include "WindowMemory.h"
 #include "engine/DropoutLog.h"
@@ -143,7 +144,7 @@ public:
 
         graphics.setColour(theme::fainter);
         graphics.setFont(juce::Font(juce::FontOptions(11.0f)));
-        graphics.drawText("CPU", juce::Rectangle<float>(inner.getX(), inner.getY(), 40.0f, 14.0f),
+        graphics.drawText("DSP", juce::Rectangle<float>(inner.getX(), inner.getY(), 40.0f, 14.0f),
                           juce::Justification::centredLeft, false);
         graphics.drawText("now", juce::Rectangle<float>(inner.getRight() - 36.0f, bottom, 36.0f, 16.0f),
                           juce::Justification::centredRight, false);
@@ -167,7 +168,7 @@ public:
         rangeBox_.addItem("Last 10 min", 1);
         rangeBox_.addItem("Last 1 hour", 2);
         rangeBox_.addItem("Whole session", 3);
-        rangeBox_.setSelectedId(1, juce::dontSendNotification);
+        rangeBox_.setSelectedId(dropoutRangeOnOpen(), juce::dontSendNotification);
         rangeBox_.onChange = [this]
         {
             body_.setData(snapshot_, loadText_, selectedWindowNs());
@@ -193,6 +194,11 @@ public:
     ~Content() override
     {
         viewport_.setViewedComponent(nullptr, false);
+    }
+
+    void openOnWholeSession()
+    {
+        rangeBox_.setSelectedId(dropoutRangeOnOpen(), juce::dontSendNotification);
     }
 
     void refresh()
@@ -245,14 +251,14 @@ DropoutWindow::DropoutWindow(AudioEngine& engine, AppSettings& settings)
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    prepareRememberedWindow(*this, settings_, "windowDropouts", 720, 420, 520, 300);
+    prepareRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight(), 520, 300);
     setVisible(false);
     startTimerHz(4);
 }
 
 DropoutWindow::~DropoutWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts");
+    saveRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight());
     stopTimer();
 }
 
@@ -262,14 +268,17 @@ void DropoutWindow::toggle()
     if (isVisible())
     {
         if (content_ != nullptr)
+        {
+            content_->openOnWholeSession();
             content_->refresh();
+        }
         toFront(true);
     }
 }
 
 void DropoutWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowDropouts");
+    saveRememberedWindow(*this, settings_, "windowDropouts", dropoutWindowWidth(), dropoutWindowHeight());
     setVisible(false);
 }
 

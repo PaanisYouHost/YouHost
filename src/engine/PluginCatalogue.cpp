@@ -1,4 +1,6 @@
 #include "PluginCatalogue.h"
+#include "PluginBuses.h"
+#include "PluginLoadPace.h"
 #include "AppSettings.h"
 #include "ScanJobs.h"
 
@@ -64,6 +66,49 @@ struct Outcome
     juce::String reason;
     juce::OwnedArray<juce::PluginDescription> found;
 };
+
+bool layoutSupported(juce::AudioPluginInstance& instance, int inCh, int outCh)
+{
+    juce::AudioProcessor::BusesLayout layout;
+    const int inputs = instance.getBusCount(true);
+    const int outputs = instance.getBusCount(false);
+    layout.inputBuses.resize(inputs);
+    layout.outputBuses.resize(outputs);
+    const auto inSet = inCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    const auto outSet = outCh > 1 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    for (int bus = 0; bus < inputs; ++bus)
+        layout.inputBuses.getReference(bus) = bus == 0 ? inSet : juce::AudioChannelSet::disabled();
+    for (int bus = 0; bus < outputs; ++bus)
+        layout.outputBuses.getReference(bus) = bus == 0 ? outSet : juce::AudioChannelSet::disabled();
+    return instance.checkBusesLayoutSupported(layout);
+}
+
+void stampBusMark(juce::AudioPluginFormat& format, juce::PluginDescription& description)
+{
+    juce::String error;
+    std::unique_ptr<juce::AudioPluginInstance> instance;
+    try
+    {
+        instance = format.createInstanceFromDescription(description, 48000.0, 512, error);
+    }
+    catch (...)
+    {
+        instance.reset();
+    }
+
+    juce::String mark;
+    if (instance != nullptr)
+    {
+        const bool mono = layoutSupported(*instance, 1, 1);
+        const bool stereo = layoutSupported(*instance, 2, 2);
+        mark = juce::String(pluginBusMark(mono, stereo));
+        instance.reset();
+    }
+    if (mark.isEmpty())
+        mark = juce::String(pluginBusMarkFromCounts(description.numInputChannels, description.numOutputChannels));
+    if (mark.isNotEmpty() && (description.descriptiveName.isEmpty() || description.descriptiveName == description.name))
+        description.descriptiveName = mark;
+}
 
 void lowerScannerPriority()
 {
@@ -218,8 +263,11 @@ void ScanWorker::run()
                 reply.setAttribute("reason", reason);
                 for (auto* description : found)
                     if (description != nullptr)
+                    {
+                        stampBusMark(*format, *description);
                         if (auto xml = description->createXml())
                             reply.addChildElement(xml.release());
+                    }
             }
             else
             {
@@ -556,6 +604,102 @@ void PluginCatalogue::createInstanceAsync(const juce::PluginDescription& descrip
                                           juce::AudioPluginFormat::PluginCreationCallback callback)
 {
     formats_.createPluginInstanceAsync(description, sampleRate, blockSize, std::move(callback));
+}
+
+bool PluginCatalogue::prefersBackgroundInstance(const juce::PluginDescription& description) const
+{
+    const bool audioUnit = isAudioUnitFormat(description.pluginFormatName.toRawUTF8());
+    bool requiresMessageThread = true;
+    for (int index = 0; index < formats_.getNumFormats(); ++index)
+    {
+        auto* format = formats_.getFormat(index);
+        if (format == nullptr || format->getName() != description.pluginFormatName)
+            continue;
+        requiresMessageThread = format->requiresUnblockedMessageThreadDuringCreation(description);
+        break;
+    }
+    return pluginInstantiateWhere(audioUnit, requiresMessageThread) == PluginInstantiateWhere::background;
+}
+
+namespace
+{
+
+// createPluginInstance is protected. The public helpers always post the work
+// back onto the message thread, which is the freeze we are avoiding.
+struct PluginFormatInstantiate
+{
+    using Signature = void (juce::AudioPluginFormat::*)(const juce::PluginDescription&,
+                                                        double,
+                                                        int,
+                                                        juce::AudioPluginFormat::PluginCreationCallback);
+    friend Signature pluginFormatInstantiate(PluginFormatInstantiate);
+};
+
+template <typename Tag, typename Tag::Signature Member>
+struct ExposePluginFormatInstantiate
+{
+    friend typename Tag::Signature pluginFormatInstantiate(Tag)
+    {
+        return Member;
+    }
+};
+
+template struct ExposePluginFormatInstantiate<PluginFormatInstantiate, &juce::AudioPluginFormat::createPluginInstance>;
+
+} // namespace
+
+bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& description,
+                                             double sampleRate,
+                                             int blockSize,
+                                             std::unique_ptr<juce::AudioPluginInstance>& instance,
+                                             juce::String& error) const
+{
+    instance.reset();
+    error.clear();
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    {
+        if (messages->isThisTheMessageThread())
+        {
+            error = "This plugin is opened on the message thread.";
+            return false;
+        }
+    }
+    if (! prefersBackgroundInstance(description))
+    {
+        error = "This plugin is opened on the message thread.";
+        return false;
+    }
+
+    juce::AudioPluginFormat* format = nullptr;
+    for (int index = 0; index < formats_.getNumFormats(); ++index)
+    {
+        auto* candidate = formats_.getFormat(index);
+        if (candidate != nullptr && candidate->getName() == description.pluginFormatName)
+        {
+            format = candidate;
+            break;
+        }
+    }
+    if (format == nullptr)
+    {
+        error = "Unknown plugin format.";
+        return false;
+    }
+
+    bool called = false;
+    (format->*pluginFormatInstantiate(PluginFormatInstantiate {}))(
+        description,
+        sampleRate,
+        blockSize,
+        [&](std::unique_ptr<juce::AudioPluginInstance> created, const juce::String& message)
+        {
+            called = true;
+            instance = std::move(created);
+            error = message;
+        });
+    if (! called && error.isEmpty())
+        error = "Could not load the plugin.";
+    return instance != nullptr;
 }
 
 bool PluginCatalogue::identifierNeedsScan(const juce::String& formatName, const juce::String& identifier) const

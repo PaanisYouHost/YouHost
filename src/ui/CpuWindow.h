@@ -19,6 +19,7 @@ public:
     void closeButtonPressed() override;
 
 private:
+    friend class CpuShell;
     class Content;
 
     void timerCallback() override;

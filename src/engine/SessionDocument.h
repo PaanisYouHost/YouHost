@@ -3,6 +3,7 @@
 #include "ChannelListen.h"
 #include "DisplayLayout.h"
 #include "HostLimits.h"
+#include "SessionFormat.h"
 #include "TakePlan.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -32,6 +33,12 @@ struct SessionGroup
     bool collapsed = false;
 };
 
+struct SessionMarker
+{
+    std::int64_t sample = 0;
+    juce::String name;
+};
+
 struct SessionChannel
 {
     bool excludeFromCompensation = false;
@@ -39,8 +46,10 @@ struct SessionChannel
     ChannelListen listen = ChannelListen::record;
     float outputDb = 0.0f;
     int color = 0;
+    bool colorOwn = false;
     int group = -1;
     juce::String name;
+    bool stereoLink = false;
     std::array<SessionSlot, kSlotsPerChannel> slots {};
 };
 
@@ -62,10 +71,21 @@ struct SessionData
     float waveformGain = 1.0f;
     int alignGroup = 0;
     double sampleRate = 0.0;
+    int bufferSamples = 0;
+    int cardChannels = 0;
+    bool explicitOffline = false;
+    juce::String inputDevice;
+    juce::String outputDevice;
+    int channelCount = kMaxChannels;
+    SessionTimelineState timeline {};
     std::unique_ptr<juce::XmlElement> device;
     std::array<SessionChannel, kMaxChannels> channels {};
     std::array<SessionGroup, kMaxDisplayGroups> groups {};
     std::vector<SessionTake> takes;
+    std::vector<SessionMarker> markers;
+    juce::String savedWith;
+    SessionNode preserved {};
+    bool hasPreserved = false;
 };
 
 // Writes session.youhost. The caller creates the sibling audio/ folder.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -52,6 +53,29 @@ inline void stagePluginChannels(float* const* plugin,
         else
             std::memset(dest, 0, bytes);
     }
+}
+
+// Zero scratch that is not the live mono buffer, then copy the current input.
+// A right channel left from the previous block is the plugin's own output.
+// Feeding that back in is the loop that builds up and clips.
+inline void preparePluginBlock(float* const* plugin,
+                               int inputChannels,
+                               int outputChannels,
+                               const float* mono,
+                               int numSamples) noexcept
+{
+    if (plugin == nullptr || numSamples <= 0)
+        return;
+    const int width = std::max(inputChannels, outputChannels);
+    const auto bytes = sizeof(float) * static_cast<std::size_t>(numSamples);
+    for (int index = 0; index < width && index < 2; ++index)
+    {
+        float* dest = plugin[index];
+        if (dest == nullptr || dest == mono)
+            continue;
+        std::memset(dest, 0, bytes);
+    }
+    stagePluginChannels(plugin, inputChannels, outputChannels, mono, numSamples);
 }
 
 // Keep the first plugin output. Never add or subtract the other channel.
@@ -135,6 +159,36 @@ inline void takeFoldedChannel(float* mono,
     }
 }
 
+// One mono channel through a stereo (or mono) plugin. Scratch belongs to this
+// slot only. The plugin never sees the previous block's output.
+template <typename Process>
+inline void renderFoldedMono(float* mono,
+                             int numSamples,
+                             int inputChannels,
+                             int outputChannels,
+                             StereoFold fold,
+                             float* scratchLeft,
+                             float* scratchRight,
+                             Process&& process)
+{
+    if (mono == nullptr || numSamples <= 0 || scratchLeft == nullptr)
+        return;
+    const int width = std::max(1, std::max(inputChannels, outputChannels));
+    if (width > 1 && scratchRight == nullptr)
+        return;
+    float* plugin[2] = { scratchLeft, scratchRight };
+    preparePluginBlock(plugin, inputChannels, outputChannels, mono, numSamples);
+    const int viewWidth = std::min(width, 2);
+    process(plugin, viewWidth, numSamples);
+    if (viewWidth <= 1)
+    {
+        if (scratchLeft != mono)
+            std::memcpy(mono, scratchLeft, sizeof(float) * static_cast<std::size_t>(numSamples));
+        return;
+    }
+    takeFoldedChannel(mono, plugin, outputChannels, numSamples, fold);
+}
+
 inline bool sameFloatBits(float left, float right) noexcept
 {
     std::uint32_t a = 0;
@@ -142,6 +196,61 @@ inline bool sameFloatBits(float left, float right) noexcept
     std::memcpy(&a, &left, sizeof(a));
     std::memcpy(&b, &right, sizeof(b));
     return a == b;
+}
+
+// Above full scale, so a real clip still latches, and finite, so a meter can fall.
+inline constexpr float kPluginOutputCeiling = 4.0f;
+
+struct SanitizeReport
+{
+    bool nonFinite = false;
+    bool clamped = false;
+};
+
+// NaN and Inf become silence. Finite values outside the ceiling are clamped.
+// No allocation. The caller logs on the message thread when nonFinite is set.
+inline SanitizeReport sanitizeAudioBlock(float* data, int numSamples) noexcept
+{
+    SanitizeReport report;
+    if (data == nullptr || numSamples <= 0)
+        return report;
+    for (int index = 0; index < numSamples; ++index)
+    {
+        const float sample = data[index];
+        if (! std::isfinite(sample))
+        {
+            data[index] = 0.0f;
+            report.nonFinite = true;
+        }
+        else if (sample > kPluginOutputCeiling)
+        {
+            data[index] = kPluginOutputCeiling;
+            report.clamped = true;
+        }
+        else if (sample < -kPluginOutputCeiling)
+        {
+            data[index] = -kPluginOutputCeiling;
+            report.clamped = true;
+        }
+    }
+    return report;
+}
+
+// Recordings stay bit-exact for finite samples. Only NaN and Inf are silenced.
+inline void silenceNonFinite(float* data, int numSamples) noexcept
+{
+    if (data == nullptr || numSamples <= 0)
+        return;
+    for (int index = 0; index < numSamples; ++index)
+        if (! std::isfinite(data[index]))
+            data[index] = 0.0f;
+}
+
+inline float finiteTrimGain(float linear) noexcept
+{
+    if (! std::isfinite(linear))
+        return 1.0f;
+    return linear;
 }
 
 // Unity gain is the bit pattern of 1 and is not applied. Any other value is a straight multiply.

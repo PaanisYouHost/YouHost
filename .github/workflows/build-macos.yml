@@ -37,6 +37,90 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Engine tests
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostTests
+          TEST=build/YouHostTests
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostTests was not produced"
+            find build -name 'YouHostTests*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: SYNC LOST glyphs
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostSyncLostGlyphs
+          TEST=build/YouHostSyncLostGlyphs
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostSyncLostGlyphs was not produced"
+            find build -name 'YouHostSyncLostGlyphs*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Tool window keys
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostToolKeys
+          TEST=build/YouHostToolKeys
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostToolKeys was not produced"
+            find build -name 'YouHostToolKeys*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: AUDelay silent input
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostAuDelayTest
+          TEST=build/YouHostAuDelayTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostAuDelayTest was not produced"
+            find build -name 'YouHostAuDelayTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Apple AU chain offline
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostAuChainTest
+          TEST=build/YouHostAuChainTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostAuChainTest was not produced"
+            find build -name 'YouHostAuChainTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Group edit stress
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostGroupStressTest
+          TEST=build/YouHostGroupStressTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostGroupStressTest was not produced"
+            find build -name 'YouHostGroupStressTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
+      - name: Mono 1/1 null
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostMonoNullTest
+          TEST=build/YouHostMonoNullTest
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostMonoNullTest was not produced"
+            find build -name 'YouHostMonoNullTest*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: Ad-hoc sign
         run: |
           set -euo pipefail
@@ -69,21 +153,68 @@ jobs:
         run: |
           set -euo pipefail
           APP=$(find build -type d -name 'YouHost.app' -print -quit)
-          ditto -c -k --keepParent "${APP}" YouHost-macOS-universal.zip
-          unzip -t YouHost-macOS-universal.zip
-          ls -lh YouHost-macOS-universal.zip
+          if [ -z "${APP}" ]; then
+            echo "YouHost.app was not produced"
+            exit 1
+          fi
+          rm -rf pack
+          mkdir -p pack
+          ditto "${APP}" "pack/YouHost.app"
+          cp "INSTALL.md" "pack/ASENNUSOHJE - INSTALL.txt"
+          VERSION=$(awk '/^project\(YouHost/,/^\)/' CMakeLists.txt | sed -n 's/^[[:space:]]*VERSION[[:space:]]\([0-9][0-9.]*\).*/\1/p' | head -n 1)
+          if [ -z "${VERSION}" ]; then
+            echo "project VERSION was not found in CMakeLists.txt"
+            exit 1
+          fi
+          ZIP="YouHost-${VERSION}-macOS.zip"
+          echo "YOUHOST_ZIP=${ZIP}" >> "${GITHUB_ENV}"
+          echo "YOUHOST_RELEASE_NAME=YouHost ${VERSION}" >> "${GITHUB_ENV}"
+          rm -f "${ZIP}"
+          # --keepParent puts YouHost.app at the zip root. zip -g adds the notes beside it.
+          ditto -c -k --keepParent "pack/YouHost.app" "${ZIP}"
+          (cd pack && zip -g "../${ZIP}" "ASENNUSOHJE - INSTALL.txt")
+          unzip -t "${ZIP}"
+          ZIP="${ZIP}" python3 - <<'PY'
+          import os, zipfile
+          archive = os.environ["ZIP"]
+          names = zipfile.ZipFile(archive).namelist()
+          notes = [n for n in names if n.rstrip("/") == "ASENNUSOHJE - INSTALL.txt"]
+          if notes != ["ASENNUSOHJE - INSTALL.txt"]:
+              raise SystemExit("install notes are not beside YouHost.app: " + repr(notes))
+          if not any(n.startswith("YouHost.app/") for n in names):
+              raise SystemExit("YouHost.app is missing from the zip")
+          if any(n.startswith("YouHost.app/") and "ASENNUSOHJE" in n for n in names):
+              raise SystemExit("install notes were packed inside the app")
+          print("zip layout ok", archive)
+          PY
+          ls -lh "${ZIP}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: YouHost-macOS-universal
-          path: YouHost-macOS-universal.zip
+          path: pack
           if-no-files-found: error
 
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.YOUHOST_ZIP }}
+          path: ${{ env.YOUHOST_ZIP }}
+          if-no-files-found: error
+
+      # A green macOS run of a version tag publishes the release.
+      # Tag v1.0.1, name "YouHost 1.0.1", not a pre-release.
+      # The asset name is YouHost-1.0.1-macOS.zip, so the download URL is
+      # https://github.com/PaanisYouHost/YouHost/releases/download/v1.0.1/YouHost-1.0.1-macOS.zip
       - name: Attach zip to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: YouHost-macOS-universal.zip
+          name: ${{ env.YOUHOST_RELEASE_NAME }}
+          files: ${{ env.YOUHOST_ZIP }}
+          draft: false
+          prerelease: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

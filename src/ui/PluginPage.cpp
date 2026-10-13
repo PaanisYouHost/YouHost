@@ -1,4 +1,5 @@
 #include "PluginPage.h"
+#include "engine/WindowCatalog.h"
 #include "AppSettings.h"
 #include "ChannelMenu.h"
 #include "MeterColours.h"
@@ -8,9 +9,13 @@
 #include "engine/ChannelListen.h"
 #include "engine/SignalPath.h"
 #include "engine/DisplayLayout.h"
+#include "engine/HostColumns.h"
 #include "engine/InsertMenu.h"
+#include "engine/PluginBuses.h"
+#include "engine/StereoLink.h"
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
+#include "engine/Shortcuts.h"
 
 namespace youhost
 {
@@ -217,9 +222,14 @@ private:
         catalog.reserve(static_cast<std::size_t>(types_.size()));
         for (const auto& type : types_)
         {
+            const auto described = type.descriptiveName.toStdString();
+            const auto buses = isPluginBusMark(described)
+                                   ? described
+                                   : pluginBusMarkFromCounts(type.numInputChannels, type.numOutputChannels);
             catalog.push_back(CatalogPlugin { type.name.toStdString(),
                                               type.manufacturerName.toStdString(),
-                                              type.pluginFormatName.toStdString() });
+                                              type.pluginFormatName.toStdString(),
+                                              buses });
         }
 
         const auto query = search_.getText().trim().toStdString();
@@ -292,11 +302,36 @@ bool parseSlotDrag(const juce::var& description, int& channel, int& slot, bool& 
     return true;
 }
 
+class LinkButton : public juce::TextButton
+{
+public:
+    LinkButton()
+    {
+        setButtonText("LINK");
+    }
+
+    void paintButton(juce::Graphics& graphics, bool over, bool down) override
+    {
+        getLookAndFeel().drawButtonBackground(graphics, *this, findColour(juce::TextButton::buttonColourId), over, down);
+        graphics.setColour(findColour(juce::TextButton::textColourOffId));
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        graphics.drawFittedText(getButtonText(), getLocalBounds().reduced(2, 0), juce::Justification::centred, 1);
+    }
+};
+
 class SlotButton : public juce::TextButton,
                    public juce::DragAndDropTarget
 {
 public:
+    SlotButton()
+    {
+        setOpaque(true);
+    }
+
     std::function<void()> onMenu;
+    std::uint32_t shownFill = 0;
+    std::uint32_t shownText = 0;
+    bool shownReady = false;
     std::function<bool()> canDrag;
     std::function<void(bool copy)> onDrag;
     std::function<void(int fromChannel, int fromSlot, bool copy)> onDrop;
@@ -396,18 +431,18 @@ public:
         picker_ = picker.get();
         setUsingNativeTitleBar(true);
         setContentOwned(picker.release(), true);
-        prepareRememberedWindow(*this, settings_, "windowPluginList", 420, 480, 320, 240);
+        prepareRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight(), 320, 240);
         setVisible(false);
     }
 
     ~PluginListWindow() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
     }
 
     void closeButtonPressed() override
     {
-        saveRememberedWindow(*this, settings_, "windowPluginList");
+        saveRememberedWindow(*this, settings_, "windowPluginList", pluginListWindowWidth(), pluginListWindowHeight());
         setVisible(false);
     }
 
@@ -436,9 +471,48 @@ public:
     {
     }
 
+    int groupId() const noexcept { return group_; }
+
     void refresh()
     {
-        repaint();
+        const int channels = std::max(0, engine_.visibleChannels());
+        const int revision = engine_.displayRevision();
+        float level = 0.0f;
+        bool clip = false;
+        int count = 0;
+        bool plugins = false;
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            if (engine_.channelGroup(channel) != group_)
+                continue;
+            ++count;
+            level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
+            clip = clip || engine_.clipFor(channel);
+            if (plugins)
+                continue;
+            const auto snap = engine_.channelSnapshot(channel);
+            for (const auto& slot : snap.slots)
+                plugins = plugins || slot.occupied;
+        }
+
+        const bool chrome = revision != revision_ || count != count_ || plugins != plugins_ || clip != clip_;
+        revision_ = revision;
+        count_ = count;
+        plugins_ = plugins;
+        clip_ = clip;
+        if (chrome)
+        {
+            level_ = level;
+            repaint();
+            return;
+        }
+        if (std::fabs(level - level_) <= 0.00001f)
+            return;
+        level_ = level;
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        repaint(juce::Rectangle<float>(track.x, track.y, track.width, track.height).getSmallestIntegerContainer());
     }
 
     void mouseDown(const juce::MouseEvent& event) override
@@ -479,65 +553,52 @@ public:
         }
         graphics.setColour(ink);
 
-        const int channels = std::max(0, engine_.visibleChannels());
-        float level = 0.0f;
-        bool clip = false;
-        bool plugins = false;
-        int count = 0;
-        int recording = 0;
-        int inputOnly = 0;
-        for (int channel = 0; channel < channels; ++channel)
-        {
-            if (engine_.channelGroup(channel) != group_)
-                continue;
-            ++count;
-            const auto listen = engine_.channelListen(channel);
-            if (listen == ChannelListen::record)
-                ++recording;
-            else if (listen == ChannelListen::input)
-                ++inputOnly;
-            level = std::max(level, showPeak_ ? engine_.peakFor(channel) : engine_.rmsFor(channel));
-            clip = clip || engine_.clipFor(channel);
-            if (! plugins)
-            {
-                const auto snap = engine_.channelSnapshot(channel);
-                for (const auto& slot : snap.slots)
-                    plugins = plugins || slot.occupied;
-            }
-        }
+        constexpr int nameX = 16;
+        constexpr int nameW = 180;
+        constexpr int foldX = 204;
+        constexpr int foldW = 72;
+        constexpr int clipX = 284;
+        constexpr int clipW = 48;
+        constexpr int fxX = 340;
+        constexpr int fxW = 36;
 
-        auto area = getLocalBounds().reduced(14, 4);
         graphics.setColour(ink);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
-        auto title = engine_.groupName(group_);
-        if (engine_.groupCollapsed(group_))
-            title << "    folded";
-        graphics.drawText(title, area.removeFromLeft(std::min(220, area.getWidth() / 3)), juce::Justification::centredLeft, true);
+        graphics.drawText(engine_.groupName(group_),
+                          nameX,
+                          0,
+                          nameW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
 
-        juce::String state = "OFF";
-        if (count > 0 && recording == count)
-            state = "REC";
-        else if (count > 0 && inputOnly == count)
-            state = "INPUT";
-        else if (recording + inputOnly > 0)
-            state = "mixed";
-        if (clip)
-            state << "   CLIP";
-        if (plugins)
-            state << "   FX";
-        graphics.setColour(ink);
+        graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+        graphics.drawText(juce::String(groupFoldLabel(engine_.groupCollapsed(group_), count_)),
+                          foldX,
+                          0,
+                          foldW,
+                          getHeight(),
+                          juce::Justification::centredLeft,
+                          true);
+
         graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText(state, area.removeFromRight(180), juce::Justification::centredRight, true);
+        if (clip_)
+            graphics.drawText("CLIP", clipX, 0, clipW, getHeight(), juce::Justification::centredLeft, true);
+        if (plugins_)
+            graphics.drawText("FX", fxX, 0, fxW, getHeight(), juce::Justification::centredLeft, true);
 
-        auto meter = area.reduced(8, 6);
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        const auto meter = juce::Rectangle<float>(track.x, track.y, track.width, track.height);
         graphics.setColour(theme::meterTrack);
-        graphics.fillRoundedRectangle(meter.toFloat(), 2.0f);
-        if (level > 0.0f && meter.getWidth() > 1)
+        graphics.fillRoundedRectangle(meter, 2.0f);
+        if (level_ > 0.0f && meter.getWidth() > 1.0f)
         {
             const MeterSpan span = showPeak_ ? peakMeterSpan() : rmsMeterSpan(referenceDb_);
-            const float filled = normaliseDb(gainToDb(level), span) * static_cast<float>(meter.getWidth());
-            graphics.setColour(meterLevelColour(level, referenceDb_));
-            graphics.fillRect(meter.getX(), meter.getY(), static_cast<int>(filled), meter.getHeight());
+            const float filled = normaliseDb(gainToDb(level_), span) * meter.getWidth();
+            graphics.setColour(meterLevelColour(level_, referenceDb_));
+            graphics.fillRect(meter.getX(), meter.getY(), filled, meter.getHeight());
         }
 
         graphics.setColour(juce::Colour(0xff8b95a8));
@@ -546,8 +607,14 @@ public:
 
     void setMeterMode(bool peak, int referenceDb)
     {
+        if (showPeak_ == peak && referenceDb_ == referenceDb)
+            return;
         showPeak_ = peak;
         referenceDb_ = referenceDb;
+        const auto track = hostGroupMeterTrack(static_cast<float>(getWidth()),
+                                               static_cast<float>(getHeight()),
+                                               kHostGroupMeterOrigin);
+        repaint(juce::Rectangle<float>(track.x, track.y, track.width, track.height).getSmallestIntegerContainer());
     }
 
 private:
@@ -555,6 +622,11 @@ private:
     int group_ = 0;
     bool showPeak_ = false;
     int referenceDb_ = kDefaultRmsReferenceDb;
+    int revision_ = -1;
+    int count_ = 0;
+    bool plugins_ = false;
+    bool clip_ = false;
+    float level_ = 0.0f;
 };
 
 class OutputTrim : public juce::Component,
@@ -599,6 +671,8 @@ public:
             return;
         }
         dragging_ = true;
+        dragEdit_ = true;
+        engine_.beginEdit();
         startDb_ = engine_.outputDb(channel_);
     }
 
@@ -613,6 +687,9 @@ public:
 
     void mouseUp(const juce::MouseEvent&) override
     {
+        if (dragEdit_)
+            engine_.endEdit();
+        dragEdit_ = false;
         dragging_ = false;
     }
 
@@ -656,18 +733,21 @@ private:
     int channel_ = 0;
     float startDb_ = 0.0f;
     bool dragging_ = false;
+    bool dragEdit_ = false;
     juce::TextEditor editor_;
 };
 
 class PluginPage::Row : public juce::Component
 {
 public:
-    Row(AudioEngine& engine, int channel)
+    Row(AudioEngine& engine, int channel, std::function<void(int)> onListen)
         : engine_(engine),
           channel_(channel),
           tabKeys_(*this),
-          gain_(engine, channel)
+          gain_(engine, channel),
+          onListen_(std::move(onListen))
     {
+        setOpaque(true);
         addAndMakeVisible(number_);
         addAndMakeVisible(name_);
         addAndMakeVisible(arm_);
@@ -679,6 +759,8 @@ public:
         number_.setColour(juce::Label::textColourId, theme::text);
         number_.setMinimumHorizontalScale(1.0f);
         number_.setJustificationType(juce::Justification::centred);
+        name_.setOpaque(false);
+        name_.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         name_.setEditable(false, true, false);
         name_.setFont(juce::Font(juce::FontOptions(13.0f)));
         name_.setMinimumHorizontalScale(0.6f);
@@ -692,7 +774,19 @@ public:
         name_.onEditorShow = [this]
         {
             if (auto* editor = name_.getCurrentTextEditor())
+            {
+                editor->setSelectAllWhenFocused(true);
                 editor->addKeyListener(&tabKeys_);
+                juce::Component::SafePointer<juce::TextEditor> safe(editor);
+                juce::MessageManager::callAsync([safe]
+                {
+                    if (safe != nullptr)
+                    {
+                        safe->grabKeyboardFocus();
+                        safe->selectAll();
+                    }
+                });
+            }
         };
         name_.addMouseListener(this, false);
 
@@ -700,7 +794,13 @@ public:
         exclude_.setMouseClickGrabsKeyboardFocus(false);
         exclude_.setButtonText("Ex");
         exclude_.setTooltip("Exclude from alignment. This channel stays undelayed and does not move the others.");
-        arm_.onClick = [this] { engine_.cycleChannelListen(channel_); };
+        arm_.onClick = [this]
+        {
+            if (onListen_)
+                onListen_(channel_);
+            else
+                engine_.cycleChannelListen(channel_);
+        };
         pdc_.setFont(juce::Font(juce::FontOptions(11.0f)));
         pdc_.setColour(juce::Label::textColourId, theme::dim);
         pdc_.setJustificationType(juce::Justification::centredLeft);
@@ -711,6 +811,18 @@ public:
             const bool excluded = engine_.channelSnapshot(channel_).excluded;
             engine_.setChannelExcluded(channel_, ! excluded);
         };
+
+        addAndMakeVisible(link_);
+        link_.setButtonText("LINK");
+        link_.setMouseClickGrabsKeyboardFocus(false);
+        link_.setClickingTogglesState(false);
+        link_.onClick = [this] { engine_.toggleStereoLink(channel_); };
+        addAndMakeVisible(linkedNote_);
+        linkedNote_.setFont(juce::Font(juce::FontOptions(12.0f)));
+        linkedNote_.setColour(juce::Label::textColourId, theme::dim);
+        linkedNote_.setJustificationType(juce::Justification::centredLeft);
+        linkedNote_.setInterceptsMouseClicks(false, false);
+        linkedNote_.setVisible(false);
 
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
@@ -767,6 +879,7 @@ public:
         number_.setText(juce::String(channel_ + 1), juce::dontSendNotification);
 
         const auto listen = engine_.channelListen(channel_);
+        arm_.setEnabled(! engine_.recordingLocked());
         arm_.setButtonText(channelListenLabel(listen));
         if (listen == ChannelListen::record)
         {
@@ -798,27 +911,60 @@ public:
         exclude_.setColour(juce::TextButton::buttonColourId, excluded ? theme::buttonOn : theme::button);
 
         const auto snap = engine_.channelSnapshot(channel_);
+        const bool canLink = canStereoLink(channel_, std::max(0, engine_.visibleChannels()));
+        const bool linked = canLink && engine_.stereoLinked(channel_);
+        const bool linkBlocked = canLink && engine_.stereoLinkTurnBlocked(channel_) && ! linked;
+        const bool showSlots = hostPluginSlotsVisible(channel_, linked);
+        link_.setVisible(canLink && (channel_ & 1) == 0);
+        link_.setEnabled(! linkBlocked);
+        link_.setColour(juce::TextButton::buttonColourId, linkBlocked ? theme::panelEdge : linked ? theme::buttonOn : theme::button);
+        link_.setColour(juce::TextButton::textColourOffId, linkBlocked ? theme::fainter : theme::text);
+        if (linkBlocked)
+            link_.setTooltip(stereoLinkBlockedTip());
+        else
+            link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
+                             + ". One plugin row for the pair. REC, INPUT, OFF, name, colour, and group stay per channel. Recording stays one mono WAV per channel.");
+        linkedNote_.setVisible(linked && ! showSlots);
+        if (linked && ! showSlots)
+            linkedNote_.setText("Linked to ch " + juce::String(channel_), juce::dontSendNotification);
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
-            const auto& source = snap.slots[static_cast<std::size_t>(slot)];
             auto& button = slots_[static_cast<std::size_t>(slot)];
+            button.setVisible(showSlots);
+            if (! showSlots)
+                continue;
+            const auto& source = snap.slots[static_cast<std::size_t>(slot)];
             const auto text = slotLabel(slot, source);
             if (button.getButtonText() != text)
                 button.setButtonText(text);
             juce::Colour fill = theme::button;
-            if (source.occupied && source.bypassed)
+            const bool blinkBypass = engine_.bypassAll() && source.occupied;
+            if (blinkBypass)
+            {
+                const bool lit = (juce::Time::getMillisecondCounter() / 500u) % 2u == 0u;
+                fill = lit ? juce::Colour(0xffd48a20) : juce::Colour(0xff8a6a22);
+            }
+            else if (source.occupied && source.bypassed)
                 fill = juce::Colour(0xff3a3424);
             else if (source.occupied)
                 fill = theme::buttonOn;
-            if (source.loading)
+            if (! blinkBypass && source.loading)
                 fill = juce::Colour(0xff3d3420);
-            if (engine_.isPluginEditorOpen(channel_, slot))
+            if (! blinkBypass && engine_.isPluginEditorOpen(channel_, slot))
                 fill = fill.brighter(0.2f);
             const int color = engine_.channelColor(channel_);
-            if (color != 0)
+            if (! blinkBypass && color != 0)
                 fill = fill.interpolatedWith(x32Hue(color), 0.28f);
-            button.setColour(juce::TextButton::buttonColourId, fill);
-            button.setColour(juce::TextButton::textColourOffId, source.bypassed ? theme::dim : theme::text);
+            const auto fillArgb = fill.getARGB();
+            const auto textArgb = (source.bypassed ? theme::dim : theme::text).getARGB();
+            if (! button.shownReady || button.shownFill != fillArgb || button.shownText != textArgb)
+            {
+                button.shownReady = true;
+                button.shownFill = fillArgb;
+                button.shownText = textArgb;
+                button.setColour(juce::TextButton::buttonColourId, juce::Colour(fillArgb));
+                button.setColour(juce::TextButton::textColourOffId, juce::Colour(textArgb));
+            }
             juce::String tip = "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.";
             if (source.occupied)
             {
@@ -837,28 +983,55 @@ public:
             colorDrawn_ = color;
             repaint();
         }
-        else if (! meterArea_.isEmpty())
+        const float level = showPeak_ ? engine_.peakFor(channel_) : engine_.rmsFor(channel_);
+        const bool clip = engine_.clipFor(channel_);
+        const int milli = static_cast<int>(level * 1000.0f);
+        if (milli != meterMilli_ || clip != meterClip_)
         {
-            repaint(meterArea_);
+            meterMilli_ = milli;
+            meterClip_ = clip;
+            if (! meterArea_.isEmpty())
+                repaint(meterArea_);
         }
+        const float outputShown = showPeak_ ? engine_.outputPeakFor(channel_) : engine_.outputRmsFor(channel_);
+        const int outputMilli = static_cast<int>(outputShown * 1000.0f);
+        if (outputMilli != outputMilli_)
+        {
+            outputMilli_ = outputMilli;
+            if (! outputMeterArea_.isEmpty())
+                repaint(outputMeterArea_);
+        }
+    }
+
+    void setListenHandler(std::function<void(int)> handler)
+    {
+        onListen_ = std::move(handler);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(4, 2);
-        area.removeFromLeft(8);
-        number_.setBounds(area.removeFromLeft(46));
-        arm_.setBounds(area.removeFromLeft(62).reduced(2, 4));
-        name_.setBounds(area.removeFromLeft(120));
-        meterArea_ = area.removeFromLeft(18).reduced(3, 3);
-        exclude_.setBounds(area.removeFromLeft(34).reduced(2, 4));
-        gain_.setBounds(area.removeFromRight(72).reduced(2, 4));
-        area.removeFromLeft(4);
-        const int slotBudget = std::max(0, area.getWidth() - 150);
-        const int slotWidth = std::min(128, std::max(56, slotBudget / kSlotsPerChannel));
+        const auto columns = layoutHostColumns(getWidth());
+        const auto row = getLocalBounds().reduced(0, 2);
+        number_.setBounds(columns.channel.x, row.getY(), columns.channel.width, row.getHeight());
+        arm_.setBounds(columns.mode.x, row.getY() + 2, std::max(0, columns.mode.width - 4), std::max(0, row.getHeight() - 4));
+        name_.setBounds(columns.name.x + 3, row.getY() + 3, std::max(0, columns.name.width - 6), std::max(0, row.getHeight() - 6));
+        meterArea_ = juce::Rectangle<int>(columns.meter.x + 3, row.getY() + 3,
+                                          std::max(0, columns.meter.width - 6), std::max(0, row.getHeight() - 6));
+        exclude_.setBounds(columns.exclude.x, row.getY() + 2, std::max(0, columns.exclude.width - 4), std::max(0, row.getHeight() - 4));
+        gain_.setBounds(columns.gain.x + 2, row.getY() + 2, std::max(0, columns.gain.width - 4), std::max(0, row.getHeight() - 4));
+        outputMeterArea_ = juce::Rectangle<int>(columns.output.x + 2, row.getY() + 3,
+                                                std::max(0, columns.output.width - 4), std::max(0, row.getHeight() - 6));
+        const int linkWidth = (channel_ & 1) == 0 ? 50 : 0;
+        pdc_.setBounds(columns.delay.x, row.getY(), std::max(0, columns.delay.width - linkWidth), row.getHeight());
+        link_.setBounds(columns.delay.x + std::max(0, columns.delay.width - 48), row.getY() + 8, 46, 22);
+        link_.toFront(false);
+        linkedNote_.setBounds(columns.plugins.x + 4, row.getY(), std::max(0, columns.plugins.width - 8), row.getHeight());
+        const int slotWidth = kSlotsPerChannel > 0 ? columns.plugins.width / kSlotsPerChannel : 0;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-            slots_[static_cast<std::size_t>(slot)].setBounds(area.removeFromLeft(slotWidth).reduced(2, 2));
-        pdc_.setBounds(area.reduced(4, 4));
+            slots_[static_cast<std::size_t>(slot)].setBounds(columns.plugins.x + slot * slotWidth + 2,
+                                                            row.getY() + 2,
+                                                            std::max(0, slotWidth - 4),
+                                                            std::max(0, row.getHeight() - 4));
     }
 
     void paint(juce::Graphics& graphics) override
@@ -881,8 +1054,8 @@ public:
 
         if (engine_.isChannelSelected(channel_))
         {
-            graphics.setColour(theme::text.withAlpha(0.85f));
-            graphics.drawRect(getLocalBounds(), 1);
+            graphics.setColour(theme::green);
+            graphics.drawRect(getLocalBounds().reduced(1), 2);
         }
 
         graphics.setColour(juce::Colour(0xff8b95a8));
@@ -903,24 +1076,45 @@ public:
         }
         graphics.setColour(! on ? theme::panelEdge : engine_.clipFor(channel_) ? theme::red : theme::panelEdge);
         graphics.fillRect(meterArea_.getX(), meterArea_.getY(), meterArea_.getWidth(), 3);
+
+        if (! name_.isBeingEdited())
+        {
+            // Outside the label. A stroke inside its bounds is covered when the label paints.
+            graphics.setColour(juce::Colours::white);
+            graphics.drawRoundedRectangle(name_.getBounds().toFloat().expanded(1.5f), 3.0f, 1.0f);
+        }
+
+        graphics.setColour(on ? theme::meterTrack : theme::panelEdge.withAlpha(0.45f));
+        graphics.fillRoundedRectangle(outputMeterArea_.toFloat(), 2.0f);
+        const float outputLevel = showPeak_ ? engine_.outputPeakFor(channel_) : engine_.outputRmsFor(channel_);
+        if (on && outputLevel > 0.0f && outputMeterArea_.getHeight() > 1)
+        {
+            const float filled = normaliseDb(gainToDb(outputLevel), span) * static_cast<float>(outputMeterArea_.getHeight());
+            auto bar = outputMeterArea_.toFloat();
+            bar.setTop(bar.getBottom() - filled);
+            graphics.setColour(meterLevelColour(outputLevel, referenceDb_));
+            graphics.fillRoundedRectangle(bar, 2.0f);
+        }
     }
 
     void mouseDown(const juce::MouseEvent& event) override
     {
         if (event.mods.isPopupMenu())
         {
-            showChannelMenu(engine_, *this, channel_, [this](int) { editName(); });
+            showChannelMenu(engine_, *this, channel_, nullptr, true);
             return;
         }
-        if (event.mods.isShiftDown())
+        const bool toggle = event.mods.isCommandDown() || event.mods.isCtrlDown();
+        const bool extend = event.mods.isShiftDown() && ! toggle;
+        if (toggle || extend)
         {
-            engine_.selectChannel(channel_, true);
+            engine_.selectChannel(channel_, extend, toggle);
             return;
         }
         if (event.eventComponent == this && meterArea_.contains(event.getPosition()) && engine_.clipFor(channel_))
             engine_.requestClipClear(channel_);
         else if (event.eventComponent == this)
-            engine_.selectChannel(channel_, false);
+            engine_.selectChannel(channel_, false, false);
     }
 
 private:
@@ -934,12 +1128,18 @@ private:
         bool keyPressed(const juce::KeyPress& key, juce::Component*) override
         {
             const auto mods = key.getModifiers();
-            if (mods.isCommandDown() || mods.isAltDown() || mods.isCtrlDown())
-                return false;
-            if (key.getKeyCode() != juce::KeyPress::tabKey)
+            const auto code = key.getKeyCode();
+            const auto nameKey = matchNameKey(code == juce::KeyPress::tabKey,
+                                               false,
+                                               false,
+                                               mods.isShiftDown(),
+                                               mods.isCommandDown(),
+                                               mods.isAltDown(),
+                                               mods.isCtrlDown());
+            if (nameKey != NameKey::next && nameKey != NameKey::previous)
                 return false;
 
-            const int direction = mods.isShiftDown() ? -1 : 1;
+            const int direction = nameKey == NameKey::previous ? -1 : 1;
             const int channel = row.channel_;
             juce::Component::SafePointer<Row> safe(&row);
             juce::MessageManager::callAsync([safe, channel, direction]
@@ -981,7 +1181,7 @@ private:
         menu.addItem(1, "Open");
         menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
         menu.addItem(3, "Remove");
-        if (snap.outputChannels > 1)
+        if (snap.outputChannels > 1 && ! engine_.stereoLinked(channel_))
         {
             juce::PopupMenu fold;
             fold.addItem(10, "Use L", true, snap.stereoFold == 0);
@@ -1011,16 +1211,94 @@ private:
     bool updating_ = false;
     bool selectedDrawn_ = false;
     int colorDrawn_ = -1;
+    int meterMilli_ = -1;
+    bool meterClip_ = false;
     float gainShown_ = 100.0f;
     juce::Label number_;
     juce::Label name_;
     TabKeys tabKeys_;
     juce::TextButton arm_;
     juce::TextButton exclude_;
+    LinkButton link_;
+    juce::Label linkedNote_;
     juce::Label pdc_;
     OutputTrim gain_;
     std::array<SlotButton, kSlotsPerChannel> slots_;
     juce::Rectangle<int> meterArea_;
+    juce::Rectangle<int> outputMeterArea_;
+    int outputMilli_ = -1;
+    std::function<void(int)> onListen_;
+};
+
+class HostColumnHeader : public juce::Component
+{
+public:
+    HostColumnHeader()
+    {
+        setInterceptsMouseClicks(false, false);
+    }
+
+    // Row width can be narrower than this bar when the vertical scrollbar is up.
+    // Labels use that width so they stay on the channel columns.
+    void setLayoutWidth(int width)
+    {
+        if (layoutWidth_ == width)
+            return;
+        layoutWidth_ = width;
+        rebuildCache();
+        repaint();
+    }
+
+    void resized() override
+    {
+        rebuildCache();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (cache_.isValid())
+            graphics.drawImageAt(cache_, 0, 0);
+    }
+
+private:
+    void rebuildCache()
+    {
+        const int width = getWidth();
+        const int height = getHeight();
+        if (width < 1 || height < 1)
+            return;
+        const int layoutWidth = layoutWidth_ > 0 ? std::min(layoutWidth_, width) : width;
+        if (cache_.isValid() && cache_.getWidth() == width && cache_.getHeight() == height && cachedLayout_ == layoutWidth)
+            return;
+
+        cache_ = juce::Image(juce::Image::ARGB, width, height, true);
+        juce::Graphics graphics(cache_);
+        graphics.fillAll(theme::panel);
+        graphics.setColour(theme::panelEdge);
+        graphics.fillRect(0, height - 1, width, 1);
+        graphics.setColour(theme::dim);
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        const auto columns = layoutHostColumns(layoutWidth);
+        auto draw = [&graphics, height](const char* text, HostColumnBox box)
+        {
+            graphics.drawFittedText(text, box.x + 2, 0, std::max(0, box.width - 4), height - 1,
+                                    juce::Justification::centredLeft, 1);
+        };
+        draw(kHostColumnChannel, columns.channel);
+        draw(kHostColumnMode, columns.mode);
+        draw(kHostColumnName, columns.name);
+        const auto delayHeader = delayCompHeaderBox(columns);
+        graphics.drawFittedText(kHostColumnDelay, delayHeader.x, 0, std::max(0, delayHeader.width), height - 1,
+                                juce::Justification::centredLeft, 1);
+        draw(kHostColumnPlugins, columns.plugins);
+        draw(kHostColumnGain, columns.gain);
+        draw(kHostColumnOutput, columns.output);
+        cachedLayout_ = layoutWidth;
+    }
+
+    juce::Image cache_;
+    int layoutWidth_ = 0;
+    int cachedLayout_ = -1;
 };
 
 PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
@@ -1028,16 +1306,18 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
       settings_(settings)
 {
     pluginList_ = std::make_unique<PluginListWindow>(engine_, settings_);
+    columnHeader_ = std::make_unique<HostColumnHeader>();
+    addAndMakeVisible(*columnHeader_);
     addAndMakeVisible(nullButton_);
     nullButton_.setMouseClickGrabsKeyboardFocus(false);
-    nullButton_.setTooltip("Bypass every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. The recorded WAV is always the raw input.");
+    nullButton_.setTooltip("ALL PLUGIN BYPASS. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
     nullButton_.onClick = [this]
     {
         engine_.setBypassAll(! engine_.bypassAll());
         refresh();
     };
     addAndMakeVisible(viewport_);
-    empty_.setText("No input channels are open. Open Audio setup and enable the inputs.", juce::dontSendNotification);
+    empty_.setText("This interface has no input channels.", juce::dontSendNotification);
     empty_.setJustificationType(juce::Justification::centred);
     empty_.setColour(juce::Label::textColourId, theme::dim);
     content_.addAndMakeVisible(empty_);
@@ -1051,6 +1331,13 @@ PluginPage::~PluginPage()
     rows_.clear();
     headers_.clear();
     viewport_.setViewedComponent(nullptr, false);
+}
+
+void PluginPage::setListenHandler(std::function<void(int channel)> handler)
+{
+    listenHandler_ = std::move(handler);
+    for (auto& row : rows_)
+        row->setListenHandler(listenHandler_);
 }
 
 void PluginPage::setMeterMode(bool peak, int referenceDb)
@@ -1087,7 +1374,7 @@ void PluginPage::rebuild()
         }
         else
         {
-            auto row = std::make_unique<Row>(engine_, item.channel);
+            auto row = std::make_unique<Row>(engine_, item.channel, listenHandler_);
             row->setMeterMode(showPeak_, referenceDb_);
             content_.addAndMakeVisible(*row);
             order_.push_back(row.get());
@@ -1142,6 +1429,24 @@ void PluginPage::showPluginList(int channel, int slot)
     });
 }
 
+void PluginPage::refreshChannel(int channel)
+{
+    const int channels = std::max(0, engine_.visibleChannels());
+    if (channels != channels_ || engine_.displayRevision() != revision_)
+        rebuild();
+
+    for (auto& row : rows_)
+        if (row != nullptr && row->isChannel(channel))
+            row->refresh();
+
+    const int group = engine_.channelGroup(channel);
+    if (group < 0)
+        return;
+    for (auto& header : headers_)
+        if (header != nullptr && header->groupId() == group)
+            header->refresh();
+}
+
 void PluginPage::refresh()
 {
     const int channels = std::max(0, engine_.visibleChannels());
@@ -1150,8 +1455,9 @@ void PluginPage::refresh()
 
     empty_.setVisible(channels_ == 0);
     const bool bypass = engine_.bypassAll();
-    nullButton_.setButtonText(bypass ? "Bypass all" : "Null test");
-    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xff8a6a22) : theme::button);
+    nullButton_.setButtonText("ALL PLUGIN BYPASS");
+    nullButton_.setToggleState(bypass, juce::dontSendNotification);
+    nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xffd48a20) : theme::button);
     nullButton_.setColour(juce::TextButton::textColourOffId, bypass ? juce::Colours::white : theme::text);
     for (auto& row : rows_)
         row->refresh();
@@ -1163,12 +1469,25 @@ void PluginPage::resized()
 {
     auto bounds = getLocalBounds();
     auto bar = bounds.removeFromTop(32);
-    nullButton_.setBounds(bar.removeFromLeft(128).reduced(0, 4));
-    viewport_.setBounds(bounds);
+    nullButton_.setBounds(bar.removeFromLeft(176).reduced(0, 4));
+    auto list = bounds;
+    auto headerArea = list.removeFromTop(kHostColumnHeaderHeight);
+    viewport_.setBounds(list);
     int height = 0;
     for (int rowHeight : heights_)
         height += rowHeight;
-    content_.setSize(std::max(1, viewport_.getMaximumVisibleWidth()), std::max(getHeight(), height));
+    const int contentHeight = std::max(viewport_.getHeight(), height);
+    int contentWidth = std::max(1, viewport_.getMaximumVisibleWidth());
+    content_.setSize(contentWidth, contentHeight);
+    contentWidth = std::max(1, viewport_.getMaximumVisibleWidth());
+    if (content_.getWidth() != contentWidth)
+        content_.setSize(contentWidth, contentHeight);
+    if (columnHeader_ != nullptr)
+    {
+        columnHeader_->setLayoutWidth(contentWidth);
+        columnHeader_->setBounds(headerArea);
+        columnHeader_->toFront(false);
+    }
     empty_.setBounds(content_.getLocalBounds().reduced(24));
     auto area = content_.getLocalBounds();
     for (std::size_t index = 0; index < order_.size(); ++index)

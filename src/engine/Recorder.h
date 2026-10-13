@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CheckedMutex.h"
+#include "PlaybackRoute.h"
 #include "SessionDocument.h"
 #include "TakePlan.h"
 
@@ -10,7 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <string>
 #include <vector>
 
 namespace youhost
@@ -75,9 +77,13 @@ public:
                        int numInputs,
                        const std::int16_t* inputPacked,
                        int packedCount,
-                       int numSamples) noexcept;
-    bool processPlayback(float* const* dest, int numSamples) noexcept;
+                       int numSamples,
+                       int activeChannels) noexcept;
+    // keepReading lets Stop finish the crossfade from samples still in the ring.
+    PlaybackPull processPlayback(float* const* dest, int numSamples, bool keepReading = false) noexcept;
     void noteCallback() noexcept;
+    void setPlaybackRingHeld(bool held) noexcept { playbackRingHeld_.store(held, std::memory_order_release); }
+    bool playbackRingHeld() const noexcept { return playbackRingHeld_.load(std::memory_order_acquire); }
 
     bool isRecording() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::recording); }
     bool isPlaying() const noexcept { return mode_.load(std::memory_order_acquire) == static_cast<int>(TransportMode::playing); }
@@ -85,23 +91,33 @@ public:
     void addImportedTake(std::int64_t length, const std::array<juce::String, kMaxChannels>& files, double sampleRate);
 
     void setArmed(int channel, bool armed);
+    // Copies the REC mask without marking the session dirty. Listen mode is already stored.
+    void replaceArmed(const std::array<bool, kMaxChannels>& armed);
     bool isArmed(int channel) const;
     void setChannelName(int channel, const juce::String& name);
     juce::String channelName(int channel) const;
     void setWavBitDepth(int bits);
     int wavBitDepth() const;
 
-    void record(const std::int16_t* inputPacked, int packedCount);
+    // Empty string means the take is running. packedCount is the length of inputPacked.
+    // allowWithoutDevice records every armed channel even when that input is closed (offline).
+    juce::String record(const std::int16_t* inputPacked, int packedCount, bool allowWithoutDevice);
     void stop();
     void play();
     void locate(std::int64_t sample);
     void jumpMarker(int direction);
     void nudgeSeconds(double seconds);
     void clearTakes();
+    void clearChannelNames();
+    bool channelHasTake(int channel) const;
 
     TransportView view() const;
-    void visitRecordedTakes(const std::function<void(const RecordedTakeView* takes, int count, const RecordedTakeView* live)>& fn) const;
+    void visitRecordedTakes(const std::function<void(const RecordedTakeView* takes,
+                                                    int count,
+                                                    const RecordedTakeView* live,
+                                                    const std::array<std::string, kMaxChannels>& names)>& fn) const;
     double timelineSampleRate() const noexcept;
+    void setTimelineSampleRate(double sampleRate) noexcept;
     void setCallbacksLive(bool live) noexcept;
     void captureSession(SessionData& data) const;
     void restoreSession(const SessionData& data, const juce::File& audioFolder);
@@ -162,7 +178,7 @@ private:
     std::array<Ring, kMaxChannels> playRings_ {};
     std::vector<float> ioScratch_;
 
-    mutable std::mutex stateLock_;
+    mutable CheckedMutex stateLock_;
     std::vector<StoredTake> takes_;
     std::array<bool, kMaxChannels> armed_ {};
     std::array<juce::String, kMaxChannels> names_ {};
@@ -197,6 +213,8 @@ private:
     std::atomic<std::int64_t> readerCursor_ { 0 };
     std::atomic<int> overflows_ { 0 };
     std::atomic<std::uint64_t> callbackCount_ { 0 };
+    // The audio thread sets this while Play is up or the crossfade still owns the rings.
+    std::atomic<int> playbackRingHeld_ { 0 };
     std::atomic<double> deviceRate_ { 0.0 };
     std::atomic<double> timelineRate_ { 0.0 };
 

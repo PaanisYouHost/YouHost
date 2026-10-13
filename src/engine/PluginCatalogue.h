@@ -87,6 +87,18 @@ public:
                              int blockSize,
                              juce::AudioPluginFormat::PluginCreationCallback callback);
 
+    // True when this format may be constructed off the message thread.
+    // AudioUnit is never background: it uses createPluginInstanceAsync.
+    bool prefersBackgroundInstance(const juce::PluginDescription& description) const;
+
+    // Called on a background thread. The callback inside the format runs
+    // before this returns.
+    bool createInstanceBlocking(const juce::PluginDescription& description,
+                                double sampleRate,
+                                int blockSize,
+                                std::unique_ptr<juce::AudioPluginInstance>& instance,
+                                juce::String& error) const;
+
 private:
     class DirectoryScanThread;
     friend class DirectoryScanThread;

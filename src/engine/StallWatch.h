@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <pthread.h>
@@ -115,6 +116,19 @@ struct StallClock
         return false;
     }
 };
+
+// The watchdog treats a silent message thread as a stall. A session load
+// touches this before each plugin so one slow instantiate is not added to the
+// previous one.
+inline void touchMessageBeat() noexcept
+{
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    auto& clock = StallClock::get();
+    clock.noteThread(clock.messageThread);
+    clock.messageNs.store(static_cast<std::int64_t>(now), std::memory_order_relaxed);
+}
 
 struct PhaseScope
 {

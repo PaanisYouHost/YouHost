@@ -91,6 +91,38 @@ public:
         }
     }
 
+    double loadPreferredSampleRate()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getDoubleValue("preferredSampleRate", 48000.0);
+        return 48000.0;
+    }
+
+    void savePreferredSampleRate(double rate)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("preferredSampleRate", rate);
+            settings->saveIfNeeded();
+        }
+    }
+
+    int loadPreferredBuffer()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getIntValue("preferredBuffer", kNewSessionBufferSamples);
+        return kNewSessionBufferSamples;
+    }
+
+    void savePreferredBuffer(int samples)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("preferredBuffer", samples);
+            settings->saveIfNeeded();
+        }
+    }
+
     juce::String loadWindowState()
     {
         if (auto* settings = properties_.getUserSettings())
@@ -276,6 +308,22 @@ public:
         if (auto* settings = properties_.getUserSettings())
         {
             settings->setValue("sessionParentFolder", folder);
+            settings->saveIfNeeded();
+        }
+    }
+
+    juce::String loadUserChosenDevice()
+    {
+        if (auto* settings = properties_.getUserSettings())
+            return settings->getValue("userChosenDevice");
+        return {};
+    }
+
+    void saveUserChosenDevice(const juce::String& name)
+    {
+        if (auto* settings = properties_.getUserSettings())
+        {
+            settings->setValue("userChosenDevice", name);
             settings->saveIfNeeded();
         }
     }

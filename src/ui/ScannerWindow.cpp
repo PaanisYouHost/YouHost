@@ -1,4 +1,5 @@
 #include "ScannerWindow.h"
+#include "engine/WindowCatalog.h"
 #include "Theme.h"
 #include "WindowMemory.h"
 
@@ -330,14 +331,14 @@ ScannerWindow::ScannerWindow(AudioEngine& engine, AppSettings& settings)
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
-    prepareRememberedWindow(*this, settings_, "windowScanner", 860, 560, 640, 420);
+    prepareRememberedWindow(*this, settings_, "windowScanner", scannerWindowWidth(), scannerWindowHeight(), 640, 420);
     setVisible(false);
     startTimerHz(4);
 }
 
 ScannerWindow::~ScannerWindow()
 {
-    saveRememberedWindow(*this, settings_, "windowScanner");
+    saveRememberedWindow(*this, settings_, "windowScanner", scannerWindowWidth(), scannerWindowHeight());
     stopTimer();
 }
 
@@ -354,7 +355,7 @@ void ScannerWindow::toggle()
 
 void ScannerWindow::closeButtonPressed()
 {
-    saveRememberedWindow(*this, settings_, "windowScanner");
+    saveRememberedWindow(*this, settings_, "windowScanner", scannerWindowWidth(), scannerWindowHeight());
     setVisible(false);
 }
 

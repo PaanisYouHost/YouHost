@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace youhost
@@ -12,6 +13,9 @@ struct DropoutMark
     std::int64_t steadyNs = 0;
     std::int64_t timelineSample = -1;
     bool recording = false;
+    int bufferSamples = 0;
+    int dspPercent = 0;
+    int pluginCount = 0;
 };
 
 struct CpuSample
@@ -27,13 +31,21 @@ class DropoutRing
 public:
     static constexpr int kCapacity = 512;
 
-    void push(std::int64_t steadyNs, std::int64_t timelineSample, bool recording) noexcept
+    void push(std::int64_t steadyNs,
+              std::int64_t timelineSample,
+              bool recording,
+              int bufferSamples = 0,
+              int dspPercent = 0,
+              int pluginCount = 0) noexcept
     {
         const auto index = write_.load(std::memory_order_relaxed);
         auto& slot = slots_[static_cast<std::size_t>(index % kCapacity)];
         slot.steadyNs = steadyNs;
         slot.timelineSample = timelineSample;
         slot.recording = recording ? 1 : 0;
+        slot.bufferSamples = bufferSamples;
+        slot.dspPercent = dspPercent;
+        slot.pluginCount = pluginCount;
         write_.store(index + 1, std::memory_order_release);
     }
 
@@ -53,6 +65,9 @@ public:
             destination[count].steadyNs = slot.steadyNs;
             destination[count].timelineSample = slot.timelineSample;
             destination[count].recording = slot.recording != 0;
+            destination[count].bufferSamples = slot.bufferSamples;
+            destination[count].dspPercent = slot.dspPercent;
+            destination[count].pluginCount = slot.pluginCount;
             ++count;
             ++read_;
         }
@@ -70,12 +85,26 @@ private:
         std::int64_t steadyNs = 0;
         std::int64_t timelineSample = -1;
         int recording = 0;
+        int bufferSamples = 0;
+        int dspPercent = 0;
+        int pluginCount = 0;
     };
 
     Slot slots_[kCapacity] {};
     std::atomic<std::uint32_t> write_ { 0 };
     std::uint32_t read_ = 0;
 };
+
+// The DROPOUTS range menu. Whole session is what the window shows each time it opens.
+inline constexpr int kDropoutRangeTenMinutes = 1;
+inline constexpr int kDropoutRangeOneHour = 2;
+inline constexpr int kDropoutWholeSessionId = 3;
+inline constexpr const char* kDropoutWholeSessionLabel = "Whole session";
+
+inline int dropoutRangeOnOpen() noexcept
+{
+    return kDropoutWholeSessionId;
+}
 
 inline int countMarksInWindow(const DropoutMark* marks, int count, std::int64_t nowNs, std::int64_t windowNs)
 {
@@ -110,6 +139,31 @@ inline std::int64_t latestMarkNs(const DropoutMark* marks, int count)
 inline bool windowIsStable(const DropoutMark* marks, int count, std::int64_t nowNs, std::int64_t windowNs)
 {
     return countMarksInWindow(marks, count, nowNs, windowNs) == 0;
+}
+
+// youhost.log line. The ISO8601 prefix is added by appendHostLog.
+// "dropout x3  take 48000  buffer 32  dsp 180%  plugins 15"
+inline std::string formatDropoutHostLine(int count, std::int64_t timelineSample, int bufferSamples, int dspPercent, int pluginCount)
+{
+    if (count < 1)
+        count = 1;
+    std::string line = "dropout x" + std::to_string(count);
+    if (timelineSample >= 0)
+        line += "  take " + std::to_string(timelineSample);
+    line += "  buffer " + std::to_string(bufferSamples);
+    line += "  dsp " + std::to_string(dspPercent) + "%";
+    line += "  plugins " + std::to_string(pluginCount);
+    return line;
+}
+
+// First event logs immediately. Later events inside 500 ms stay in one line.
+inline bool dropoutLogDue(std::int64_t nowNs, std::int64_t lastLogNs, int pending) noexcept
+{
+    if (pending <= 0)
+        return false;
+    if (lastLogNs <= 0)
+        return true;
+    return nowNs - lastLogNs >= 500000000;
 }
 
 struct DropoutSnapshot

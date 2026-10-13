@@ -1,7 +1,10 @@
 #pragma once
 
 #include "ChannelEnable.h"
+#include "LatencyCompensation.h"
 #include "Passthrough.h"
+#include "PluginLoadPace.h"
+#include "RepaintCoalesce.h"
 #include "SessionDocument.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -50,6 +53,8 @@ struct PluginGate
     std::atomic<int> pause { 0 };
     std::atomic<std::uint64_t> cpuNs { 0 };
     std::atomic<std::uint32_t> blocks { 0 };
+    // Whole-percent EMA written on the audio thread. Readers never exchange it.
+    std::atomic<int> shownPercent { 0 };
 };
 
 struct DspLoadLine
@@ -93,12 +98,17 @@ public:
                  int numSamples,
                  const Routing& routing,
                  std::uint64_t enabledLow,
-                 std::uint64_t enabledHigh);
+                 std::uint64_t enabledHigh,
+                 int activeChannels);
+    void setActiveChannels(int count);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
     CpuMeters cpuMeters() const;
+    int livePluginPercent() const noexcept { return livePluginPercent_.load(std::memory_order_relaxed); }
+    std::uint64_t graphPublishSerial() const noexcept { return graphPublishSerial_.load(std::memory_order_relaxed); }
     void setAlignMode(int perGroup);
     void setChannelGroups(const int* groups, int count);
+    void copyLatencyInputs(ChannelLatencyInput* out, int count) const;
     void deviceStopped();
     void updateRouting(const Routing& routing);
 
@@ -111,6 +121,14 @@ public:
                     bool openWhenReady = false,
                     int stereoFold = 0);
     void setStereoFold(int channel, int slot, int fold);
+    void setStereoLink(int leftChannel, bool linked);
+    bool stereoLink(int leftChannel) const noexcept;
+    void requestChannelReset(int channel) noexcept;
+    bool takeNaNFault(int& channel, int& slot) noexcept;
+    // Zeros meters' partner memory: delay lines, per-slot scratch, and the
+    // feed rings. Resets prepared plugins once the audio thread is outside
+    // the callback. New, Open, and Offline call this.
+    void silencePublished();
     void clearAll(bool markDirty);
     void removePlugin(int channel, int slot);
     void transferPlugin(int fromChannel, int fromSlot, int toChannel, int toSlot, bool copy);
@@ -128,6 +146,13 @@ public:
     int alignmentSamples() const;
     void captureSession(SessionData& data);
     void restoreSession(const SessionData& data);
+    // Starts the queued session plugins after the device is open again.
+    // One plugin per later message-loop turn. Audio keeps running.
+    void pumpSessionLoads();
+    bool isLoadingPlugins() const noexcept { return ! loadCursor_.done(); }
+    juce::String pluginLoadProgress() const;
+    // channel >= 0: that row changed. -2: batch is about to start. -1: batch finished.
+    void setPluginSlotHandler(std::function<void(int channel)> handler);
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
@@ -177,7 +202,8 @@ private:
                     juce::PluginDescription description,
                     juce::MemoryBlock state,
                     std::unique_ptr<juce::AudioPluginInstance> instance,
-                    const juce::String& error);
+                    const juce::String& error,
+                    std::uint64_t restoreGeneration);
     void publishUnlocked();
     void reapUnlocked();
     std::unique_ptr<LiveGraph> buildGraph();
@@ -185,7 +211,9 @@ private:
     bool pauseGate(PluginGate& gate);
     void resumeGate(PluginGate& gate) noexcept;
     void processJob(int index);
-    void processOneChannel(LiveGraph& graph, int channel, float* output, int numSamples);
+    void processOneChannel(LiveGraph& graph, int channel, float* output, float* partner, int numSamples);
+    void clearChannelMemory(LiveGraph& graph, int channel) noexcept;
+    void noteNaN(int channel, int slot) noexcept;
     void rememberActiveNames();
     void addCoreNs(int core, std::uint64_t ns) noexcept;
     bool waitUntilOutsideCallback();
@@ -200,7 +228,16 @@ private:
                    bool bypassed,
                    bool markDirty,
                    bool openWhenReady,
-                   int stereoFold);
+                   int stereoFold,
+                   std::uint64_t restoreGeneration);
+    void scheduleNextRestore();
+    void startNextRestore();
+    void completeRestoreStep(std::uint64_t generation);
+    void finishRestore();
+    void noteSlot(int channel);
+    void launchBackgroundLoad();
+    void deliverOffThreadInstance();
+    class BackgroundInstantiate;
     void enqueueChannel(int channel, std::function<void()> work, bool asynchronous);
     void pumpChannel(int channel);
     void finishChannelWork(int channel, std::uint64_t ticket);
@@ -229,12 +266,22 @@ private:
     std::array<std::array<SlotModel, kSlotsPerChannel>, kMaxChannels> model_ {};
     std::array<bool, kMaxChannels> excluded_ {};
     std::array<bool, kMaxChannels> audible_ {};
+    std::array<std::atomic<std::uint8_t>, kMaxChannels> stereoLink_ {};
+    std::array<std::atomic<std::uint8_t>, kMaxChannels> channelReset_ {};
+    std::atomic<int> nanFaultChannel_ { -1 };
+    std::atomic<int> nanFaultSlot_ { -1 };
+    std::atomic<int> nanFaultPending_ { 0 };
     std::array<int, kMaxChannels> groups_ {};
     int alignGroup_ = 0;
+    std::atomic<int> activeChannels_ { kMaxChannels };
     mutable std::array<std::atomic<std::uint64_t>, 8> coreNs_ {};
     mutable std::array<std::atomic<std::uint32_t>, 8> coreBlocks_ {};
+    std::array<std::atomic<int>, 8> coreShown_ {};
+    std::atomic<int> pluginPercentScratch_ { 0 };
+    std::atomic<int> livePluginPercent_ { 0 };
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
+    std::array<ChannelLatencyInput, kMaxChannels> latencyInputs_ {};
     int alignmentSamples_ = 0;
     Routing routing_ {};
     double sampleRate_ = 48000.0;
@@ -244,6 +291,37 @@ private:
     std::atomic<int> reprepareBlock_ { 0 };
     std::uint64_t ticketSource_ = 0;
     bool restoring_ = false;
+    SessionLoadCursor loadCursor_ {};
+    std::uint64_t restoreGeneration_ = 0;
+    bool restorePosted_ = false;
+    bool sessionLoadsReady_ = false;
+    struct RestorePlugin
+    {
+        int channel = 0;
+        int slot = 0;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        bool bypassed = false;
+        int stereoFold = 0;
+    };
+    std::vector<RestorePlugin> restoreQueue_;
+    std::function<void(int)> slotHandler_;
+    std::unique_ptr<BackgroundInstantiate> backgroundInstantiate_;
+    std::mutex offThreadMutex_;
+    std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
+    juce::String offThreadError_;
+    int jobChannel_ = 0;
+    int jobSlot_ = 0;
+    std::uint64_t jobTicket_ = 0;
+    std::uint64_t jobGeneration_ = 0;
+    bool jobMarkDirty_ = false;
+    bool jobBypassed_ = false;
+    bool jobOpen_ = false;
+    int jobStereo_ = 0;
+    juce::PluginDescription jobDescription_;
+    juce::MemoryBlock jobState_;
+    double jobRate_ = 48000.0;
+    int jobBlock_ = 512;
 
     std::unique_ptr<LiveGraph> current_;
     std::vector<std::unique_ptr<LiveGraph>> retired_;
@@ -255,8 +333,12 @@ private:
     std::atomic<int> bypassAll_ { 0 };
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
+    RepaintCoalescer uiRepaint_;
+    std::uint64_t triggerLogNs_ = 0;
+    int triggerLoggedNotes_ = 0;
     std::atomic<bool> capturing_ { false };
     std::atomic<std::uint64_t> lastCallbackNs_ { 0 };
+    std::atomic<std::uint64_t> graphPublishSerial_ { 0 };
 
     std::unique_ptr<RealtimePool> pool_;
     juce::AudioWorkgroup workgroup_;
@@ -264,6 +346,7 @@ private:
     bool audioJoined_ = false;
     int jobChannels_[kMaxChannels] {};
     float* jobOutputs_[kMaxChannels] {};
+    float* jobPartners_[kMaxChannels] {};
     LiveGraph* jobGraph_ = nullptr;
     int jobSamples_ = 0;
     int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};

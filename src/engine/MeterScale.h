@@ -44,12 +44,19 @@ inline int normaliseRmsReferenceDb(int db)
     return best;
 }
 
-// RMS ticks run from +20 to -40 around the reference, a 60 dB ruler.
-// With the default -20 dBFS reference the top tick is 0 dBFS.
+// Headroom from the chosen line level up to 0 dBFS. -14 gives 14.
+inline int rmsHeadroomDb(int referenceDb) noexcept
+{
+    return -normaliseRmsReferenceDb(referenceDb);
+}
+
+// The RMS ruler is pinned at 0 dBFS on top and the meter floor on the bottom.
+// Changing the reference moves the 0 line and the tick numbers. It does not
+// slide the whole ruler, which would leave the 0 line looking stuck.
 inline MeterSpan rmsMeterSpan(int referenceDb)
 {
-    const int reference = normaliseRmsReferenceDb(referenceDb);
-    return { static_cast<float>(reference - 40), static_cast<float>(reference + 20) };
+    (void) referenceDb;
+    return { kMeterFloorDb, 0.0f };
 }
 
 inline MeterSpan peakMeterSpan()
@@ -60,15 +67,24 @@ inline MeterSpan peakMeterSpan()
 inline int rmsTicks(int referenceDb, MeterTick* out, int capacity)
 {
     const int reference = normaliseRmsReferenceDb(referenceDb);
+    const int headroom = rmsHeadroomDb(reference);
     int count = 0;
     if (out == nullptr || capacity <= 0)
         return 0;
 
+    const auto push = [&](int label, float dbFs)
+    {
+        if (count >= capacity || dbFs > 0.0f || dbFs < kMeterFloorDb)
+            return;
+        out[count++] = MeterTick { label, dbFs };
+    };
+
+    push(headroom, 0.0f);
     for (int label : kRmsTickLabels)
     {
-        if (count >= capacity)
-            break;
-        out[count++] = MeterTick { label, static_cast<float>(reference + label) };
+        if (label >= headroom)
+            continue;
+        push(label, static_cast<float>(reference + label));
     }
     return count;
 }
@@ -131,6 +147,52 @@ inline float meterNormal(float linearGain, bool peak, int referenceDb)
 {
     const MeterSpan span = peak ? peakMeterSpan() : rmsMeterSpan(referenceDb);
     return normaliseDb(gainToDb(linearGain), span);
+}
+
+// Group meters match on REC and HOST: a thin track along the long side of the
+// bar. HOST rows are short, so the track runs across. REC strips are tall, so
+// the same thickness runs down almost the full height.
+inline constexpr float kGroupMeterInset = 6.0f;
+inline constexpr float kGroupMeterThickness = 14.0f;
+inline constexpr float kHostGroupMeterOrigin = 384.0f;
+inline constexpr float kHostGroupMeterRightInset = 12.0f;
+
+struct GroupMeterTrack
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    bool horizontal = false;
+};
+
+inline GroupMeterTrack recGroupMeterTrack(float barX, float barY, float barW, float barH) noexcept
+{
+    const float room = std::max(0.0f, barW - kGroupMeterInset * 2.0f);
+    const float thickness = std::min(kGroupMeterThickness, room);
+    GroupMeterTrack track;
+    track.horizontal = false;
+    track.width = thickness;
+    track.height = std::max(0.0f, barH - kGroupMeterInset * 2.0f);
+    track.x = barX + barW - kGroupMeterInset - thickness;
+    track.y = barY + kGroupMeterInset;
+    return track;
+}
+
+inline GroupMeterTrack hostGroupMeterTrack(float barW, float barH, float originX) noexcept
+{
+    GroupMeterTrack track;
+    track.horizontal = true;
+    track.x = originX;
+    track.y = kGroupMeterInset;
+    track.width = std::max(0.0f, barW - originX - kHostGroupMeterRightInset);
+    track.height = std::max(0.0f, barH - kGroupMeterInset * 2.0f);
+    return track;
+}
+
+inline float groupMeterLongSpan(const GroupMeterTrack& track) noexcept
+{
+    return track.horizontal ? track.width : track.height;
 }
 
 } // namespace youhost

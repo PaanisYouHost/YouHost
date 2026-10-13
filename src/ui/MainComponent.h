@@ -8,17 +8,21 @@
 #include "ui/MeterGrid.h"
 #include "ui/PluginPage.h"
 #include "ui/ScannerWindow.h"
+#include "ui/SyncLostOverlay.h"
 #include "ui/TimelineView.h"
+#include "engine/Shortcuts.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace youhost
 {
 
-class BitDepthSlot;
+class RecordLockButton;
 
 class MainComponent : public juce::Component,
                       private juce::Timer,
@@ -28,43 +32,64 @@ public:
     MainComponent(AudioEngine& engine, AppSettings& settings);
     ~MainComponent() override;
 
+    void requestApplicationQuit(std::function<void()> quit);
+
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
     void parentHierarchyChanged() override;
 
 private:
     void timerCallback() override;
     bool handleKey(const juce::KeyPress& key, juce::Component* originating);
+    bool runShortcut(ShortcutId id);
     void refresh();
+    void placeSyncOverlay();
+    void placeSyncDialog();
+    void showSyncRestoredDialog();
+    void publishMeters(bool repaintLevels);
+    void onPluginSlot(int channel);
     void setPeakMode(bool peak, bool fromUser);
     void setRmsReference(int db, bool fromUser);
-    void hideDeviceTestTone();
-    void mirrorSetupToggles();
     void toggleSetup();
     void showPage(int page);
     void toggleScanner();
     void toggleDropouts();
     void toggleCpu();
     void toggleLatency();
+    void toggleMarkers();
+    enum class MonitorWindow
+    {
+        dropouts,
+        cpu,
+        latency
+    };
+    void raiseMonitorWindows(MonitorWindow front);
+    void keepMonitorWindowsOpen(MonitorWindow front);
     void ensureLogo();
     class BrandMark;
     void openSession();
     void saveSession();
     void saveSessionAs();
     void importRecordings();
-    void confirmClearTimeline();
     void openRecent(int index);
-    void showFileMenu();
+    void showOpenMenu();
     void showHelp();
-    void showGroupsMenu();
     void layoutMeters();
     void openStartup();
     void dismissStartup();
-    void promptForSession(const juce::String& title, std::function<void(bool placed)> then);
+    void applyGlobalListen(ChannelListen mode);
+    void requestChannelListenCycle(int channel);
+    void confirmListenChange(const juce::String& headline, std::function<void()> apply);
+    void promptForSession(const juce::String& title, std::function<void(bool placed)> then, bool clean = false);
+    void runAfterUnsavedCheck(std::function<void()> action);
     void newSession();
     void requestRecord();
     void startRecordingIfReady();
     bool shortcutBlocked(juce::Component* originating) const;
+    std::optional<std::int64_t> markerPlaySample() const;
+    void selectMarker(int index);
+    void deleteMarkerIndex(int index);
 
     juce::ApplicationCommandTarget* getNextCommandTarget() override;
     void getAllCommands(juce::Array<juce::CommandID>& commands) override;
@@ -73,8 +98,12 @@ private:
 
     enum CommandIDs
     {
-        saveCommand = 0x2101,
-        saveAsCommand = 0x2102
+        saveCommand = kSaveCommandId,
+        saveAsCommand = kSaveAsCommandId,
+        selectAllCommand = kSelectAllCommandId,
+        makeGroupCommand = kMakeGroupCommandId,
+        undoCommand = kUndoCommandId,
+        redoCommand = kRedoCommandId
     };
 
     AudioEngine& engine_;
@@ -109,23 +138,37 @@ private:
     juce::TextButton newButton_ { "New" };
     juce::TextButton openButton_ { "Open" };
     juce::TextButton saveButton_ { "Save" };
-    juce::TextButton fileButton_ { "File" };
+    juce::TextButton saveAsButton_ { "Save As" };
     juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
     juce::TextButton cpuButton_ { "4 CPU" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "5 LATENCY" };
+    juce::TextButton markersButton_ { "6 MARKERS" };
+    juce::TextButton markerButton_ { "MARKER" };
+    SyncLostOverlay syncOverlay_;
+    SyncRestoredDialog syncDialog_;
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
+    juce::TextButton globalRecButton_ { "ALL REC" };
+    juce::TextButton globalInputButton_ { "ALL INPUT" };
+    juce::TextButton globalOffButton_ { "ALL OFF" };
+    std::unique_ptr<RecordLockButton> recordLock_;
+    std::function<void(bool)> afterCopy_;
+    bool copyWasRunning_ = false;
+    bool copyFailedSeen_ = false;
+    bool lockLayout_ = false;
     juce::Label latencyLabel_;
     juce::Viewport meterViewport_;
     MeterScaleRail leftScale_;
     MeterScaleRail rightScale_;
-    juce::AudioDeviceSelectorComponent deviceSelector_;
-    std::unique_ptr<BitDepthSlot> bitDepthSlot_;
     std::unique_ptr<juce::DocumentWindow> setupWindow_;
     std::unique_ptr<juce::DocumentWindow> latencyWindow_;
+    std::unique_ptr<juce::DocumentWindow> helpWindow_;
+    std::unique_ptr<juce::DocumentWindow> markersWindow_;
+    int markerRevisionSeen_ = -1;
+    int selectedMarkerIndex_ = -1;
     std::unique_ptr<juce::FileChooser> fileChooser_;
     struct KeyProxy;
     std::unique_ptr<KeyProxy> keys_;
@@ -133,7 +176,14 @@ private:
     juce::ApplicationCommandManager commandManager_;
     std::unique_ptr<juce::DocumentWindow> startupWindow_;
     std::unique_ptr<juce::DocumentWindow> placeWindow_;
+    std::unique_ptr<juce::DocumentWindow> copyWindow_;
+    double copyProgressValue_ = 0.0;
+    void chooseSaveAsDestination(std::function<void(bool saved)> then = {});
+    void syncCopyProgress();
+    void layoutStatusLine();
 
+    bool heavyPaintSuspended_ = false;
+    bool heavyPaintHeld_ = false;
     bool showPeak_ = false;
     int rmsReferenceDb_ = kDefaultRmsReferenceDb;
     int page_ = 1;
@@ -148,8 +198,14 @@ private:
 
     juce::Rectangle<int> titleArea_;
     juce::Rectangle<int> statusArea_;
+    juce::Rectangle<int> cpuStatusArea_;
+    juce::Font statusFont_ { juce::FontOptions(13.0f) };
+    int lastCpuPercent_ = -1;
+    std::string lastStatusWithoutCpu_;
     juce::Rectangle<int> bannerArea_;
-    juce::Rectangle<int> deviceLostArea_;
+    juce::Rectangle<int> recordLockArea_;
+    juce::Rectangle<int> recordArmArea_;
+    bool armHintVisible_ = false;
     int timelineHeight_ = 0;
     juce::Rectangle<int> hintArea_;
     juce::Rectangle<int> bridgeArea_;

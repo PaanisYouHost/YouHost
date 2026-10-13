@@ -2,6 +2,7 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace youhost
 {
@@ -56,6 +57,34 @@ inline std::string sanitiseSessionName(std::string_view name)
     if (out.empty())
         return "Session";
     return out;
+}
+
+struct SessionCopyEntry
+{
+    std::string relativePath;
+};
+
+// Save As writes session.youhost once and copies every WAV in audio/.
+// Backups and other root files (dropouts, temp) are not copied.
+inline std::vector<SessionCopyEntry> planSessionCopy(const std::vector<std::string>& rootFiles,
+                                                     const std::vector<std::string>& wavNames,
+                                                     const std::vector<std::string>& backupFolders)
+{
+    (void) rootFiles;
+    (void) backupFolders;
+    std::vector<SessionCopyEntry> plan;
+    plan.push_back(SessionCopyEntry { kSessionFileName });
+    for (const auto& wav : wavNames)
+        plan.push_back(SessionCopyEntry { std::string(kAudioFolderName) + "/" + wav });
+    return plan;
+}
+
+// After a successful Save As the session continues in the destination folder.
+inline std::string folderAfterSaveAs(std::string_view current, std::string_view destination, bool copyOk)
+{
+    if (! copyOk || destination.empty())
+        return std::string(current);
+    return std::string(destination);
 }
 
 } // namespace youhost

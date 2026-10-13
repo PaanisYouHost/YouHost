@@ -1,4 +1,5 @@
 #include "YouHostApplication.h"
+#include "engine/VersionLabel.h"
 #include "engine/PluginCatalogue.h"
 #include "ui/MainComponent.h"
 #include "ui/Theme.h"
@@ -10,7 +11,7 @@ class YouHostApplication::MainWindow : public juce::DocumentWindow
 {
 public:
     MainWindow(AudioEngine& engine, AppSettings& settings)
-        : DocumentWindow("YouHost", theme::background, DocumentWindow::allButtons),
+        : DocumentWindow(versionLabel(), theme::background, DocumentWindow::allButtons),
           settings_(settings)
     {
         setUsingNativeTitleBar(true);
@@ -54,7 +55,7 @@ const juce::String YouHostApplication::getApplicationName()
 
 const juce::String YouHostApplication::getApplicationVersion()
 {
-    return YOUHOST_VERSION;
+    return juce::String(YOUHOST_VERSION);
 }
 
 bool YouHostApplication::moreThanOneInstanceAllowed()
@@ -140,8 +141,28 @@ void YouHostApplication::shutdown()
     lookAndFeel_.reset();
 }
 
+void YouHostApplication::anotherInstanceStarted(const juce::String&)
+{
+    if (mainWindow_ != nullptr)
+        mainWindow_->toFront(true);
+}
+
 void YouHostApplication::systemRequestedQuit()
 {
+    if (mainWindow_ != nullptr)
+    {
+        if (auto* main = dynamic_cast<MainComponent*>(mainWindow_->getContentComponent()))
+        {
+            main->requestApplicationQuit([this]
+            {
+                if (engine_ != nullptr)
+                    engine_->prepareForQuit();
+                mainWindow_.reset();
+                quit();
+            });
+            return;
+        }
+    }
     if (engine_ != nullptr)
         engine_->prepareForQuit();
     mainWindow_.reset();

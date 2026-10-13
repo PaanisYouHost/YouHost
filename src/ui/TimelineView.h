@@ -1,12 +1,15 @@
 #pragma once
 
 #include "engine/Recorder.h"
+#include "engine/SessionFormat.h"
 #include "engine/TimelineLanes.h"
 #include "engine/TimelineZoom.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace youhost
 {
@@ -24,9 +27,13 @@ public:
     TimelineView();
     ~TimelineView() override;
 
-    using LaneProvider = std::function<void(const std::function<void(const std::vector<TimelineLaneView>&)>&)>;
+    using LanePaint = std::function<void(const std::vector<TimelineLaneView>&, const std::vector<TakeMark>&)>;
+    using LaneProvider = std::function<void(const LanePaint&)>;
 
     void setTransport(const TransportView& view);
+    void setMarkers(const std::vector<std::pair<std::int64_t, juce::String>>& markers);
+    void setSelectedMarker(int index);
+    void setMarkerHandlers(std::function<void(int)> select, std::function<void(int)> remove);
     void setLaneProvider(LaneProvider provider);
     void setLocateHandler(std::function<void(std::int64_t)> handler);
     void setHeightHandler(std::function<void(int)> handler);
@@ -37,6 +44,14 @@ public:
     void verticalZoomOut();
     void setWaveformGain(float gain);
     void setWaveformGainHandler(std::function<void(float)> handler);
+    void setSelectedChannel(std::function<int()> channel);
+    void scrollToChannel(int channel);
+    void focusChannelLane(int channel, bool enlarge);
+    void focusChannelJump();
+    void releaseGoFocus();
+    bool goFieldIs(const juce::Component* component) const;
+    void setViewState(const SessionTimelineState& state);
+    SessionTimelineState viewState() const;
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -53,10 +68,14 @@ private:
     void nudgeWaveformGain(int direction);
     std::int64_t zoomAnchorSample() const;
     void verticalZoomBy(int delta);
+    int zoomAnchorLane() const;
+    void rememberLanes(const std::vector<TimelineLaneView>& lanes);
     void syncScroll();
     juce::Rectangle<float> waveformArea() const;
     std::int64_t sampleAt(float x) const;
     void locateAt(float x);
+    int markerAt(juce::Point<float> position) const;
+    void showMarkerMenu(int index);
     int laneCount() const;
     int lanesShown() const;
     void clampLaneScroll();
@@ -64,13 +83,20 @@ private:
     TransportView view_;
     LaneProvider laneProvider_;
     std::function<void(std::int64_t)> onLocate_;
+    std::function<void(int)> onSelectMarker_;
+    std::function<void(int)> onDeleteMarker_;
     std::function<void(int)> onHeight_;
+    int selectedMarker_ = -1;
+    bool suppressDragLocate_ = false;
     int knownLanes_ = 0;
     int zoomStep_ = 0;
     int verticalStep_ = 0;
     int laneScroll_ = 0;
     std::int64_t viewStart_ = 0;
+    bool holdTimeScroll_ = false;
+    bool pendingView_ = false;
     bool updatingScroll_ = false;
+    SessionTimelineState pendingViewState_ {};
     bool draggingHeight_ = false;
     int dragStartY_ = 0;
     int dragStartHeight_ = 0;
@@ -80,14 +106,28 @@ private:
     juce::TextButton zoomInButton_ { "+" };
     juce::TextButton verticalOutButton_ { "v-" };
     juce::TextButton verticalInButton_ { "v+" };
-    juce::TextButton fitButton_ { "Fit" };
+    juce::TextButton fitButton_ { "FIT" };
+    class GoBox : public juce::TextEditor
+    {
+    public:
+        void mouseDown(const juce::MouseEvent& event) override
+        {
+            setWantsKeyboardFocus(true);
+            juce::TextEditor::mouseDown(event);
+            grabKeyboardFocus();
+        }
+    };
+    GoBox gotoBox_;
     juce::TextButton waveOutButton_ { "W-" };
     juce::TextButton waveInButton_ { "W+" };
     float waveformGain_ = 1.0f;
     float laneWheel_ = 0.0f;
-    float timeWheel_ = 0.0f;
+    double timeWheel_ = 0.0;
     float gainWheel_ = 0.0f;
     std::function<void(float)> onWaveformGain_;
+    std::function<int()> selectedChannel_;
+    std::vector<std::vector<int>> laneMembers_;
+    std::vector<std::pair<std::int64_t, juce::String>> rulerMarkers_;
 };
 
 } // namespace youhost
