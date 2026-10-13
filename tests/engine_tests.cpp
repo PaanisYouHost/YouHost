@@ -5012,6 +5012,10 @@ void testReleaseChecklist()
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YOUHOST_RELEASE_NAME=YouHost ${VERSION}") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("draft: false") != std::string::npos
+             && checklistDoc.find("not a pre-release") != std::string::npos
+             && checklistDoc.find("releases/download/vX.Y.Z/YouHost-X.Y.Z-macOS.zip") != std::string::npos
              && aboutVersion.find("Beta") == std::string::npos
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
