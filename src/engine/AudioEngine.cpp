@@ -2368,6 +2368,8 @@ void AudioEngine::setChannelName(int channel, const juce::String& name)
         return;
     const bool ownEdit = openOwnEdit(false);
     recorder_->setChannelName(channel, name);
+    if (rack_ != nullptr)
+        rack_->setTrackLabel(channel, name);
     noteSessionEdit();
     closeOwnEdit(ownEdit);
 }
@@ -4188,6 +4190,8 @@ void AudioEngine::applyMixSnapshot(const MixSnapshot& snapshot)
         const auto name = juce::String::fromUTF8(snapshot.names[index].c_str());
         if (recorder_ != nullptr && recorder_->channelName(channel) != name)
             recorder_->setChannelName(channel, name);
+        if (rack_ != nullptr)
+            rack_->setTrackLabel(channel, name);
         channelColor_[index] = snapshot.color[index];
         channelColorOwn_[index] = snapshot.colorOwn[index] != 0;
         channelGroup_[index] = snapshot.group[index];

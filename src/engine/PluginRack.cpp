@@ -35,6 +35,16 @@ struct InstanceDeleter
     }
 };
 
+bool isYouMixPlugin(const juce::PluginDescription& description)
+{
+    if (description.name.equalsIgnoreCase("YouMix"))
+        return true;
+    const auto& file = description.fileOrIdentifier;
+    return file.containsIgnoreCase("YouMix.vst3")
+           || file.containsIgnoreCase("YouMix.component")
+           || file.contains("Ymx1");
+}
+
 juce::String pluginIdentifier(const juce::PluginDescription& description)
 {
     if (description.fileOrIdentifier.isNotEmpty())
@@ -1589,6 +1599,15 @@ void PluginRack::finishLoad(int channel,
         hosted->stereoFold = static_cast<int>(stereoFoldFromInt(stereoFold));
         hosted->latencySamples = clampLatencySamples(hosted->instance->getLatencySamples());
         logHostedPlugin(settings_, *hosted->instance, hosted->description, buses, stereoFoldFromInt(hosted->stereoFold), rate, block);
+        if (isYouMixPlugin(hosted->description))
+        {
+            // Before the instance joins the audio graph. Name only; no graph change.
+            if (trackLabel_[static_cast<std::size_t>(channel)].isEmpty())
+                trackLabel_[static_cast<std::size_t>(channel)] = "Ch " + juce::String(channel + 1);
+            juce::AudioProcessor::TrackProperties properties;
+            properties.name = trackLabel_[static_cast<std::size_t>(channel)];
+            hosted->instance->updateTrackProperties(properties);
+        }
     }
     else if (problem.isEmpty())
     {
@@ -2020,6 +2039,45 @@ void PluginRack::openEditor(int channel, int slot)
         window->addKeyListener(commandKeys_);
     window->setVisible(true);
     editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
+}
+
+void PluginRack::setTrackLabel(int channel, const juce::String& name)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    const auto trimmed = name.trim();
+    const juce::String label = trimmed.isEmpty()
+                                   ? "Ch " + juce::String(channel + 1)
+                                   : juce::String(channel + 1) + " " + trimmed;
+    if (trackLabel_[static_cast<std::size_t>(channel)] == label)
+        return;
+    trackLabel_[static_cast<std::size_t>(channel)] = label;
+    pushTrackLabel(channel);
+}
+
+void PluginRack::pushTrackLabel(int channel)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    if (trackLabel_[static_cast<std::size_t>(channel)].isEmpty())
+        trackLabel_[static_cast<std::size_t>(channel)] = "Ch " + juce::String(channel + 1);
+
+    juce::AudioProcessor::TrackProperties properties;
+    properties.name = trackLabel_[static_cast<std::size_t>(channel)];
+
+    std::array<std::shared_ptr<juce::AudioPluginInstance>, kSlotsPerChannel> instances;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+        {
+            const auto& plugin = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin;
+            if (plugin != nullptr && isYouMixPlugin(plugin->description))
+                instances[static_cast<std::size_t>(slot)] = plugin->instance;
+        }
+    }
+    for (auto& instance : instances)
+        if (instance != nullptr)
+            instance->updateTrackProperties(properties);
 }
 
 void PluginRack::setGlobalKeyListener(juce::KeyListener* listener)

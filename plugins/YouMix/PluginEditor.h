@@ -1,0 +1,76 @@
+#pragma once
+
+#include "PluginProcessor.h"
+#include "dsp/YouMixCore.h"
+#include "ui/Fader.h"
+
+// Closing this window does not change the audio. It only mirrors the shared core.
+class YouMixAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                   private juce::Timer
+{
+public:
+    explicit YouMixAudioProcessorEditor(YouMixAudioProcessor&);
+    ~YouMixAudioProcessorEditor() override;
+
+    void paint(juce::Graphics&) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseMove(const juce::MouseEvent&) override;
+
+private:
+    void timerCallback() override;
+    void visibilityChanged() override;
+    void parentHierarchyChanged() override;
+    void layoutStrips();
+    void refreshButtons();
+    void fitOnce();
+    void commitTypedName();
+    void placeNameEditor();
+    bool hostNamed(int slot) const noexcept;
+
+    struct Strip
+    {
+        int slot = 0;
+        juce::Rectangle<int> bounds;
+        juce::Rectangle<int> swatch;
+        juce::Rectangle<int> title;
+        juce::Rectangle<int> meter;
+        juce::Rectangle<int> mute;
+        juce::Rectangle<int> weightLabel;
+        juce::Rectangle<int> groupButton[5];
+    };
+
+    YouMixAudioProcessor& processor_;
+    youmix::YouMixSettings snapshot_ {};
+    float input_[youmix::kYouMixSlots] {};
+    float reduction_[youmix::kYouMixSlots] {};
+    std::uint32_t trackColour_[youmix::kYouMixSlots] {};
+    char hostName_[youmix::kYouMixSlots][32] {};
+    juce::TextEditor nameEditor_;
+    int editingSlot_ = -1;
+    bool skipNameCommit_ = false;
+    Strip strips_[youmix::kYouMixSlots];
+    int stripCount_ = 0;
+    bool advanced_ = false;
+    bool fitted_ = false;
+    juce::Rectangle<int> stripArea_;
+
+    juce::TextButton bypassButton_ { "ON" };
+    juce::TextButton voiceButton_ { "VOICE" };
+    juce::TextButton singingButton_ { "SINGING" };
+    juce::TextButton advancedButton_ { "ADVANCED" };
+    juce::Rectangle<int> pinkBypassArea_[youmix::kYouMixGroups];
+    Fader weight_[youmix::kYouMixSlots];
+    juce::Label title_;
+    juce::Label meterKey_;
+    juce::Label pinkCaption_[youmix::kYouMixGroups];
+    Fader pink_[youmix::kYouMixGroups];
+    juce::Label attackCaption_;
+    juce::Label releaseCaption_;
+    juce::Label thresholdCaption_;
+    Fader attack_;
+    Fader release_;
+    Fader threshold_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(YouMixAudioProcessorEditor)
+};
