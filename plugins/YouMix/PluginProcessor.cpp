@@ -9,7 +9,7 @@ namespace
 {
 
 constexpr std::uint32_t kStateMagic = 0x594D5831; // YMX1
-constexpr std::uint32_t kStateVersion = 1;
+constexpr std::uint32_t kStateVersion = 3;
 
 struct YouMixState
 {
@@ -22,9 +22,14 @@ struct YouMixState
     float pinkDb[youmix::kYouMixGroups] = { -32.0f, -32.0f, -32.0f, -32.0f };
     std::uint32_t bypass = 0;
     char name[32] = {};
+    float attackMs = 5.0f;
+    float releaseMs = 70.0f;
+    float thresholdDb = -45.0f;
+    float weightDb = 0.0f;
+    std::uint32_t pinkBypass = 0;
 };
 
-static_assert(sizeof(YouMixState) == 76, "YouMix session blob must stay fixed-size");
+static_assert(sizeof(YouMixState) == 96, "YouMix session blob must stay fixed-size");
 
 } // namespace
 
@@ -95,6 +100,16 @@ void YouMixAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         state.bypass = settings.bypass ? 1u : 0u;
         for (int group = 0; group < youmix::kYouMixGroups; ++group)
             state.pinkDb[group] = settings.pinkDb[group];
+        state.attackMs = settings.attackMs;
+        state.releaseMs = settings.releaseMs;
+        state.thresholdDb = settings.thresholdDb;
+        state.weightDb = settings.weightDb[slot_];
+        state.pinkBypass = 0;
+        for (int group = 0; group < youmix::kYouMixGroups; ++group)
+        {
+            if (settings.pinkBypass[group])
+                state.pinkBypass |= 1u << static_cast<unsigned>(group);
+        }
         std::memcpy(state.name, settings.name[slot_], sizeof(state.name));
         state.name[31] = 0;
     }
@@ -103,12 +118,13 @@ void YouMixAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 
 void YouMixAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    if (data == nullptr || sizeInBytes < static_cast<int>(sizeof(YouMixState)))
+    if (data == nullptr || sizeInBytes < 76)
         return;
 
     YouMixState state;
-    std::memcpy(&state, data, sizeof(state));
-    if (state.magic != kStateMagic || state.version != kStateVersion)
+    const int bytes = juce::jmin(sizeInBytes, static_cast<int>(sizeof(state)));
+    std::memcpy(&state, data, static_cast<std::size_t>(bytes));
+    if (state.magic != kStateMagic || state.version < 1 || state.version > kStateVersion)
         return;
     state.name[31] = 0;
 
@@ -128,6 +144,18 @@ void YouMixAudioProcessor::setStateInformation(const void* data, int sizeInBytes
     {
         for (int group = 0; group < youmix::kYouMixGroups; ++group)
             core.setPinkDb(group, state.pinkDb[group], true);
+        if (state.version >= 2 && bytes >= 88)
+        {
+            core.setAttackMs(state.attackMs, true);
+            core.setReleaseMs(state.releaseMs, true);
+            core.setThresholdDb(state.thresholdDb, true);
+        }
+    }
+    if (state.version >= 3 && bytes >= static_cast<int>(sizeof(YouMixState)))
+    {
+        core.setWeightDb(slot_, state.weightDb);
+        for (int group = 0; group < youmix::kYouMixGroups; ++group)
+            core.setPinkBypass(group, (state.pinkBypass & (1u << static_cast<unsigned>(group))) != 0);
     }
     core.setBypass(state.bypass != 0);
 }

@@ -27,10 +27,10 @@ struct Spec
 const Spec kSpecs[6] = {
     { "Threshold", " dB", -80.0f, 0.0f, 0.5f, -40.0f, 1, &youmix::PseSettings::thresholdDb, &youmix::PseCore::setThresholdDb },
     { "Range", " dB", 0.0f, 60.0f, 0.5f, 18.0f, 1, &youmix::PseSettings::rangeDb, &youmix::PseCore::setRangeDb },
-    { "Attack", " ms", 1.0f, 200.0f, 1.0f, 8.0f, 0, &youmix::PseSettings::attackMs, &youmix::PseCore::setAttackMs },
-    { "Hold", " ms", 0.0f, 500.0f, 1.0f, 40.0f, 0, &youmix::PseSettings::holdMs, &youmix::PseCore::setHoldMs },
-    { "Release", " ms", 5.0f, 1000.0f, 1.0f, 100.0f, 0, &youmix::PseSettings::releaseMs, &youmix::PseCore::setReleaseMs },
-    { "Hysteresis", " dB", 0.0f, 12.0f, 0.5f, 4.0f, 1, &youmix::PseSettings::hysteresisDb, &youmix::PseCore::setHysteresisDb },
+    { "Attack", " ms", 1.0f, 200.0f, 1.0f, 12.0f, 0, &youmix::PseSettings::attackMs, &youmix::PseCore::setAttackMs },
+    { "Hang", " ms", 0.0f, 500.0f, 1.0f, 80.0f, 0, &youmix::PseSettings::hangMs, &youmix::PseCore::setHangMs },
+    { "Release", " ms", 5.0f, 1000.0f, 1.0f, 140.0f, 0, &youmix::PseSettings::releaseMs, &youmix::PseCore::setReleaseMs },
+    { "Knee", " dB", 0.0f, 24.0f, 0.5f, 12.0f, 1, &youmix::PseSettings::kneeDb, &youmix::PseCore::setKneeDb },
 };
 
 void styleButton(juce::TextButton& button)
@@ -49,17 +49,17 @@ PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
 {
     setOpaque(true);
     styleButton(bypassButton_);
-    bypassButton_.setTooltip("Turn this expander on or bypass it. Other plugins are left alone.");
+    bypassButton_.setTooltip("Turn this expander on or bypass it. It ducks bleed with a smooth curve. It does not hard-gate.");
     bypassButton_.onClick = [this]
     {
         auto& core = processor_.core();
         core.setBypass(! core.settings().bypass);
     };
 
-    title_.setText("PSE", juce::dontSendNotification);
+    title_.setText("Left IN    Right GATE/GR", juce::dontSendNotification);
     title_.setJustificationType(juce::Justification::centredRight);
-    title_.setFont(juce::Font(juce::FontOptions(13.0f)));
-    title_.setColour(juce::Label::textColourId, kDim);
+    title_.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
+    title_.setColour(juce::Label::textColourId, kText);
     title_.setInterceptsMouseClicks(false, false);
 
     for (int index = 0; index < 6; ++index)
@@ -67,7 +67,7 @@ PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
         const Spec& spec = kSpecs[index];
         auto& row = rows_[index];
         row.caption.setText(spec.title, juce::dontSendNotification);
-        row.caption.setFont(juce::Font(juce::FontOptions(12.0f)));
+        row.caption.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
         row.caption.setColour(juce::Label::textColourId, kDim);
         row.caption.setJustificationType(juce::Justification::centredLeft);
         row.caption.setInterceptsMouseClicks(false, false);
@@ -77,7 +77,7 @@ PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
         row.value.step = spec.step;
         row.value.decimals = spec.decimals;
         row.value.suffix = spec.suffix;
-        row.value.setHero(true);
+        row.value.textPt = 28.0f;
         row.value.read = [this, member = spec.member]
         {
             return processor_.core().settings().*member;
@@ -87,32 +87,15 @@ PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
             (processor_.core().*apply)(value);
         };
         row.value.resetTo = [reset = spec.reset] { return reset; };
-        row.value.setTooltip("Drag to change. Double-click to type. Option-click resets. The scroll wheel does nothing.");
-
-        styleButton(row.minus);
-        styleButton(row.plus);
-        row.minus.onClick = [this, index]
-        {
-            auto& value = rows_[index].value;
-            if (value.read != nullptr && value.write != nullptr)
-                value.write(value.read() - value.step);
-        };
-        row.plus.onClick = [this, index]
-        {
-            auto& value = rows_[index].value;
-            if (value.read != nullptr && value.write != nullptr)
-                value.write(value.read() + value.step);
-        };
+        row.value.setTooltip("Drag the fader or click it to jump. Hold + or - to keep stepping; it speeds up while held. Double-click the number to type. Option-click resets. The scroll wheel does nothing.");
 
         addAndMakeVisible(row.caption);
         addAndMakeVisible(row.value);
-        addAndMakeVisible(row.minus);
-        addAndMakeVisible(row.plus);
     }
 
     addAndMakeVisible(bypassButton_);
     addAndMakeVisible(title_);
-    setSize(520, 640);
+    setSize(760, 780);
     startTimerHz(30);
 }
 
@@ -130,12 +113,12 @@ void PseAudioProcessorEditor::paint(juce::Graphics& graphics)
 void PseAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced(16);
-    auto top = area.removeFromTop(36);
+    auto top = area.removeFromTop(40);
     bypassButton_.setBounds(top.removeFromLeft(120));
     title_.setBounds(top);
     area.removeFromTop(12);
-    meterArea_ = area.removeFromLeft(88).reduced(8, 0);
-    area.removeFromLeft(12);
+    meterArea_ = area.removeFromLeft(168).reduced(6, 0);
+    area.removeFromLeft(16);
 
     const int count = 6;
     const int rowHeight = area.getHeight() / count;
@@ -143,8 +126,6 @@ void PseAudioProcessorEditor::resized()
     {
         auto line = area.removeFromTop(rowHeight).reduced(0, 4);
         rows_[index].caption.setBounds(line.removeFromTop(18));
-        rows_[index].minus.setBounds(line.removeFromLeft(40).withSizeKeepingCentre(36, 32));
-        rows_[index].plus.setBounds(line.removeFromRight(40).withSizeKeepingCentre(36, 32));
         rows_[index].value.setBounds(line);
     }
 }

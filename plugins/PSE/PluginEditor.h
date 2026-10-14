@@ -1,7 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
-#include "ui/DragValue.h"
+#include "ui/Fader.h"
 
 // Closing this window does not change the audio. Each PSE keeps its own settings.
 class PseAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -20,9 +20,7 @@ private:
     struct Row
     {
         juce::Label caption;
-        DragValue value;
-        juce::TextButton minus { "-" };
-        juce::TextButton plus { "+" };
+        Fader value;
     };
 
     PseAudioProcessor& processor_;

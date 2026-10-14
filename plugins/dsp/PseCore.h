@@ -8,21 +8,101 @@
 namespace youmix
 {
 
+inline constexpr int kPseSlots = 16;
+
+// Levels shared by every PSE instance in this process. Each instance keeps
+// its own expander settings. Slots are claimed on the message thread.
+class PseBus
+{
+public:
+    int claim()
+    {
+        for (int slot = 0; slot < kPseSlots; ++slot)
+        {
+            int expected = 0;
+            if (active_[slot].compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+            {
+                levelDb_[slot].store(-160.0f, std::memory_order_relaxed);
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    void release(int slot)
+    {
+        if (slot < 0 || slot >= kPseSlots)
+            return;
+        levelDb_[slot].store(-160.0f, std::memory_order_relaxed);
+        active_[slot].store(0, std::memory_order_release);
+    }
+
+    void publishLevel(int slot, float db) noexcept
+    {
+        if (slot >= 0 && slot < kPseSlots)
+            levelDb_[slot].store(db, std::memory_order_relaxed);
+    }
+
+    float loudestOtherDb(int slot) const noexcept
+    {
+        float best = -160.0f;
+        for (int other = 0; other < kPseSlots; ++other)
+        {
+            if (other == slot || active_[other].load(std::memory_order_acquire) == 0)
+                continue;
+            const float level = levelDb_[other].load(std::memory_order_relaxed);
+            if (level > best)
+                best = level;
+        }
+        return best;
+    }
+
+private:
+    std::atomic<int> active_[kPseSlots] {};
+    std::atomic<float> levelDb_[kPseSlots] {};
+};
+
+inline PseBus& pseSharedBus()
+{
+    static PseBus bus;
+    return bus;
+}
+
 struct PseSettings
 {
     bool bypass = false;
     float thresholdDb = -40.0f;
     float rangeDb = 18.0f;
-    float attackMs = 8.0f;
-    float holdMs = 40.0f;
-    float releaseMs = 100.0f;
-    float hysteresisDb = 4.0f;
+    float attackMs = 12.0f;
+    float hangMs = 80.0f;
+    float releaseMs = 140.0f;
+    float kneeDb = 12.0f;
 };
 
-// Per-instance primary source expander. No shared state and no allocation in process().
+// Smooth primary-source expander. Gain follows a soft-knee downward curve and
+// is capped at Range, so it never snaps open or shut. A slow noise-floor
+// tracker can raise the threshold. Other PSE instances in this process pull a
+// quieter mic down when a louder one is the source.
 class PseCore
 {
 public:
+    explicit PseCore(PseBus* bus = nullptr)
+        : bus_(bus)
+    {
+        if (bus_ != nullptr)
+            slot_ = bus_->claim();
+        publish();
+    }
+
+    ~PseCore()
+    {
+        if (bus_ != nullptr)
+            bus_->release(slot_);
+    }
+
+    PseCore(const PseCore&) = delete;
+    PseCore& operator=(const PseCore&) = delete;
+
     void setBypass(bool bypass)
     {
         staging_.bypass = bypass;
@@ -32,9 +112,9 @@ public:
     void setThresholdDb(float db) { setField(&PseSettings::thresholdDb, clamp(db, -80.0f, 0.0f)); }
     void setRangeDb(float db) { setField(&PseSettings::rangeDb, clamp(db, 0.0f, 60.0f)); }
     void setAttackMs(float ms) { setField(&PseSettings::attackMs, clamp(ms, 1.0f, 200.0f)); }
-    void setHoldMs(float ms) { setField(&PseSettings::holdMs, clamp(ms, 0.0f, 500.0f)); }
+    void setHangMs(float ms) { setField(&PseSettings::hangMs, clamp(ms, 0.0f, 500.0f)); }
     void setReleaseMs(float ms) { setField(&PseSettings::releaseMs, clamp(ms, 5.0f, 1000.0f)); }
-    void setHysteresisDb(float db) { setField(&PseSettings::hysteresisDb, clamp(db, 0.0f, 12.0f)); }
+    void setKneeDb(float db) { setField(&PseSettings::kneeDb, clamp(db, 0.0f, 24.0f)); }
 
     PseSettings settings() const
     {
@@ -42,8 +122,6 @@ public:
     }
 
     float gainFor() const noexcept { return gain_; }
-    bool isOpen() const noexcept { return open_; }
-
     float inputRms() const noexcept { return inputRms_.load(std::memory_order_relaxed); }
     float reductionDb() const noexcept { return reductionDb_.load(std::memory_order_relaxed); }
     int latencySamples() const noexcept { return 0; }
@@ -56,17 +134,13 @@ public:
         const PseSettings settings = params_[published_.load(std::memory_order_acquire)];
         const int width = numChannels < 1 ? 0 : (numChannels > 8 ? 8 : numChannels);
         const double rate = sampleRate > 1000.0 ? sampleRate : 48000.0;
-        const float envCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(rate * 0.010));
-        const int holdSamples = static_cast<int>(settings.holdMs * 0.001f * static_cast<float>(rate));
-        const float closed = decibelsToGain(-settings.rangeDb);
-        const float openAt = settings.thresholdDb + settings.hysteresisDb * 0.5f;
-        const float closeAt = settings.thresholdDb - settings.hysteresisDb * 0.5f;
+        const float envCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(rate * 0.020));
+        const float otherDb = bus_ != nullptr ? bus_->loudestOtherDb(slot_) : -160.0f;
 
         double sumSq = 0.0;
         int counted = 0;
         float gain = gain_;
-        bool open = open_;
-        int hold = holdLeft_;
+        float lastLevel = -160.0f;
 
         for (int index = 0; index < numSamples; ++index)
         {
@@ -91,33 +165,42 @@ public:
                 env_ = 0.0f;
 
             const float levelDb = gainToDecibels(std::sqrt(env_));
-            if (open)
+            lastLevel = levelDb;
+            followFloor(levelDb, rate);
+
+            float reduction = 0.0f;
+            if (! settings.bypass)
             {
-                if (levelDb < closeAt)
+                float threshold = settings.thresholdDb;
+                const float lifted = floorDb_ + 9.0f;
+                if (lifted > threshold)
+                    threshold = lifted;
+                reduction = downwardDb(levelDb, threshold, settings.kneeDb, kRatio, settings.rangeDb);
+                if (otherDb > -120.0f)
                 {
-                    if (hold > 0)
-                        --hold;
-                    else
-                        open = false;
+                    const float gap = otherDb - levelDb;
+                    if (gap > 6.0f)
+                        reduction += (gap - 6.0f) * 0.5f;
                 }
-                else
-                {
-                    hold = holdSamples;
-                }
-            }
-            else if (levelDb >= openAt)
-            {
-                open = true;
-                hold = holdSamples;
+                if (reduction > settings.rangeDb)
+                    reduction = settings.rangeDb;
+                if (reduction < 0.0f)
+                    reduction = 0.0f;
             }
 
-            const float target = settings.bypass ? 1.0f : (open ? 1.0f : closed);
-            const float ms = target >= gain ? settings.attackMs : settings.releaseMs;
+            const float openNow = reduction < 3.0f ? 1.0f : 0.0f;
+            const float hangMs = settings.hangMs < 1.0f ? 1.0f : settings.hangMs;
+            const float rise = 1.0f - std::exp(-1.0f / static_cast<float>(rate * 0.008));
+            const float fall = 1.0f - std::exp(-1.0f / static_cast<float>(rate * static_cast<double>(hangMs) * 0.001));
+            const float follow = openNow > activity_ ? rise : fall;
+            activity_ += follow * (openNow - activity_);
+
+            const float target = settings.bypass ? 1.0f : decibelsToGain(-reduction);
+            const float releaseMs = settings.releaseMs + settings.hangMs * activity_;
+            const float ms = target >= gain ? settings.attackMs : releaseMs;
             const float seconds = (ms < 1.0f ? 1.0f : ms) * 0.001f;
             const float coeff = 1.0f - std::exp(-1.0f / static_cast<float>(rate * static_cast<double>(seconds)));
             const float applied = gain;
-            // Exact unity leaves the buffer alone. A float one-pole stalls just
-            // short of 1, so the last inaudible step snaps to the target.
             if (floatBitsEqual(applied, 1.0f) && floatBitsEqual(target, 1.0f))
             {
                 gain = 1.0f;
@@ -144,15 +227,51 @@ public:
         }
 
         gain_ = gain;
-        open_ = open;
-        holdLeft_ = hold;
+        if (bus_ != nullptr)
+            bus_->publishLevel(slot_, settings.bypass ? -160.0f : lastLevel);
         const float meanSq = counted > 0 ? static_cast<float>(sumSq / static_cast<double>(counted)) : 0.0f;
         inputRms_.store(std::sqrt(meanSq), std::memory_order_relaxed);
-        const float reduction = gain >= 1.0f ? 0.0f : -gainToDecibels(gain);
-        reductionDb_.store(reduction < 0.0f ? 0.0f : reduction, std::memory_order_relaxed);
+        const float shown = gain >= 1.0f ? 0.0f : -gainToDecibels(gain);
+        reductionDb_.store(shown < 0.0f ? 0.0f : shown, std::memory_order_relaxed);
     }
 
 private:
+    static constexpr float kRatio = 2.0f;
+
+    // Soft-knee downward expander. 0 dB at the top of the knee, then a
+    // quadratic join into a gentle 2:1 slope. Continuous, including slope.
+    static float downwardDb(float levelDb, float thresholdDb, float kneeDb, float ratio, float rangeDb) noexcept
+    {
+        const float slope = ratio - 1.0f;
+        const float knee = kneeDb < 0.5f ? 0.5f : kneeDb;
+        const float top = thresholdDb + knee * 0.5f;
+        float reduction = 0.0f;
+        if (levelDb < top)
+        {
+            const float bottom = thresholdDb - knee * 0.5f;
+            if (levelDb <= bottom)
+                reduction = slope * (thresholdDb - levelDb);
+            else
+            {
+                const float distance = top - levelDb;
+                reduction = slope * distance * distance / (2.0f * knee);
+            }
+        }
+        if (reduction > rangeDb)
+            reduction = rangeDb;
+        if (reduction < 0.0f)
+            reduction = 0.0f;
+        return reduction;
+    }
+
+    void followFloor(float levelDb, double rate) noexcept
+    {
+        const bool falling = levelDb < floorDb_;
+        const float seconds = falling ? 0.30f : 8.0f;
+        const float coeff = 1.0f - std::exp(-1.0f / static_cast<float>(rate * static_cast<double>(seconds)));
+        floorDb_ += coeff * (levelDb - floorDb_);
+    }
+
     template <typename Field>
     void setField(Field PseSettings::* member, float value)
     {
@@ -176,13 +295,15 @@ private:
         published_.store(1 - current, std::memory_order_release);
     }
 
+    PseBus* bus_ = nullptr;
+    int slot_ = -1;
     PseSettings staging_ {};
     PseSettings params_[2] {};
     std::atomic<int> published_ { 0 };
     float env_ = 0.0f;
     float gain_ = 1.0f;
-    bool open_ = false;
-    int holdLeft_ = 0;
+    float floorDb_ = -90.0f;
+    float activity_ = 0.0f;
     std::atomic<float> inputRms_ { 0.0f };
     std::atomic<float> reductionDb_ { 0.0f };
 };

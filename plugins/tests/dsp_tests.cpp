@@ -131,14 +131,15 @@ int main()
     grouped.setPinkDb(0, 0.0f);
     grouped.setPinkDb(1, -160.0f);
     settle(grouped, 2, 0.5f, 800);
-    CHECK(grouped.gainFor(0) < 0.45f);
+    CHECK(grouped.gainFor(0) > 0.35f);
+    CHECK(grouped.gainFor(0) < 0.65f);
     CHECK(grouped.gainFor(1) > 0.9f);
 
     youmix::YouMixCore quiet;
     CHECK(quiet.claimSlot() == 0);
     quiet.setPinkDb(0, -12.0f);
     settle(quiet, 1, 0.05f, 800);
-    CHECK(quiet.gainFor(0) < 0.2f);
+    CHECK(quiet.gainFor(0) > 0.7f);
     std::vector<float> silence(128, 0.0f);
     float* silent[] = { silence.data() };
     quiet.process(0, silent, 1, 128, 48000.0);
@@ -166,7 +167,8 @@ int main()
     CHECK(settledBypass.claimSlot() == 0);
     settledBypass.setPinkDb(0, 0.0f);
     settle(settledBypass, 1, 0.05f, 400);
-    CHECK(settledBypass.gainFor(0) < 0.5f);
+    CHECK(settledBypass.gainFor(0) < 0.65f);
+    CHECK(settledBypass.gainFor(0) > 0.35f);
     settledBypass.setBypass(true);
     std::vector<float> returning(64, 0.05f);
     for (int block = 0; block < 800; ++block)
@@ -248,6 +250,102 @@ int main()
     limited.releaseSlot(3);
     CHECK(limited.claimSlot(3) == 3);
 
+    youmix::YouMixCore voicePreset;
+    voicePreset.applyPreset(1);
+    const auto voice = voicePreset.settings();
+    CHECK(voice.preset == 1);
+    CHECK(near(voice.attackMs, 5.0f, 0.01f));
+    CHECK(near(voice.releaseMs, 70.0f, 0.01f));
+    CHECK(near(voice.thresholdDb, -45.0f, 0.01f));
+    CHECK(near(voice.pinkDb[0], -32.0f, 0.01f));
+    voicePreset.applyPreset(2);
+    const auto singing = voicePreset.settings();
+    CHECK(singing.preset == 2);
+    CHECK(near(singing.attackMs, 10.0f, 0.01f));
+    CHECK(near(singing.releaseMs, 400.0f, 0.01f));
+    CHECK(near(singing.thresholdDb, -74.0f, 0.01f));
+    CHECK(near(singing.pinkDb[3], -58.0f, 0.01f));
+    voicePreset.setThresholdDb(-40.0f);
+    CHECK(voicePreset.settings().preset == 0);
+
+    youmix::YouMixCore quietSong;
+    quietSong.applyPreset(2);
+    CHECK(quietSong.claimSlot() == 0);
+    settle(quietSong, 1, 0.001f, 800);
+    CHECK(quietSong.gainFor(0) > 0.9f);
+
+    youmix::YouMixCore spread;
+    CHECK(spread.claimSlot() == 0);
+    CHECK(spread.claimSlot() == 1);
+    spread.setGroup(0, 1);
+    spread.setGroup(1, 1);
+    CHECK(spread.settings().preset == 1);
+    spread.setPinkBypass(0, true);
+    spread.setPinkDb(0, 0.0f, false);
+    CHECK(spread.settings().preset == 1);
+    std::vector<float> spreadLoud(64, 0.5f);
+    std::vector<float> spreadSoft(64, 0.02f);
+    for (int block = 0; block < 500; ++block)
+    {
+        fill(spreadLoud, 0.5f);
+        fill(spreadSoft, 0.02f);
+        float* loudChannels[] = { spreadLoud.data() };
+        float* softChannels[] = { spreadSoft.data() };
+        spread.process(0, loudChannels, 1, 64, 48000.0);
+        spread.process(1, softChannels, 1, 64, 48000.0);
+    }
+    CHECK(near(spread.gainFor(0), 0.5f, 0.12f));
+    CHECK(near(spread.gainFor(1), 0.5f, 0.12f));
+    spread.setWeightDb(1, 12.0f);
+    CHECK(spread.settings().preset == 1);
+    for (int block = 0; block < 800; ++block)
+    {
+        fill(spreadLoud, 0.5f);
+        fill(spreadSoft, 0.02f);
+        float* loudChannels[] = { spreadLoud.data() };
+        float* softChannels[] = { spreadSoft.data() };
+        spread.process(0, loudChannels, 1, 64, 48000.0);
+        spread.process(1, softChannels, 1, 64, 48000.0);
+    }
+    CHECK(spread.gainFor(1) > 0.75f);
+    CHECK(spread.gainFor(0) < 0.30f);
+
+    youmix::YouMixCore pinkOff;
+    CHECK(pinkOff.claimSlot() == 0);
+    pinkOff.setPinkDb(0, 0.0f);
+    pinkOff.setPinkBypass(0, true);
+    settle(pinkOff, 1, 0.5f, 400);
+    CHECK(pinkOff.gainFor(0) > 0.9f);
+
+    youmix::YouMixCore pinkClick;
+    CHECK(pinkClick.claimSlot() == 0);
+    pinkClick.setPinkDb(0, 0.0f);
+    settle(pinkClick, 1, 0.5f, 400);
+    CHECK(pinkClick.gainFor(0) > 0.35f);
+    CHECK(pinkClick.gainFor(0) < 0.65f);
+    pinkClick.setPinkBypass(0, true);
+    float pinkPrevious = pinkClick.gainFor(0);
+    float pinkStep = 0.0f;
+    for (int index = 0; index < 2500; ++index)
+    {
+        float sample = 0.5f;
+        float* channels[] = { &sample };
+        pinkClick.process(0, channels, 1, 1, 48000.0);
+        const float step = std::fabs(pinkClick.gainFor(0) - pinkPrevious);
+        if (step > pinkStep)
+            pinkStep = step;
+        pinkPrevious = pinkClick.gainFor(0);
+    }
+    CHECK(pinkStep < 0.02f);
+    CHECK(pinkClick.gainFor(0) > 0.9f);
+
+    youmix::YouMixCore below;
+    CHECK(below.claimSlot() == 0);
+    below.setThresholdDb(-20.0f);
+    below.setPinkDb(0, -60.0f);
+    settle(below, 1, 0.01f, 800);
+    CHECK(below.gainFor(0) < 0.05f);
+
     youmix::PseCore gate;
     CHECK(gate.latencySamples() == 0);
     std::vector<float> loud(64, 0.5f);
@@ -257,13 +355,30 @@ int main()
         float* channels[] = { loud.data() };
         gate.process(channels, 1, 64, 48000.0);
     }
-    CHECK(gate.isOpen());
     CHECK(gate.gainFor() > 0.9f);
+
+    youmix::PseCore partial;
+    partial.setThresholdDb(-40.0f);
+    partial.setKneeDb(12.0f);
+    partial.setRangeDb(18.0f);
+    partial.setHangMs(0.0f);
+    partial.setReleaseMs(40.0f);
+    const float partialLevel = std::pow(10.0f, -43.0f / 20.0f);
+    std::vector<float> partialBuffer(64, partialLevel);
+    for (int block = 0; block < 400; ++block)
+    {
+        fill(partialBuffer, partialLevel);
+        float* channels[] = { partialBuffer.data() };
+        partial.process(channels, 1, 64, 48000.0);
+    }
+    std::cout << "pse partial gain " << partial.gainFor() << "\n";
+    CHECK(partial.gainFor() > 0.45f);
+    CHECK(partial.gainFor() < 0.9f);
 
     youmix::PseCore closed;
     closed.setRangeDb(18.0f);
     closed.setThresholdDb(-40.0f);
-    closed.setHoldMs(0.0f);
+    closed.setHangMs(0.0f);
     closed.setReleaseMs(40.0f);
     std::vector<float> soft(64, 0.001f);
     for (int block = 0; block < 400; ++block)
@@ -273,13 +388,115 @@ int main()
         closed.process(channels, 1, 64, 48000.0);
     }
     std::cout << "pse closed gain " << closed.gainFor() << "\n";
-    CHECK(! closed.isOpen());
     CHECK(near(closed.gainFor(), youmix::decibelsToGain(-18.0f), 0.03f));
+    CHECK(closed.gainFor() > 0.05f);
+
+    youmix::PseCore chatter;
+    chatter.setThresholdDb(-40.0f);
+    chatter.setKneeDb(12.0f);
+    chatter.setRangeDb(18.0f);
+    chatter.setHangMs(0.0f);
+    chatter.setAttackMs(12.0f);
+    chatter.setReleaseMs(30.0f);
+    const float chatterLow = std::pow(10.0f, -41.0f / 20.0f);
+    const float chatterHigh = std::pow(10.0f, -39.0f / 20.0f);
+    float chatterMin = 2.0f;
+    float chatterMax = 0.0f;
+    std::vector<float> chatterBuffer(64, chatterLow);
+    for (int block = 0; block < 600; ++block)
+    {
+        const float level = (block % 2) == 0 ? chatterLow : chatterHigh;
+        fill(chatterBuffer, level);
+        float* channels[] = { chatterBuffer.data() };
+        chatter.process(channels, 1, 64, 48000.0);
+        if (block > 200)
+        {
+            chatterMin = std::fmin(chatterMin, chatter.gainFor());
+            chatterMax = std::fmax(chatterMax, chatter.gainFor());
+        }
+    }
+    std::cout << "pse chatter " << chatterMin << " " << chatterMax << "\n";
+    CHECK(chatterMax - chatterMin < 0.2f);
+    CHECK(chatterMin > 0.4f);
+    CHECK(chatterMax < 0.95f);
+
+    youmix::PseBus bus;
+    youmix::PseCore primary(&bus);
+    youmix::PseCore bleed(&bus);
+    primary.setThresholdDb(-36.0f);
+    bleed.setThresholdDb(-36.0f);
+    primary.setRangeDb(18.0f);
+    bleed.setRangeDb(18.0f);
+    primary.setHangMs(0.0f);
+    bleed.setHangMs(0.0f);
+    primary.setReleaseMs(40.0f);
+    bleed.setReleaseMs(40.0f);
+    primary.setKneeDb(12.0f);
+    bleed.setKneeDb(12.0f);
+    std::vector<float> primaryBuffer(64, 0.5f);
+    std::vector<float> bleedBuffer(64, 0.01f);
+    for (int block = 0; block < 500; ++block)
+    {
+        fill(primaryBuffer, 0.5f);
+        fill(bleedBuffer, 0.01f);
+        float* primaryChannels[] = { primaryBuffer.data() };
+        float* bleedChannels[] = { bleedBuffer.data() };
+        primary.process(primaryChannels, 1, 64, 48000.0);
+        bleed.process(bleedChannels, 1, 64, 48000.0);
+    }
+    std::cout << "pse relative " << primary.gainFor() << " " << bleed.gainFor() << "\n";
+    CHECK(primary.gainFor() > 0.8f);
+    CHECK(bleed.gainFor() < 0.4f);
+
+    youmix::PseCore moved;
+    moved.setHangMs(400.0f);
+    moved.setReleaseMs(20.0f);
+    moved.setThresholdDb(-20.0f);
+    moved.setRangeDb(18.0f);
+    moved.setKneeDb(8.0f);
+    std::vector<float> movedBuffer(64, 0.5f);
+    for (int block = 0; block < 200; ++block)
+    {
+        fill(movedBuffer, 0.5f);
+        float* channels[] = { movedBuffer.data() };
+        moved.process(channels, 1, 64, 48000.0);
+    }
+    CHECK(moved.gainFor() > 0.9f);
+    std::vector<float> movedQuiet(10000, 0.001f);
+    float* movedQuietChannels[] = { movedQuiet.data() };
+    moved.process(movedQuietChannels, 1, 10000, 48000.0);
+    std::cout << "pse hang gain " << moved.gainFor() << "\n";
+    CHECK(moved.gainFor() < 0.95f);
+    CHECK(moved.gainFor() > 0.05f);
+
+    youmix::PseCore floorTrack;
+    floorTrack.setThresholdDb(-70.0f);
+    floorTrack.setRangeDb(18.0f);
+    floorTrack.setKneeDb(8.0f);
+    floorTrack.setHangMs(0.0f);
+    floorTrack.setReleaseMs(30.0f);
+    std::vector<float> room(64, 0.1f);
+    for (int block = 0; block < 12000; ++block)
+    {
+        fill(room, 0.1f);
+        float* channels[] = { room.data() };
+        floorTrack.process(channels, 1, 64, 48000.0);
+    }
+    const float underLevel = std::pow(10.0f, -32.0f / 20.0f);
+    std::vector<float> under(64, underLevel);
+    for (int block = 0; block < 400; ++block)
+    {
+        fill(under, underLevel);
+        float* channels[] = { under.data() };
+        floorTrack.process(channels, 1, 64, 48000.0);
+    }
+    std::cout << "pse floor gain " << floorTrack.gainFor() << "\n";
+    CHECK(floorTrack.gainFor() < 0.7f);
 
     youmix::PseCore pseSettled;
     pseSettled.setRangeDb(18.0f);
     pseSettled.setThresholdDb(-40.0f);
-    pseSettled.setHoldMs(0.0f);
+    pseSettled.setHangMs(0.0f);
     pseSettled.setReleaseMs(20.0f);
     std::vector<float> pseSoft(64, 0.001f);
     for (int block = 0; block < 400; ++block)

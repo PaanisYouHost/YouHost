@@ -17,10 +17,10 @@ struct PseState
     std::uint32_t bypass = 0;
     float thresholdDb = -40.0f;
     float rangeDb = 18.0f;
-    float attackMs = 8.0f;
-    float holdMs = 40.0f;
-    float releaseMs = 100.0f;
-    float hysteresisDb = 4.0f;
+    float attackMs = 12.0f;
+    float holdMs = 80.0f;
+    float releaseMs = 140.0f;
+    float hysteresisDb = 12.0f;
 };
 
 static_assert(sizeof(PseState) == 36, "PSE session blob must stay fixed-size");
@@ -30,7 +30,8 @@ static_assert(sizeof(PseState) == 36, "PSE session blob must stay fixed-size");
 PseAudioProcessor::PseAudioProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      core_(&youmix::pseSharedBus())
 {
     setLatencySamples(0);
 }
@@ -83,9 +84,9 @@ void PseAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.thresholdDb = settings.thresholdDb;
     state.rangeDb = settings.rangeDb;
     state.attackMs = settings.attackMs;
-    state.holdMs = settings.holdMs;
+    state.holdMs = settings.hangMs;
     state.releaseMs = settings.releaseMs;
-    state.hysteresisDb = settings.hysteresisDb;
+    state.hysteresisDb = settings.kneeDb;
     destData.append(&state, sizeof(state));
 }
 
@@ -102,9 +103,9 @@ void PseAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
     core_.setThresholdDb(state.thresholdDb);
     core_.setRangeDb(state.rangeDb);
     core_.setAttackMs(state.attackMs);
-    core_.setHoldMs(state.holdMs);
+    core_.setHangMs(state.holdMs);
     core_.setReleaseMs(state.releaseMs);
-    core_.setHysteresisDb(state.hysteresisDb);
+    core_.setKneeDb(state.hysteresisDb);
     core_.setBypass(state.bypass != 0);
 }
 
