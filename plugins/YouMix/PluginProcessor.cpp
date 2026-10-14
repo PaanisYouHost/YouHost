@@ -34,6 +34,15 @@ struct YouMixState
 
 static_assert(sizeof(YouMixState) == 104, "YouMix session blob must stay fixed-size");
 
+void logHostTrack(const juce::String& line)
+{
+    auto directory = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                         .getChildFile("Library/Logs/YouMix");
+    directory.createDirectory();
+    directory.getChildFile("host-track.log")
+        .appendText(juce::Time::getCurrentTime().toISO8601(true) + " " + line + "\n");
+}
+
 } // namespace
 
 YouMixAudioProcessor::YouMixAudioProcessor()
@@ -43,6 +52,8 @@ YouMixAudioProcessor::YouMixAudioProcessor()
 {
     slot_ = youmix::youMixShared().claimSlot();
     setLatencySamples(0);
+    logHostTrack("created wrapper=" + juce::String(getWrapperTypeDescription(wrapperType))
+                 + " slot=" + juce::String(slot_));
 }
 
 YouMixAudioProcessor::~YouMixAudioProcessor()
@@ -182,11 +193,28 @@ void YouMixAudioProcessor::rememberEditorSize(int width, int height) noexcept
 
 void YouMixAudioProcessor::updateTrackProperties(const TrackProperties& properties)
 {
+    juce::String line = "updateTrackProperties wrapper=" + juce::String(getWrapperTypeDescription(wrapperType))
+                        + " slot=" + juce::String(slot_);
+    if (properties.name.has_value())
+        line += " name=\"" + *properties.name + "\"";
+    else
+        line += " name=<absent>";
+    if (properties.colourARGB.has_value())
+        line += " colour=0x" + juce::String::toHexString(static_cast<int>(*properties.colourARGB));
+    else
+        line += " colour=<absent>";
+    logHostTrack(line);
+
     if (slot_ < 0)
         return;
     auto& core = youmix::youMixShared();
+    // A real host name replaces the label. An empty name clears only the host
+    // label, so a name typed in the editor can stay as the fallback.
     if (properties.name.has_value())
-        core.setName(slot_, properties.name->toRawUTF8());
+    {
+        const auto trimmed = properties.name->trim();
+        core.setHostName(slot_, trimmed.isEmpty() ? nullptr : trimmed.toRawUTF8());
+    }
     // 0 means the host did not send a colour. AU context names have no colour.
     if (properties.colourARGB.has_value() && *properties.colourARGB != 0)
         core.setTrackColour(slot_, static_cast<std::uint32_t>(*properties.colourARGB));

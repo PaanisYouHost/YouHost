@@ -565,6 +565,13 @@ int main()
 
     youmix::YouMixCore labels;
     const int named = labels.claimSlot();
+    labels.setHostName(named, "Lead Vox");
+    labels.setName(named, "typed");
+    CHECK(std::string(labels.hostName(named)) == "Lead Vox");
+    CHECK(std::string(labels.settings().name[named]) == "typed");
+    labels.setHostName(named, nullptr);
+    CHECK(labels.hostName(named)[0] == 0);
+    CHECK(std::string(labels.settings().name[named]) == "typed");
     labels.setName(named, "3 Vocal");
     CHECK(std::string(labels.settings().name[named]) == "3 Vocal");
     char longName[80];
@@ -575,8 +582,10 @@ int main()
     CHECK(std::strlen(labels.settings().name[named]) == 31);
     labels.setTrackColour(named, 0xff2266ccu);
     CHECK(labels.trackColour(named) == 0xff2266ccu);
+    labels.setHostName(named, "Lead Vox");
     labels.releaseSlot(named);
     CHECK(labels.trackColour(named) == 0);
+    CHECK(labels.hostName(named)[0] == 0);
     CHECK(labels.settings().name[named][0] == 0);
 
     if (failures != 0)

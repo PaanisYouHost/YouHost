@@ -30,10 +30,12 @@ juce::String groupLabel(int group)
     return "Off";
 }
 
-juce::String channelTitle(const char* raw, int slot)
+juce::String channelTitle(const char* host, const char* typed, int slot)
 {
-    if (raw != nullptr && raw[0] != 0)
-        return juce::String::fromUTF8(raw);
+    if (host != nullptr && host[0] != 0)
+        return juce::String::fromUTF8(host);
+    if (typed != nullptr && typed[0] != 0)
+        return juce::String::fromUTF8(typed);
     return "Ch " + juce::String(slot + 1);
 }
 
@@ -213,6 +215,23 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     release_.setTooltip(faderHelp);
     threshold_.setTooltip(juce::String(faderHelp) + " Channels quieter than this close.");
 
+    nameEditor_.setJustification(juce::Justification::centred);
+    nameEditor_.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
+    nameEditor_.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff1a1e28));
+    nameEditor_.setColour(juce::TextEditor::textColourId, kText);
+    nameEditor_.setColour(juce::TextEditor::outlineColourId, kMine);
+    nameEditor_.setColour(juce::TextEditor::focusedOutlineColourId, kMine);
+    nameEditor_.setInputRestrictions(31);
+    nameEditor_.onReturnKey = [this] { commitTypedName(); };
+    nameEditor_.onFocusLost = [this] { commitTypedName(); };
+    nameEditor_.onEscapeKey = [this]
+    {
+        skipNameCommit_ = true;
+        nameEditor_.setVisible(false);
+        editingSlot_ = -1;
+    };
+    addChildComponent(nameEditor_);
+
     addAndMakeVisible(bypassButton_);
     addAndMakeVisible(voiceButton_);
     addAndMakeVisible(singingButton_);
@@ -239,7 +258,17 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
 
     snapshot_ = youmix::youMixShared().settings();
     for (int slot = 0; slot < youmix::kYouMixSlots; ++slot)
+    {
         trackColour_[slot] = youmix::youMixShared().trackColour(slot);
+        const char* host = youmix::youMixShared().hostName(slot);
+        std::size_t count = 0;
+        while (host[count] != 0 && count < 31)
+        {
+            hostName_[slot][count] = host[count];
+            ++count;
+        }
+        hostName_[slot][count] = 0;
+    }
     refreshButtons();
     if (processor_.slot() < 0)
     {
@@ -415,7 +444,7 @@ void YouMixAudioProcessorEditor::paint(juce::Graphics& graphics)
             graphics.fillRoundedRectangle(strip.swatch.toFloat(), 2.0f);
         }
 
-        const juce::String name = channelTitle(snapshot_.name[strip.slot], strip.slot);
+        const juce::String name = channelTitle(hostName_[strip.slot], snapshot_.name[strip.slot], strip.slot);
         const float point = strip.bounds.getWidth() >= 110 ? 15.0f : 13.0f;
         graphics.setColour(kText);
         graphics.setFont(juce::Font(juce::FontOptions(point).withStyle("Bold")));
@@ -528,6 +557,7 @@ void YouMixAudioProcessorEditor::resized()
     area.removeFromTop(juce::jmin(6, area.getHeight()));
     stripArea_ = area;
     layoutStrips();
+    placeNameEditor();
     processor_.rememberEditorSize(getWidth(), getHeight());
 }
 
@@ -563,7 +593,76 @@ void YouMixAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
             youmix::youMixShared().setMode(strip.slot, mode);
             return;
         }
+        if (strip.title.contains(event.getPosition()) && ! hostNamed(strip.slot))
+        {
+            editingSlot_ = strip.slot;
+            skipNameCommit_ = false;
+            const char* typed = snapshot_.name[strip.slot];
+            nameEditor_.setText(typed[0] == 0 ? juce::String() : juce::String::fromUTF8(typed), false);
+            nameEditor_.setBounds(strip.title);
+            nameEditor_.setVisible(true);
+            nameEditor_.toFront(false);
+            nameEditor_.grabKeyboardFocus();
+            nameEditor_.selectAll();
+            return;
+        }
     }
+}
+
+void YouMixAudioProcessorEditor::mouseMove(const juce::MouseEvent& event)
+{
+    bool editable = false;
+    if (processor_.slot() >= 0)
+    {
+        for (int index = 0; index < stripCount_; ++index)
+        {
+            const Strip& strip = strips_[index];
+            if (strip.title.contains(event.getPosition()) && ! hostNamed(strip.slot))
+            {
+                editable = true;
+                break;
+            }
+        }
+    }
+    setMouseCursor(editable ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
+}
+
+bool YouMixAudioProcessorEditor::hostNamed(int slot) const noexcept
+{
+    return slot >= 0 && slot < youmix::kYouMixSlots && hostName_[slot][0] != 0;
+}
+
+void YouMixAudioProcessorEditor::commitTypedName()
+{
+    if (skipNameCommit_)
+    {
+        skipNameCommit_ = false;
+        return;
+    }
+    if (! nameEditor_.isVisible() || editingSlot_ < 0)
+        return;
+    const int slot = editingSlot_;
+    const auto text = nameEditor_.getText().trim();
+    editingSlot_ = -1;
+    nameEditor_.setVisible(false);
+    youmix::youMixShared().setName(slot, text.toRawUTF8());
+}
+
+void YouMixAudioProcessorEditor::placeNameEditor()
+{
+    if (editingSlot_ < 0 || ! nameEditor_.isVisible())
+        return;
+    for (int index = 0; index < stripCount_; ++index)
+    {
+        if (strips_[index].slot == editingSlot_)
+        {
+            nameEditor_.setBounds(strips_[index].title);
+            return;
+        }
+    }
+    skipNameCommit_ = true;
+    nameEditor_.setVisible(false);
+    editingSlot_ = -1;
 }
 
 void YouMixAudioProcessorEditor::timerCallback()
@@ -576,6 +675,21 @@ void YouMixAudioProcessorEditor::timerCallback()
         input_[slot] = core.inputRms(slot);
         reduction_[slot] = core.reductionDb(slot);
         trackColour_[slot] = core.trackColour(slot);
+        const char* host = core.hostName(slot);
+        std::size_t count = 0;
+        while (host[count] != 0 && count < 31)
+        {
+            hostName_[slot][count] = host[count];
+            ++count;
+        }
+        hostName_[slot][count] = 0;
+    }
+
+    if (editingSlot_ >= 0 && hostNamed(editingSlot_))
+    {
+        skipNameCommit_ = true;
+        nameEditor_.setVisible(false);
+        editingSlot_ = -1;
     }
 
     const bool usable = processor_.slot() >= 0;
@@ -593,5 +707,6 @@ void YouMixAudioProcessorEditor::timerCallback()
 
     refreshButtons();
     layoutStrips();
+    placeNameEditor();
     repaint();
 }

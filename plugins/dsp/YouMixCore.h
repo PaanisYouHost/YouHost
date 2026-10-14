@@ -65,6 +65,7 @@ public:
             return;
         staging_.active[slot] = false;
         staging_.name[slot][0] = 0;
+        hostName_[slot][0] = 0;
         staging_.weightDb[slot] = 0.0f;
         colour_[slot].store(0, std::memory_order_relaxed);
         peak_[slot] = 0.0f;
@@ -168,6 +169,32 @@ public:
             dest[count] = 0;
         }
         publish();
+    }
+
+    // Name pushed by the host. Message thread only. Not saved, and process() does not read it.
+    // An empty text clears it so a typed fallback can show.
+    void setHostName(int slot, const char* text) noexcept
+    {
+        if (slot < 0 || slot >= kYouMixSlots)
+            return;
+        char* dest = hostName_[slot];
+        dest[0] = 0;
+        if (text == nullptr)
+            return;
+        std::size_t count = 0;
+        while (text[count] != 0 && count < 31)
+        {
+            dest[count] = text[count];
+            ++count;
+        }
+        dest[count] = 0;
+    }
+
+    const char* hostName(int slot) const noexcept
+    {
+        if (slot < 0 || slot >= kYouMixSlots)
+            return "";
+        return hostName_[slot];
     }
 
     // Host track colour, ARGB. 0 means the host did not send one.
@@ -384,6 +411,7 @@ private:
         staging_.group[slot] = 1;
         staging_.mode[slot] = 0;
         staging_.name[slot][0] = 0;
+        hostName_[slot][0] = 0;
         staging_.weightDb[slot] = 0.0f;
         colour_[slot].store(0, std::memory_order_relaxed);
         gain_[slot] = 1.0f;
@@ -410,6 +438,7 @@ private:
     std::atomic<float> inputRms_[kYouMixSlots] {};
     std::atomic<float> reductionDb_[kYouMixSlots] {};
     std::atomic<std::uint32_t> colour_[kYouMixSlots] {};
+    char hostName_[kYouMixSlots][32] {};
 };
 
 inline YouMixCore& youMixShared()

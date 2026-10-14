@@ -15,6 +15,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
+    void mouseMove(const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
@@ -23,6 +24,9 @@ private:
     void layoutStrips();
     void refreshButtons();
     void fitOnce();
+    void commitTypedName();
+    void placeNameEditor();
+    bool hostNamed(int slot) const noexcept;
 
     struct Strip
     {
@@ -41,6 +45,10 @@ private:
     float input_[youmix::kYouMixSlots] {};
     float reduction_[youmix::kYouMixSlots] {};
     std::uint32_t trackColour_[youmix::kYouMixSlots] {};
+    char hostName_[youmix::kYouMixSlots][32] {};
+    juce::TextEditor nameEditor_;
+    int editingSlot_ = -1;
+    bool skipNameCommit_ = false;
     Strip strips_[youmix::kYouMixSlots];
     int stripCount_ = 0;
     bool advanced_ = false;

@@ -24,6 +24,21 @@ FetchContent_Declare(JUCE
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# JUCE forwards only the VST3 channel name and colour. This records every standard
+# key the host actually pushes, into ~/Library/Logs/YouMix/host-track.log.
+set(YOUMIX_VST3_CLIENT "${juce_SOURCE_DIR}/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp")
+if(NOT EXISTS "${YOUMIX_VST3_CLIENT}")
+    message(FATAL_ERROR "JUCE VST3 client not found at ${YOUMIX_VST3_CLIENT}")
+endif()
+execute_process(
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/log_vst3_channel_context.py" "${YOUMIX_VST3_CLIENT}"
+    RESULT_VARIABLE YOUMIX_VST3_PATCH
+    OUTPUT_VARIABLE YOUMIX_VST3_PATCH_OUT
+    ERROR_VARIABLE YOUMIX_VST3_PATCH_ERR)
+if(NOT YOUMIX_VST3_PATCH EQUAL 0)
+    message(FATAL_ERROR "VST3 channel-context log patch failed: ${YOUMIX_VST3_PATCH_ERR}")
+endif()
+
 set(PLUGIN_FORMATS VST3)
 if(APPLE)
     list(APPEND PLUGIN_FORMATS AU)
