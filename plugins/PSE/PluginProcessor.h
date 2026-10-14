@@ -35,7 +35,12 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     youmix::PseCore& core() noexcept { return core_; }
+    int editorWidth() const noexcept { return editorWidth_; }
+    int editorHeight() const noexcept { return editorHeight_; }
+    void rememberEditorSize(int width, int height) noexcept;
 
 private:
     youmix::PseCore core_;
+    int editorWidth_ = 0;
+    int editorHeight_ = 0;
 };

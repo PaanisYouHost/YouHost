@@ -140,6 +140,9 @@ public:
     void setAudibleAll(const std::array<bool, kMaxChannels>& audible);
     void openEditor(int channel, int slot);
     void toggleEditor(int channel, int slot);
+    // Message thread only. Tells a hosted YouMix which channel it sits on.
+    // The audio graph is not rebuilt and process() does not read this.
+    void setTrackLabel(int channel, const juce::String& name);
     bool isEditorOpen(int channel, int slot) const;
 
     ChannelSnapshot snapshot(int channel) const;
@@ -244,6 +247,7 @@ private:
     bool channelBusy(int channel) const;
     void detachEditor(int channel, int slot);
     void placeEditor(int channel, int slot);
+    void pushTrackLabel(int channel);
     void bury(std::shared_ptr<HostedPlugin> plugin, std::unique_ptr<EditorWindow> window);
     void scheduleGraves();
     void pumpGraves();
@@ -352,6 +356,7 @@ private:
     int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};
 
     std::array<std::array<std::unique_ptr<EditorWindow>, kSlotsPerChannel>, kMaxChannels> editors_ {};
+    std::array<juce::String, kMaxChannels> trackLabel_ {};
 
     struct DeferredPluginRelease;
     struct ChannelWork

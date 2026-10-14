@@ -8,7 +8,8 @@ namespace
 {
 
 constexpr std::uint32_t kStateMagic = 0x50534531; // PSE1
-constexpr std::uint32_t kStateVersion = 1;
+constexpr std::uint32_t kStateVersion = 2;
+constexpr int kStateBytesV1 = 36;
 
 struct PseState
 {
@@ -21,9 +22,11 @@ struct PseState
     float holdMs = 80.0f;
     float releaseMs = 140.0f;
     float hysteresisDb = 12.0f;
+    std::int32_t editorWidth = 0;
+    std::int32_t editorHeight = 0;
 };
 
-static_assert(sizeof(PseState) == 36, "PSE session blob must stay fixed-size");
+static_assert(sizeof(PseState) == 44, "PSE session blob must stay fixed-size");
 
 } // namespace
 
@@ -87,17 +90,20 @@ void PseAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.holdMs = settings.hangMs;
     state.releaseMs = settings.releaseMs;
     state.hysteresisDb = settings.kneeDb;
+    state.editorWidth = editorWidth_;
+    state.editorHeight = editorHeight_;
     destData.append(&state, sizeof(state));
 }
 
 void PseAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    if (data == nullptr || sizeInBytes < static_cast<int>(sizeof(PseState)))
+    if (data == nullptr || sizeInBytes < kStateBytesV1)
         return;
 
-    PseState state;
-    std::memcpy(&state, data, sizeof(state));
-    if (state.magic != kStateMagic || state.version != kStateVersion)
+    PseState state {};
+    const int bytes = juce::jmin(sizeInBytes, static_cast<int>(sizeof(state)));
+    std::memcpy(&state, data, static_cast<std::size_t>(bytes));
+    if (state.magic != kStateMagic || state.version < 1 || state.version > kStateVersion)
         return;
 
     core_.setThresholdDb(state.thresholdDb);
@@ -107,6 +113,21 @@ void PseAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
     core_.setReleaseMs(state.releaseMs);
     core_.setKneeDb(state.hysteresisDb);
     core_.setBypass(state.bypass != 0);
+    if (state.version >= 2 && bytes >= static_cast<int>(sizeof(PseState))
+        && state.editorWidth >= 320 && state.editorHeight >= 200)
+    {
+        editorWidth_ = state.editorWidth;
+        editorHeight_ = state.editorHeight;
+    }
+}
+
+void PseAudioProcessor::rememberEditorSize(int width, int height) noexcept
+{
+    if (width >= 320 && height >= 200)
+    {
+        editorWidth_ = width;
+        editorHeight_ = height;
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

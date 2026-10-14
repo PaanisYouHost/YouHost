@@ -16,6 +16,9 @@ public:
 
 private:
     void timerCallback() override;
+    void visibilityChanged() override;
+    void parentHierarchyChanged() override;
+    void fitOnce();
 
     struct Row
     {
@@ -30,6 +33,7 @@ private:
     juce::Rectangle<int> meterArea_;
     float input_ = 0.0f;
     float reduction_ = 0.0f;
+    bool fitted_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PseAudioProcessorEditor)
 };

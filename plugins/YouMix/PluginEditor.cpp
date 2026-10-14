@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "ui/EditorFit.h"
 #include "ui/SplitMeter.h"
 
 #include <cmath>
@@ -13,6 +14,12 @@ const juce::Colour kDim { 0xff9aa3b5 };
 const juce::Colour kButton { 0xff262b38 };
 const juce::Colour kButtonOn { 0xff2f6d52 };
 const juce::Colour kBypass { 0xffd48a20 };
+const juce::Colour kMine { 0xff6ee0aa };
+
+constexpr int kMinWidth = 780;
+constexpr int kMinHeight = 460;
+constexpr int kPrefWidth = 1100;
+constexpr int kPrefHeight = 620;
 
 const char* kGroupNames[5] = { "Off", "A", "B", "C", "D" };
 
@@ -21,6 +28,13 @@ juce::String groupLabel(int group)
     if (group >= 1 && group <= 4)
         return kGroupNames[group];
     return "Off";
+}
+
+juce::String channelTitle(const char* raw, int slot)
+{
+    if (raw != nullptr && raw[0] != 0)
+        return juce::String::fromUTF8(raw);
+    return "Ch " + juce::String(slot + 1);
 }
 
 void styleButton(juce::TextButton& button)
@@ -42,12 +56,14 @@ void styleCaption(juce::Label& label, const juce::String& text)
 
 void paintTouchButton(juce::Graphics& graphics, juce::Rectangle<int> bounds, const juce::String& text, bool on, bool alert)
 {
+    if (bounds.isEmpty())
+        return;
     graphics.setColour(alert ? kBypass : (on ? kButtonOn : kButton));
     graphics.fillRoundedRectangle(bounds.toFloat(), 6.0f);
     graphics.setColour(juce::Colours::white);
-    const float point = juce::jlimit(13.0f, 18.0f, bounds.getHeight() * 0.42f);
+    const float point = juce::jlimit(11.0f, 18.0f, static_cast<float>(bounds.getHeight()) * 0.42f);
     graphics.setFont(juce::Font(juce::FontOptions(point).withStyle("Bold")));
-    graphics.drawText(text, bounds, juce::Justification::centred, false);
+    graphics.drawFittedText(text, bounds, juce::Justification::centred, 1);
 }
 
 bool stillOnPreset(int preset, float value, float voiceValue, float singingValue)
@@ -66,14 +82,11 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     styleButton(bypassButton_);
     styleButton(voiceButton_);
     styleButton(singingButton_);
-    styleButton(customButton_);
     styleButton(advancedButton_);
     advancedButton_.setClickingTogglesState(true);
-    customButton_.setInterceptsMouseClicks(false, false);
     bypassButton_.setTooltip("Turn the automixer on, or bypass every linked YouMix channel.");
     voiceButton_.setTooltip("Voice preset. Pink -32 dB, threshold -45 dB, fast attack and release.");
     singingButton_.setTooltip("Singing preset. Pink -58 dB, threshold -74 dB, slower release, so a quiet vocal can open.");
-    customButton_.setTooltip("Lights when pink, threshold, attack, or release no longer matches Voice or Singing.");
     advancedButton_.setTooltip("Open attack, threshold, and release. Leave this closed if the presets are enough.");
     bypassButton_.onClick = []
     {
@@ -85,7 +98,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     advancedButton_.onClick = [this]
     {
         advanced_ = advancedButton_.getToggleState();
-        applyWindowSize();
+        resized();
     };
 
     title_.setText("YouMix", juce::dontSendNotification);
@@ -108,7 +121,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
         pink_[group].step = 0.5f;
         pink_[group].decimals = 1;
         pink_[group].suffix = " dB";
-        pink_[group].textPt = 22.0f;
+        pink_[group].textPt = 18.0f;
         pink_[group].read = [group]
         {
             return youmix::youMixShared().settings().pinkDb[group];
@@ -134,7 +147,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
         weight_[slot].step = 0.5f;
         weight_[slot].decimals = 1;
         weight_[slot].suffix = " dB";
-        weight_[slot].textPt = 15.0f;
+        weight_[slot].textPt = 14.0f;
         weight_[slot].read = [slot]
         {
             return youmix::youMixShared().settings().weightDb[slot];
@@ -157,7 +170,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     attack_.step = 1.0f;
     attack_.decimals = 0;
     attack_.suffix = " ms";
-    attack_.textPt = 22.0f;
+    attack_.textPt = 18.0f;
     attack_.read = [] { return youmix::youMixShared().settings().attackMs; };
     attack_.write = [](float ms)
     {
@@ -172,7 +185,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     release_.step = 1.0f;
     release_.decimals = 0;
     release_.suffix = " ms";
-    release_.textPt = 22.0f;
+    release_.textPt = 18.0f;
     release_.read = [] { return youmix::youMixShared().settings().releaseMs; };
     release_.write = [](float ms)
     {
@@ -187,7 +200,7 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     threshold_.step = 0.5f;
     threshold_.decimals = 1;
     threshold_.suffix = " dB";
-    threshold_.textPt = 22.0f;
+    threshold_.textPt = 18.0f;
     threshold_.read = [] { return youmix::youMixShared().settings().thresholdDb; };
     threshold_.write = [](float db)
     {
@@ -198,12 +211,11 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     threshold_.resetTo = [] { return youmix::youMixShared().settings().preset == 2 ? -74.0f : -45.0f; };
     attack_.setTooltip(faderHelp);
     release_.setTooltip(faderHelp);
-    threshold_.setTooltip(juce::String(faderHelp) + " Channels quieter than this close. Editing this switches the preset to Custom.");
+    threshold_.setTooltip(juce::String(faderHelp) + " Channels quieter than this close.");
 
     addAndMakeVisible(bypassButton_);
     addAndMakeVisible(voiceButton_);
     addAndMakeVisible(singingButton_);
-    addAndMakeVisible(customButton_);
     addAndMakeVisible(advancedButton_);
     addAndMakeVisible(title_);
     addAndMakeVisible(meterKey_);
@@ -226,13 +238,14 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
     threshold_.setVisible(false);
 
     snapshot_ = youmix::youMixShared().settings();
+    for (int slot = 0; slot < youmix::kYouMixSlots; ++slot)
+        trackColour_[slot] = youmix::youMixShared().trackColour(slot);
     refreshButtons();
     if (processor_.slot() < 0)
     {
         bypassButton_.setVisible(false);
         voiceButton_.setVisible(false);
         singingButton_.setVisible(false);
-        customButton_.setVisible(false);
         advancedButton_.setVisible(false);
         title_.setVisible(false);
         meterKey_.setVisible(false);
@@ -242,7 +255,12 @@ YouMixAudioProcessorEditor::YouMixAudioProcessorEditor(YouMixAudioProcessor& plu
             pink_[group].setVisible(false);
         }
     }
-    applyWindowSize();
+
+    setResizable(true, true);
+    setResizeLimits(kMinWidth, kMinHeight, 2400, 1600);
+    const auto size = youmix::clampEditorSize(processor_.editorWidth(), processor_.editorHeight(),
+                                               kMinWidth, kMinHeight, kPrefWidth, kPrefHeight);
+    setSize(size.width, size.height);
     startTimerHz(30);
 }
 
@@ -251,9 +269,30 @@ YouMixAudioProcessorEditor::~YouMixAudioProcessorEditor()
     stopTimer();
 }
 
-void YouMixAudioProcessorEditor::applyWindowSize()
+void YouMixAudioProcessorEditor::fitOnce()
 {
-    setSize(1440, advanced_ ? 1360 : 1080);
+    if (fitted_ || ! isShowing())
+        return;
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || top->getPeer() == nullptr)
+        return;
+    fitted_ = true;
+    juce::Component::SafePointer<YouMixAudioProcessorEditor> alive(this);
+    juce::MessageManager::callAsync([alive]
+    {
+        if (alive != nullptr)
+            youmix::fitTopLevelToDisplay(*alive);
+    });
+}
+
+void YouMixAudioProcessorEditor::visibilityChanged()
+{
+    fitOnce();
+}
+
+void YouMixAudioProcessorEditor::parentHierarchyChanged()
+{
+    fitOnce();
 }
 
 void YouMixAudioProcessorEditor::refreshButtons()
@@ -263,7 +302,6 @@ void YouMixAudioProcessorEditor::refreshButtons()
     bypassButton_.setColour(juce::TextButton::buttonColourId, bypassed ? kBypass : kButtonOn);
     voiceButton_.setColour(juce::TextButton::buttonColourId, snapshot_.preset == 1 ? kButtonOn : kButton);
     singingButton_.setColour(juce::TextButton::buttonColourId, snapshot_.preset == 2 ? kButtonOn : kButton);
-    customButton_.setColour(juce::TextButton::buttonColourId, snapshot_.preset == 0 ? kBypass : kButton);
 }
 
 void YouMixAudioProcessorEditor::layoutStrips()
@@ -289,34 +327,54 @@ void YouMixAudioProcessorEditor::layoutStrips()
     }
 
     constexpr int gap = 8;
-    int width = (stripArea_.getWidth() - gap * (count - 1)) / count;
+    int width = (stripArea_.getWidth() - gap * (count - 1)) / juce::jmax(1, count);
     if (width > 168)
         width = 168;
+    if (width < 36)
+        width = juce::jmax(28, stripArea_.getWidth() / count);
 
     int x = stripArea_.getX();
     for (int index = 0; index < count; ++index)
     {
         Strip strip;
         strip.slot = active[index];
-        strip.bounds = { x, stripArea_.getY(), width, stripArea_.getHeight() };
-        auto body = strip.bounds.reduced(4, 4);
-        body.removeFromTop(22);
-        body.removeFromTop(18);
-        const int preferred = 5 * 46;
-        const int buttonBlock = juce::jmin(preferred, juce::jmax(5 * 32, body.getHeight() / 3));
-        auto buttons = body.removeFromTop(buttonBlock);
+        const int stripWidth = juce::jmin(width, juce::jmax(0, stripArea_.getRight() - x));
+        strip.bounds = { x, stripArea_.getY(), stripWidth, stripArea_.getHeight() };
+        auto body = strip.bounds.reduced(3, 3);
+        strip.swatch = body.removeFromTop(4);
+        body.removeFromTop(3);
+        const int titleH = juce::jmin(28, juce::jmax(18, body.getHeight() / 8));
+        strip.title = body.removeFromTop(titleH);
+
+        const int rest = juce::jmax(0, body.getHeight());
+        int meterH = juce::jmax(28, rest / 5);
+        int controls = rest - meterH;
+        if (controls < 72 && rest > 0)
+        {
+            controls = rest * 3 / 4;
+            meterH = rest - controls;
+        }
+        int groupBlock = controls * 50 / 100;
+        int muteH = controls * 16 / 100;
+        int weightH = controls - groupBlock - muteH;
+        if (weightH < 0)
+            weightH = 0;
+
+        auto buttons = body.removeFromTop(groupBlock);
         const int rowHeight = buttons.getHeight() / 5;
-        for (int group = 0; group < 5; ++group)
-            strip.groupButton[group] = buttons.removeFromTop(rowHeight).reduced(2, 2);
-        strip.mute = body.removeFromTop(juce::jmin(44, juce::jmax(32, body.getHeight() / 7))).reduced(2, 2);
-        const int weightH = juce::jmin(96, juce::jmax(78, body.getHeight() / 4));
-        auto weightZone = body.removeFromTop(weightH).reduced(1, 2);
-        strip.weightLabel = weightZone.removeFromTop(16);
+        for (int group = 0; group < 4; ++group)
+            strip.groupButton[group] = buttons.removeFromTop(rowHeight).reduced(2, 1);
+        strip.groupButton[4] = buttons.reduced(2, 1);
+        strip.mute = body.removeFromTop(muteH).reduced(2, 1);
+        auto weightZone = body.removeFromTop(weightH).reduced(1, 1);
+        if (weightZone.getHeight() >= 44)
+            strip.weightLabel = weightZone.removeFromTop(14);
+        weight_[strip.slot].textPt = weightZone.getHeight() >= 70 ? 14.0f : 12.0f;
         weight_[strip.slot].setBounds(weightZone);
-        showWeight[strip.slot] = true;
-        strip.meter = body.reduced(2, 2);
+        showWeight[strip.slot] = weightZone.getHeight() >= 28;
+        strip.meter = body.reduced(1, 1);
         strips_[stripCount_++] = strip;
-        x += width + gap;
+        x += stripWidth + gap;
     }
 
     for (int slot = 0; slot < youmix::kYouMixSlots; ++slot)
@@ -333,7 +391,7 @@ void YouMixAudioProcessorEditor::paint(juce::Graphics& graphics)
     {
         graphics.setColour(kText);
         graphics.setFont(juce::Font(juce::FontOptions(15.0f)));
-        graphics.drawText("All 16 YouMix channels are already open.", getLocalBounds(), juce::Justification::centred, false);
+        graphics.drawText("All 16 YouMix channels are already open.", getLocalBounds().reduced(16), juce::Justification::centred, true);
         return;
     }
 
@@ -347,21 +405,21 @@ void YouMixAudioProcessorEditor::paint(juce::Graphics& graphics)
     {
         const Strip& strip = strips_[index];
         const bool mine = strip.slot == processor_.slot();
-        graphics.setColour(mine ? juce::Colour(0xff6ee0aa) : kEdge);
+        graphics.setColour(mine ? kMine : kEdge);
         graphics.drawRoundedRectangle(strip.bounds.toFloat().reduced(0.5f), 6.0f, mine ? 2.0f : 1.0f);
 
-        auto text = strip.bounds.reduced(4, 4);
-        graphics.setColour(kText);
-        graphics.setFont(juce::Font(juce::FontOptions(16.0f).withStyle("Bold")));
-        graphics.drawText(juce::String(strip.slot + 1), text.removeFromTop(22), juce::Justification::centred, false);
+        const auto argb = trackColour_[strip.slot];
+        if (argb != 0 && ! strip.swatch.isEmpty())
+        {
+            graphics.setColour(juce::Colour(argb));
+            graphics.fillRoundedRectangle(strip.swatch.toFloat(), 2.0f);
+        }
 
-        graphics.setColour(kDim);
-        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        const char* raw = snapshot_.name[strip.slot];
-        const juce::String name = raw[0] == 0
-            ? "Channel " + juce::String(strip.slot + 1)
-            : juce::String::fromUTF8(raw);
-        graphics.drawText(name, text.removeFromTop(18), juce::Justification::centred, true);
+        const juce::String name = channelTitle(snapshot_.name[strip.slot], strip.slot);
+        const float point = strip.bounds.getWidth() >= 110 ? 15.0f : 13.0f;
+        graphics.setColour(kText);
+        graphics.setFont(juce::Font(juce::FontOptions(point).withStyle("Bold")));
+        graphics.drawText(name, strip.title, juce::Justification::centred, true);
 
         const int selected = snapshot_.group[strip.slot];
         for (int group = 0; group < 5; ++group)
@@ -369,44 +427,79 @@ void YouMixAudioProcessorEditor::paint(juce::Graphics& graphics)
 
         const bool muted = snapshot_.mode[strip.slot] == 1;
         paintTouchButton(graphics, strip.mute, muted ? "MUTE" : "AUTO", ! muted, muted);
-        graphics.setColour(kDim);
-        graphics.setFont(juce::Font(juce::FontOptions(12.0f).withStyle("Bold")));
-        graphics.drawText("Weight", strip.weightLabel, juce::Justification::centred, false);
+        if (! strip.weightLabel.isEmpty())
+        {
+            graphics.setColour(kDim);
+            graphics.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+            graphics.drawText("Weight", strip.weightLabel, juce::Justification::centred, false);
+        }
         youmix::paintSplitMeter(graphics, strip.meter.toFloat(), input_[strip.slot], reduction_[strip.slot]);
     }
 }
 
 void YouMixAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced(16);
-    auto top = area.removeFromTop(42);
-    bypassButton_.setBounds(top.removeFromLeft(110));
-    top.removeFromLeft(8);
-    voiceButton_.setBounds(top.removeFromLeft(110));
-    top.removeFromLeft(8);
-    singingButton_.setBounds(top.removeFromLeft(130));
-    top.removeFromLeft(8);
-    customButton_.setBounds(top.removeFromLeft(130));
-    top.removeFromLeft(8);
-    advancedButton_.setBounds(top.removeFromLeft(140));
-    title_.setBounds(top.removeFromRight(90));
-    meterKey_.setBounds(top.reduced(12, 0));
-
-    area.removeFromTop(12);
-    auto pinkRow = area.removeFromTop(196);
-    constexpr int gap = 10;
-    const int columnWidth = (pinkRow.getWidth() - gap * (youmix::kYouMixGroups - 1)) / youmix::kYouMixGroups;
-    for (int group = 0; group < youmix::kYouMixGroups; ++group)
+    auto area = getLocalBounds().reduced(10);
+    auto top = area.removeFromTop(juce::jlimit(34, 40, area.getHeight() / 14));
+    auto take = [&top](int preferred)
     {
-        auto column = pinkRow.removeFromLeft(columnWidth);
-        pinkCaption_[group].setBounds(column.removeFromTop(18));
-        pinkBypassArea_[group] = column.removeFromBottom(48).reduced(2, 2);
-        pink_[group].setBounds(column.reduced(0, 2));
-        if (group + 1 < youmix::kYouMixGroups)
-            pinkRow.removeFromLeft(gap);
-    }
+        const int width = juce::jmin(preferred, juce::jmax(0, top.getWidth()));
+        auto box = top.removeFromLeft(width);
+        if (top.getWidth() > 4)
+            top.removeFromLeft(juce::jmin(6, top.getWidth()));
+        return box;
+    };
+    bypassButton_.setBounds(take(100));
+    voiceButton_.setBounds(take(108));
+    singingButton_.setBounds(take(124));
+    advancedButton_.setBounds(take(128));
+    title_.setBounds(top.removeFromRight(juce::jmin(72, juce::jmax(0, top.getWidth() / 5))));
+    meterKey_.setBounds(top.reduced(6, 0));
 
     const bool showDetail = advanced_ && processor_.slot() >= 0;
+    int below = juce::jmax(0, area.getHeight() - (showDetail ? 18 : 12));
+    int pinkH = 132;
+    int detailH = showDetail ? 112 : 0;
+    constexpr int stripsMin = 180;
+    while (pinkH + detailH + stripsMin > below && (pinkH > 96 || detailH > 96))
+    {
+        if (detailH > 96)
+            detailH -= 4;
+        else
+            pinkH -= 4;
+    }
+    if (pinkH + detailH > below)
+    {
+        if (showDetail)
+        {
+            pinkH = juce::jmax(0, below / 2);
+            detailH = juce::jmax(0, below - pinkH);
+        }
+        else
+        {
+            pinkH = below;
+            detailH = 0;
+        }
+    }
+
+    area.removeFromTop(juce::jmin(6, area.getHeight()));
+    auto pinkRow = area.removeFromTop(juce::jmin(pinkH, area.getHeight()));
+    constexpr int gap = 8;
+    const int columnWidth = youmix::kYouMixGroups > 0
+        ? (pinkRow.getWidth() - gap * (youmix::kYouMixGroups - 1)) / youmix::kYouMixGroups
+        : 0;
+    for (int group = 0; group < youmix::kYouMixGroups; ++group)
+    {
+        auto column = pinkRow.removeFromLeft(juce::jmax(0, columnWidth));
+        pinkCaption_[group].setBounds(column.removeFromTop(juce::jmin(16, column.getHeight())));
+        const int bypassH = juce::jlimit(26, 36, juce::jmax(26, column.getHeight() / 4));
+        pinkBypassArea_[group] = column.removeFromBottom(juce::jmin(bypassH, column.getHeight())).reduced(2, 1);
+        pink_[group].textPt = column.getHeight() >= 88 ? 18.0f : 14.0f;
+        pink_[group].setBounds(column.reduced(0, 1));
+        if (group + 1 < youmix::kYouMixGroups)
+            pinkRow.removeFromLeft(juce::jmin(gap, pinkRow.getWidth()));
+    }
+
     attackCaption_.setVisible(showDetail);
     releaseCaption_.setVisible(showDetail);
     thresholdCaption_.setVisible(showDetail);
@@ -415,23 +508,27 @@ void YouMixAudioProcessorEditor::resized()
     threshold_.setVisible(showDetail);
     if (showDetail)
     {
-        area.removeFromTop(12);
-        auto detail = area.removeFromTop(236);
+        area.removeFromTop(juce::jmin(6, area.getHeight()));
+        auto detail = area.removeFromTop(juce::jmin(detailH, area.getHeight()));
         const int each = detail.getWidth() / 3;
-        auto attackColumn = detail.removeFromLeft(each).reduced(6, 0);
-        auto releaseColumn = detail.removeFromLeft(each).reduced(6, 0);
-        auto thresholdColumn = detail.reduced(6, 0);
-        attackCaption_.setBounds(attackColumn.removeFromTop(18));
+        auto attackColumn = detail.removeFromLeft(each).reduced(4, 0);
+        auto releaseColumn = detail.removeFromLeft(each).reduced(4, 0);
+        auto thresholdColumn = detail.reduced(4, 0);
+        attackCaption_.setBounds(attackColumn.removeFromTop(juce::jmin(16, attackColumn.getHeight())));
+        attack_.textPt = attackColumn.getHeight() >= 80 ? 18.0f : 14.0f;
         attack_.setBounds(attackColumn);
-        releaseCaption_.setBounds(releaseColumn.removeFromTop(18));
+        releaseCaption_.setBounds(releaseColumn.removeFromTop(juce::jmin(16, releaseColumn.getHeight())));
+        release_.textPt = attack_.textPt;
         release_.setBounds(releaseColumn);
-        thresholdCaption_.setBounds(thresholdColumn.removeFromTop(18));
+        thresholdCaption_.setBounds(thresholdColumn.removeFromTop(juce::jmin(16, thresholdColumn.getHeight())));
+        threshold_.textPt = attack_.textPt;
         threshold_.setBounds(thresholdColumn);
     }
 
-    area.removeFromTop(12);
+    area.removeFromTop(juce::jmin(6, area.getHeight()));
     stripArea_ = area;
     layoutStrips();
+    processor_.rememberEditorSize(getWidth(), getHeight());
 }
 
 void YouMixAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
@@ -471,19 +568,20 @@ void YouMixAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
 
 void YouMixAudioProcessorEditor::timerCallback()
 {
+    fitOnce();
     snapshot_ = youmix::youMixShared().settings();
     auto& core = youmix::youMixShared();
     for (int slot = 0; slot < youmix::kYouMixSlots; ++slot)
     {
         input_[slot] = core.inputRms(slot);
         reduction_[slot] = core.reductionDb(slot);
+        trackColour_[slot] = core.trackColour(slot);
     }
 
     const bool usable = processor_.slot() >= 0;
     bypassButton_.setVisible(usable);
     voiceButton_.setVisible(usable);
     singingButton_.setVisible(usable);
-    customButton_.setVisible(usable);
     advancedButton_.setVisible(usable);
     title_.setVisible(usable);
     meterKey_.setVisible(usable);

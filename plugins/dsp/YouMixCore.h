@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace youmix
@@ -65,6 +66,7 @@ public:
         staging_.active[slot] = false;
         staging_.name[slot][0] = 0;
         staging_.weightDb[slot] = 0.0f;
+        colour_[slot].store(0, std::memory_order_relaxed);
         peak_[slot] = 0.0f;
         activity_[slot].store(0.0f, std::memory_order_relaxed);
         publish();
@@ -166,6 +168,22 @@ public:
             dest[count] = 0;
         }
         publish();
+    }
+
+    // Host track colour, ARGB. 0 means the host did not send one.
+    // Message thread only. process() does not read it.
+    void setTrackColour(int slot, std::uint32_t argb) noexcept
+    {
+        if (slot < 0 || slot >= kYouMixSlots)
+            return;
+        colour_[slot].store(argb, std::memory_order_relaxed);
+    }
+
+    std::uint32_t trackColour(int slot) const noexcept
+    {
+        if (slot < 0 || slot >= kYouMixSlots)
+            return 0;
+        return colour_[slot].load(std::memory_order_relaxed);
     }
 
     void applyPreset(int preset)
@@ -367,6 +385,7 @@ private:
         staging_.mode[slot] = 0;
         staging_.name[slot][0] = 0;
         staging_.weightDb[slot] = 0.0f;
+        colour_[slot].store(0, std::memory_order_relaxed);
         gain_[slot] = 1.0f;
         peak_[slot] = 0.0f;
         activity_[slot].store(0.0f, std::memory_order_relaxed);
@@ -390,6 +409,7 @@ private:
     std::atomic<float> activity_[kYouMixSlots] {};
     std::atomic<float> inputRms_[kYouMixSlots] {};
     std::atomic<float> reductionDb_[kYouMixSlots] {};
+    std::atomic<std::uint32_t> colour_[kYouMixSlots] {};
 };
 
 inline YouMixCore& youMixShared()

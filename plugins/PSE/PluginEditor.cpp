@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "ui/EditorFit.h"
 #include "ui/SplitMeter.h"
 
 namespace
@@ -95,13 +96,43 @@ PseAudioProcessorEditor::PseAudioProcessorEditor(PseAudioProcessor& plugin)
 
     addAndMakeVisible(bypassButton_);
     addAndMakeVisible(title_);
-    setSize(760, 780);
+    setResizable(true, true);
+    setResizeLimits(560, 400, 1600, 1200);
+    const auto size = youmix::clampEditorSize(processor_.editorWidth(), processor_.editorHeight(),
+                                               560, 400, 700, 520);
+    setSize(size.width, size.height);
     startTimerHz(30);
 }
 
 PseAudioProcessorEditor::~PseAudioProcessorEditor()
 {
     stopTimer();
+}
+
+void PseAudioProcessorEditor::fitOnce()
+{
+    if (fitted_ || ! isShowing())
+        return;
+    auto* top = getTopLevelComponent();
+    if (top == nullptr || top->getPeer() == nullptr)
+        return;
+    fitted_ = true;
+    juce::Component::SafePointer<PseAudioProcessorEditor> alive(this);
+    juce::MessageManager::callAsync([alive]
+    {
+        if (alive != nullptr)
+            youmix::fitTopLevelToDisplay(*alive);
+    });
+}
+
+void PseAudioProcessorEditor::visibilityChanged()
+{
+    fitOnce();
+}
+
+void PseAudioProcessorEditor::parentHierarchyChanged()
+{
+    fitOnce();
 }
 
 void PseAudioProcessorEditor::paint(juce::Graphics& graphics)
@@ -112,26 +143,31 @@ void PseAudioProcessorEditor::paint(juce::Graphics& graphics)
 
 void PseAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced(16);
-    auto top = area.removeFromTop(40);
-    bypassButton_.setBounds(top.removeFromLeft(120));
+    auto area = getLocalBounds().reduced(12);
+    auto top = area.removeFromTop(juce::jmin(40, juce::jmax(32, area.getHeight() / 12)));
+    bypassButton_.setBounds(top.removeFromLeft(juce::jmin(120, juce::jmax(72, top.getWidth() / 4))));
     title_.setBounds(top);
-    area.removeFromTop(12);
-    meterArea_ = area.removeFromLeft(168).reduced(6, 0);
-    area.removeFromLeft(16);
+    area.removeFromTop(8);
+    const int meterWidth = juce::jlimit(72, 150, area.getWidth() / 5);
+    meterArea_ = area.removeFromLeft(meterWidth).reduced(4, 0);
+    area.removeFromLeft(juce::jmin(12, area.getWidth() / 8));
 
     const int count = 6;
-    const int rowHeight = area.getHeight() / count;
+    const int rowHeight = juce::jmax(1, area.getHeight() / count);
     for (int index = 0; index < count; ++index)
     {
-        auto line = area.removeFromTop(rowHeight).reduced(0, 4);
-        rows_[index].caption.setBounds(line.removeFromTop(18));
+        auto line = area.removeFromTop(rowHeight).reduced(0, 3);
+        const int captionH = juce::jmin(16, juce::jmax(0, line.getHeight() / 5));
+        rows_[index].caption.setBounds(line.removeFromTop(captionH));
+        rows_[index].value.textPt = line.getHeight() >= 72 ? 20.0f : 15.0f;
         rows_[index].value.setBounds(line);
     }
+    processor_.rememberEditorSize(getWidth(), getHeight());
 }
 
 void PseAudioProcessorEditor::timerCallback()
 {
+    fitOnce();
     const bool bypassed = processor_.core().settings().bypass;
     bypassButton_.setButtonText(bypassed ? "BYPASS" : "ON");
     bypassButton_.setColour(juce::TextButton::buttonColourId, bypassed ? kBypass : kButtonOn);

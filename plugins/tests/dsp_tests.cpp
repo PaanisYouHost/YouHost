@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <new>
 #include <string>
@@ -561,6 +562,22 @@ int main()
     std::cout << "pse largest gain step " << pseStep << " allocations " << pseAllocations << "\n";
     CHECK(pseStep < 0.05f);
     CHECK(pseAllocations == 0);
+
+    youmix::YouMixCore labels;
+    const int named = labels.claimSlot();
+    labels.setName(named, "3 Vocal");
+    CHECK(std::string(labels.settings().name[named]) == "3 Vocal");
+    char longName[80];
+    for (int index = 0; index < 79; ++index)
+        longName[index] = 'A';
+    longName[79] = 0;
+    labels.setName(named, longName);
+    CHECK(std::strlen(labels.settings().name[named]) == 31);
+    labels.setTrackColour(named, 0xff2266ccu);
+    CHECK(labels.trackColour(named) == 0xff2266ccu);
+    labels.releaseSlot(named);
+    CHECK(labels.trackColour(named) == 0);
+    CHECK(labels.settings().name[named][0] == 0);
 
     if (failures != 0)
     {

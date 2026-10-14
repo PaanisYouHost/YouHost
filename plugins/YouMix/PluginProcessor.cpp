@@ -9,7 +9,8 @@ namespace
 {
 
 constexpr std::uint32_t kStateMagic = 0x594D5831; // YMX1
-constexpr std::uint32_t kStateVersion = 3;
+constexpr std::uint32_t kStateVersion = 4;
+constexpr int kStateBytesV3 = 96;
 
 struct YouMixState
 {
@@ -27,9 +28,11 @@ struct YouMixState
     float thresholdDb = -45.0f;
     float weightDb = 0.0f;
     std::uint32_t pinkBypass = 0;
+    std::int32_t editorWidth = 0;
+    std::int32_t editorHeight = 0;
 };
 
-static_assert(sizeof(YouMixState) == 96, "YouMix session blob must stay fixed-size");
+static_assert(sizeof(YouMixState) == 104, "YouMix session blob must stay fixed-size");
 
 } // namespace
 
@@ -113,6 +116,8 @@ void YouMixAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         std::memcpy(state.name, settings.name[slot_], sizeof(state.name));
         state.name[31] = 0;
     }
+    state.editorWidth = editorWidth_;
+    state.editorHeight = editorHeight_;
     destData.append(&state, sizeof(state));
 }
 
@@ -151,20 +156,40 @@ void YouMixAudioProcessor::setStateInformation(const void* data, int sizeInBytes
             core.setThresholdDb(state.thresholdDb, true);
         }
     }
-    if (state.version >= 3 && bytes >= static_cast<int>(sizeof(YouMixState)))
+    if (state.version >= 3 && bytes >= kStateBytesV3)
     {
         core.setWeightDb(slot_, state.weightDb);
         for (int group = 0; group < youmix::kYouMixGroups; ++group)
             core.setPinkBypass(group, (state.pinkBypass & (1u << static_cast<unsigned>(group))) != 0);
     }
+    if (state.version >= 4 && bytes >= static_cast<int>(sizeof(YouMixState))
+        && state.editorWidth >= 320 && state.editorHeight >= 200)
+    {
+        editorWidth_ = state.editorWidth;
+        editorHeight_ = state.editorHeight;
+    }
     core.setBypass(state.bypass != 0);
+}
+
+void YouMixAudioProcessor::rememberEditorSize(int width, int height) noexcept
+{
+    if (width >= 320 && height >= 200)
+    {
+        editorWidth_ = width;
+        editorHeight_ = height;
+    }
 }
 
 void YouMixAudioProcessor::updateTrackProperties(const TrackProperties& properties)
 {
-    if (slot_ < 0 || ! properties.name.has_value())
+    if (slot_ < 0)
         return;
-    youmix::youMixShared().setName(slot_, properties.name->toRawUTF8());
+    auto& core = youmix::youMixShared();
+    if (properties.name.has_value())
+        core.setName(slot_, properties.name->toRawUTF8());
+    // 0 means the host did not send a colour. AU context names have no colour.
+    if (properties.colourARGB.has_value() && *properties.colourARGB != 0)
+        core.setTrackColour(slot_, static_cast<std::uint32_t>(*properties.colourARGB));
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

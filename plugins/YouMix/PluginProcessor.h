@@ -34,7 +34,12 @@ public:
     void updateTrackProperties(const TrackProperties& properties) override;
 
     int slot() const noexcept { return slot_; }
+    int editorWidth() const noexcept { return editorWidth_; }
+    int editorHeight() const noexcept { return editorHeight_; }
+    void rememberEditorSize(int width, int height) noexcept;
 
 private:
     int slot_ = -1;
+    int editorWidth_ = 0;
+    int editorHeight_ = 0;
 };
