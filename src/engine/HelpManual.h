@@ -139,6 +139,7 @@ Shortcuts do nothing while a text field has focus.
 12. Troubleshooting
 -------------------
 - SYNC LOST: the card in use disappeared. A large window stays until the card returns; then it shrinks to a blinking box in the bottom-left corner. Click it to see when sync was lost and for how long. It does not stop audio or recording.
+- Sample rate mismatch: a red line names both rates, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
 - Dropouts: open DROPOUTS (3). Raise the buffer to 64; see section 2.
 - CPU: open CPU (4). DSP 100% = the buffer is full and the next callback drops out. You can see each plugin's share.
 - Plugin won't load: scan it again (S > Rescan selected). After a crash, the next launch names the plugin that was loading.

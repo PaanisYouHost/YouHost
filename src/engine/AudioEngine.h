@@ -323,6 +323,7 @@ private:
     void installClockListeners(std::uint32_t deviceId);
     void removeClockListeners() noexcept;
     void sampleClockProperties(bool& aliveDown, bool& runningDown, bool& sourceChanged, bool& rateChanged);
+    void refreshSampleRateWarning();
     void noteClockLost();
     void noteClockRestored();
     void resetClockWatch() noexcept;
