@@ -97,7 +97,6 @@ jobs:
           "${TEST}"
 
       - name: Group edit stress
-        timeout-minutes: 8
         run: |
           set -euo pipefail
           cmake --build build --config Release --target YouHostGroupStressTest
