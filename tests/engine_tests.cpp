@@ -5011,7 +5011,11 @@ void testReleaseChecklist()
              && checklistDoc.find("Version label") != std::string::npos
              && checklistDoc.find("YouHost 1.0.2") != std::string::npos
              && checklistDoc.find("YouHost-1.0.2-macOS.zip") != std::string::npos
-             && checklistDoc.find("prerelease") != std::string::npos
+             && checklistDoc.find("marked Latest") != std::string::npos
+             && checklistDoc.find("prerelease") == std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: true") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-19") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
