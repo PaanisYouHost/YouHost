@@ -97,6 +97,7 @@ jobs:
           "${TEST}"
 
       - name: Group edit stress
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           cmake --build build --config Release --target YouHostGroupStressTest
@@ -210,6 +211,7 @@ jobs:
             - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
             - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. The sidechain stays on and is fed silence. If a plugin still will not open, youhost.log says why.
             - A slow plugin load no longer stalls audio.
+            - Opening several plugins at once no longer freezes the app.
             - The device list at startup no longer opens every audio card just to count its channels.
             - Sitting idle is no longer written to youhost.log as a stall.
             - A sample-rate mismatch shows a red line, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.

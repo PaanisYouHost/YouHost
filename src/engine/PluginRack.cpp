@@ -1642,24 +1642,26 @@ void PluginRack::beginLoad(int channel,
     // The loader thread creates the instance. The message thread must stay in
     // the runloop: a slow AudioComponentInstanceNew on this thread holds the
     // message lock, and the audio callback can block on that lock.
-    const bool loaderBusy = backgroundInstantiate_ != nullptr && backgroundInstantiate_->isThreadRunning();
-    const bool background = ! loaderBusy && catalogue_.prefersBackgroundInstance(description);
-    if (background)
+    // Two AudioComponentInstanceNew calls at once deadlock. The loader waits
+    // for the main thread, and the main thread is inside its own instantiate.
+    if (catalogue_.prefersBackgroundInstance(description))
     {
         StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
-        jobChannel_ = channel;
-        jobSlot_ = slot;
-        jobTicket_ = ticket;
-        jobGeneration_ = restoreGeneration;
-        jobMarkDirty_ = markDirty;
-        jobBypassed_ = bypassed;
-        jobOpen_ = openWhenReady;
-        jobStereo_ = stereoFold;
-        jobDescription_ = description;
-        jobState_ = state;
-        jobRate_ = rate;
-        jobBlock_ = block;
-        launchBackgroundLoad();
+        BackgroundJob job;
+        job.channel = channel;
+        job.slot = slot;
+        job.ticket = ticket;
+        job.generation = restoreGeneration;
+        job.markDirty = markDirty;
+        job.bypassed = bypassed;
+        job.open = openWhenReady;
+        job.stereoFold = stereoFold;
+        job.description = std::move(description);
+        job.state = std::move(state);
+        job.rate = rate;
+        job.block = block;
+        backgroundQueue_.push_back(std::move(job));
+        pumpBackgroundQueue();
         return;
     }
 
@@ -2544,14 +2546,50 @@ void PluginRack::finishRestore()
     noteSlot(-1);
 }
 
+void PluginRack::pumpBackgroundQueue()
+{
+    if (quitting_ || backgroundBusy_ || backgroundQueue_.empty())
+        return;
+    if (backgroundInstantiate_ != nullptr && backgroundInstantiate_->isThreadRunning())
+    {
+        // run() has posted its result but the thread has not exited yet.
+        // The next message turn can start the following plugin.
+        auto alive = alive_;
+        juce::MessageManager::callAsync([this, alive]
+        {
+            if (! alive->load(std::memory_order_acquire))
+                return;
+            pumpBackgroundQueue();
+        });
+        return;
+    }
+
+    auto job = std::move(backgroundQueue_.front());
+    backgroundQueue_.erase(backgroundQueue_.begin());
+    backgroundBusy_ = true;
+    jobChannel_ = job.channel;
+    jobSlot_ = job.slot;
+    jobTicket_ = job.ticket;
+    jobGeneration_ = job.generation;
+    jobMarkDirty_ = job.markDirty;
+    jobBypassed_ = job.bypassed;
+    jobOpen_ = job.open;
+    jobStereo_ = job.stereoFold;
+    jobDescription_ = std::move(job.description);
+    jobState_ = std::move(job.state);
+    jobRate_ = job.rate;
+    jobBlock_ = job.block;
+    launchBackgroundLoad();
+}
+
 void PluginRack::launchBackgroundLoad()
 {
     if (backgroundInstantiate_ == nullptr)
         backgroundInstantiate_ = std::make_unique<BackgroundInstantiate>(*this);
-    if (backgroundInstantiate_->isThreadRunning())
-        backgroundInstantiate_->stopThread(30000);
     if (backgroundInstantiate_->startThread(juce::Thread::Priority::background))
         return;
+
+    backgroundBusy_ = false;
     finishLoad(jobChannel_,
                jobSlot_,
                jobTicket_,
@@ -2564,6 +2602,7 @@ void PluginRack::launchBackgroundLoad()
                nullptr,
                "The plugin loader did not start. See youhost.log.",
                jobGeneration_);
+    pumpBackgroundQueue();
 }
 
 void PluginRack::deliverOffThreadInstance()
@@ -2587,6 +2626,8 @@ void PluginRack::deliverOffThreadInstance()
                std::move(instance),
                error,
                jobGeneration_);
+    backgroundBusy_ = false;
+    pumpBackgroundQueue();
 }
 
 void PluginRack::setDirtyHandler(std::function<void()> handler)
@@ -2786,6 +2827,8 @@ void PluginRack::releaseForQuit()
     stopTimer();
     ++restoreGeneration_;
     restoreQueue_.clear();
+    backgroundQueue_.clear();
+    backgroundBusy_ = false;
     sessionLoadsReady_ = false;
     restorePosted_ = false;
     if (backgroundInstantiate_ != nullptr)

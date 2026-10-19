@@ -237,6 +237,7 @@ private:
     void completeRestoreStep(std::uint64_t generation);
     void finishRestore();
     void noteSlot(int channel);
+    void pumpBackgroundQueue();
     void launchBackgroundLoad();
     void deliverOffThreadInstance();
     class BackgroundInstantiate;
@@ -308,6 +309,23 @@ private:
     };
     std::vector<RestorePlugin> restoreQueue_;
     std::function<void(int)> slotHandler_;
+    struct BackgroundJob
+    {
+        int channel = 0;
+        int slot = 0;
+        std::uint64_t ticket = 0;
+        std::uint64_t generation = 0;
+        bool markDirty = false;
+        bool bypassed = false;
+        bool open = false;
+        int stereoFold = 0;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        double rate = 48000.0;
+        int block = 512;
+    };
+    std::vector<BackgroundJob> backgroundQueue_;
+    bool backgroundBusy_ = false;
     std::unique_ptr<BackgroundInstantiate> backgroundInstantiate_;
     std::mutex offThreadMutex_;
     std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;

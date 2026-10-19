@@ -5639,6 +5639,9 @@ void testBeta090()
     CHECK(busSource.find("kept opened layout") != std::string::npos);
     CHECK(busSource.find("restoreGeneration != 0 && catalogue_.prefersBackgroundInstance") == std::string::npos);
     CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
+    CHECK(busSource.find("backgroundQueue_") != std::string::npos);
+    CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes: 8") != std::string::npos);
     const auto audioCallback = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                             "void AudioEngine::audioDeviceIOCallbackWithContext",
                                             "void AudioEngine::audioDeviceAboutToStart");
