@@ -42,29 +42,33 @@ inline bool isPluginBusMark(std::string_view text) noexcept
 inline constexpr int kPluginChannelCap = 8;
 inline constexpr int kPluginBusCap = 8;
 
-// How non-main buses are offered. Logic leaves a sidechain input enabled
-// (almost always mono) and does not disable it. JUCE's AudioUnit check
-// rejects a disabled sidechain, and it also rejects a mono sidechain next to
-// a stereo main bus, so a refused check is not the last word: the host still
-// asks the Audio Unit with setBusesLayout.
+// How non-main buses are offered. Logic leaves a sidechain input enabled and
+// feeds it silence. JUCE's AudioUnit check rejects a disabled sidechain, and
+// it also rejects a mono sidechain next to a stereo main bus, so a refused
+// check is not the last word: the host still asks the Audio Unit with
+// setBusesLayout.
 //
 // `opened` keeps every bus at the channel count the plugin opened with.
-// `sidechainMono` is Logic's sidechain: extra inputs are mono.
-// `keepDefault` and `matchMain` are the other enabled layouts.
-// `disable` is last, for plugins that really have no sidechain.
+// A sidechain that opened at 0 channels is not a success: it has to be enabled.
+// `sidechainStereo` is FabFilter's VST3 layout (main plus a stereo sidechain).
+// `sidechainMono` is the mono sidechain Logic also accepts.
+// `disable` is only for a plugin that has no extra bus.
 enum class ExtraBusMode
 {
     disable = 0,
     keepDefault = 1,
     matchMain = 2,
     sidechainMono = 3,
-    opened = 4
+    opened = 4,
+    sidechainStereo = 5
 };
 
 inline const char* extraBusModeName(ExtraBusMode mode) noexcept
 {
     if (mode == ExtraBusMode::opened)
         return "opened";
+    if (mode == ExtraBusMode::sidechainStereo)
+        return "sidechain2";
     if (mode == ExtraBusMode::sidechainMono)
         return "sidechain";
     if (mode == ExtraBusMode::keepDefault)
@@ -74,17 +78,18 @@ inline const char* extraBusModeName(ExtraBusMode mode) noexcept
     return "disable";
 }
 
-// Plugins with a sidechain try the layout they opened with, then a mono
-// sidechain, then the other enabled layouts, and only then a disabled bus.
-// A plugin with no extra bus only needs "opened" and one forced main layout.
+// A sidechain is offered enabled: the layout it opened with (when that
+// sidechain is already on), then stereo, then mono, then the other enabled
+// layouts. Disabling the sidechain is not an offer. A plugin with no extra
+// bus only needs "opened" and one forced main layout.
 inline int copyExtraBusAttemptOrder(bool hasExtraBuses, ExtraBusMode* dest, int capacity) noexcept
 {
     const ExtraBusMode extraOrder[] = {
         ExtraBusMode::opened,
+        ExtraBusMode::sidechainStereo,
         ExtraBusMode::sidechainMono,
-        ExtraBusMode::keepDefault,
         ExtraBusMode::matchMain,
-        ExtraBusMode::disable
+        ExtraBusMode::keepDefault
     };
     const ExtraBusMode plainOrder[] = {
         ExtraBusMode::opened,
@@ -207,15 +212,24 @@ inline LayoutPlan planPluginLayout(const int* inputDefaults,
                     plan.reason = inputs ? "an input bus is wider than stereo" : "an output bus is wider than stereo";
                     return false;
                 }
+                // An extra input at 0 channels is a disabled sidechain. Logic
+                // does not leave that bus off, and several Audio Units reject
+                // the layout. Enabling it is a later attempt.
+                if (inputs && opened == 0)
+                {
+                    plan.reason = "sidechain bus is disabled";
+                    return false;
+                }
                 channels = opened;
             }
-            else if (extra == ExtraBusMode::sidechainMono)
+            else if (extra == ExtraBusMode::sidechainMono || extra == ExtraBusMode::sidechainStereo)
             {
-                // Extra inputs are the sidechain Logic leaves on, as mono.
+                // Extra inputs stay enabled. Stereo matches FabFilter's 4/2
+                // VST3 layout. Mono is the other layout Logic accepts.
                 // Extra outputs stay as the plugin opened them.
                 if (inputs)
                 {
-                    channels = 1;
+                    channels = extra == ExtraBusMode::sidechainStereo ? 2 : 1;
                 }
                 else if (! pluginBusCountOk(opened))
                 {
@@ -312,6 +326,66 @@ inline const char* pluginLoadMessage(bool gotInstance,
     if (unlinkedMono && ! monoOk && ! stereoOk && ! sideOk && openedStereo && ! hasExtraBuses)
         return kPluginMonoChannelMessage;
     return kPluginLayoutMessage;
+}
+
+// The unload line always carries a reason. An empty host message is written
+// as a fixed sentence so a failed load is not just "loading" then "unload".
+inline std::string pluginFailureLogReason(bool gotInstance, const char* hostError, const char* attempts)
+{
+    if (! gotInstance)
+    {
+        std::string text = "instantiate failed: ";
+        if (hostError != nullptr && hostError[0] != '\0')
+            text += hostError;
+        else
+            text += "no reason from the host";
+        return text;
+    }
+    if (attempts != nullptr && attempts[0] != '\0')
+        return std::string(attempts);
+    return "no reason from the host";
+}
+
+struct KeptLayout
+{
+    bool ok = false;
+    int mainIn = 0;
+    int mainOut = 0;
+    int totalIn = 0;
+    int totalOut = 0;
+};
+
+// setBusesLayout rejected every offer. The Audio Unit is still the layout it
+// opened with. Keep that when the main bus is already mono or stereo, instead
+// of unloading a plugin that instantiated. Extra inputs stay as they are.
+inline KeptLayout keepOpenedLayout(const int* inputs,
+                                   int inputBusCount,
+                                   const int* outputs,
+                                   int outputBusCount) noexcept
+{
+    KeptLayout kept;
+    if (inputs == nullptr || outputs == nullptr || inputBusCount < 1 || outputBusCount < 1)
+        return kept;
+    if (inputBusCount > kPluginBusCap || outputBusCount > kPluginBusCap)
+        return kept;
+    const int mainIn = inputs[0];
+    const int mainOut = outputs[0];
+    if ((mainIn != 1 && mainIn != 2) || (mainOut != 1 && mainOut != 2))
+        return kept;
+    int totalIn = 0;
+    int totalOut = 0;
+    for (int bus = 0; bus < inputBusCount; ++bus)
+        totalIn += inputs[bus];
+    for (int bus = 0; bus < outputBusCount; ++bus)
+        totalOut += outputs[bus];
+    if (totalOut < 1 || totalIn > kPluginChannelCap || totalOut > kPluginChannelCap)
+        return kept;
+    kept.ok = true;
+    kept.mainIn = mainIn;
+    kept.mainOut = mainOut;
+    kept.totalIn = totalIn;
+    kept.totalOut = totalOut;
+    return kept;
 }
 
 } // namespace youhost

@@ -5,6 +5,7 @@
 #include "ScanJobs.h"
 
 #include <algorithm>
+#include <memory>
 #include <thread>
 
 #if defined(__APPLE__) || defined(__linux__)
@@ -686,18 +687,34 @@ bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& desc
         return false;
     }
 
-    bool called = false;
+    // AUv2 calls back before createPluginInstance returns. AUv3 calls back
+    // later, on another queue. The loader thread waits. The message thread
+    // does not, so the audio callback is not stuck behind the instantiate.
+    struct Result
+    {
+        std::unique_ptr<juce::AudioPluginInstance> instance;
+        juce::String error;
+        bool called = false;
+        juce::WaitableEvent finished;
+    };
+    auto result = std::make_shared<Result>();
     (format->*pluginFormatInstantiate(PluginFormatInstantiate {}))(
         description,
         sampleRate,
         blockSize,
-        [&](std::unique_ptr<juce::AudioPluginInstance> created, const juce::String& message)
+        [result](std::unique_ptr<juce::AudioPluginInstance> created, const juce::String& message)
         {
-            called = true;
-            instance = std::move(created);
-            error = message;
+            result->instance = std::move(created);
+            result->error = message;
+            result->called = true;
+            result->finished.signal();
         });
-    if (! called && error.isEmpty())
+    // wait() is the synchronisation. A callback that already ran, on this
+    // thread or another, has signalled and wait returns immediately.
+    result->finished.wait();
+    instance = std::move(result->instance);
+    error = result->error;
+    if (! result->called && error.isEmpty())
         error = "The plugin did not open. See youhost.log.";
     return instance != nullptr;
 }

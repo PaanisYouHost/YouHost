@@ -49,6 +49,21 @@ inline bool beatIsStale(std::int64_t nowNs, std::int64_t beatNs, std::int64_t li
     return nowNs - beatNs > limitNs;
 }
 
+// phase=message is the idle runloop, waiting for the next event. A stale
+// beat there is not a stuck load. Only a phase that means work in progress
+// is reported.
+inline bool messageStallMatters(int phase) noexcept
+{
+    return phase == kPhaseAudio
+           || phase == kPhasePlugins
+           || phase == kPhaseLoad
+           || phase == kPhasePrepare
+           || phase == kPhaseEditor
+           || phase == kPhaseCloseEditor
+           || phase == kPhasePublish
+           || phase == kPhaseCapture;
+}
+
 struct StallClock
 {
     std::atomic<std::int64_t> messageNs { 0 };

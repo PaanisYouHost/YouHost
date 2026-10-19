@@ -135,6 +135,8 @@ bool offerLayout(juce::AudioPluginInstance& instance,
         why = plan.reason;
         return false;
     }
+    // One slow AudioUnitInitialize must not be added to the previous one.
+    touchMessageBeat();
     juce::AudioProcessor::BusesLayout layout;
     layout.inputBuses.resize(plan.inputBusCount);
     layout.outputBuses.resize(plan.outputBusCount);
@@ -264,8 +266,38 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         }
     }
 
-    choice.attempts.add("chose none");
     instance.setBusesLayout(remember);
+    int liveIn[kPluginBusCap] {};
+    int liveOut[kPluginBusCap] {};
+    const int liveInputBuses = std::min(instance.getBusCount(true), kPluginBusCap);
+    const int liveOutputBuses = std::min(instance.getBusCount(false), kPluginBusCap);
+    for (int bus = 0; bus < liveInputBuses; ++bus)
+        liveIn[bus] = instance.getChannelCountOfBus(true, bus);
+    for (int bus = 0; bus < liveOutputBuses; ++bus)
+        liveOut[bus] = instance.getChannelCountOfBus(false, bus);
+    const auto kept = keepOpenedLayout(liveIn, liveInputBuses, liveOut, liveOutputBuses);
+    if (kept.ok)
+    {
+        choice.inputChannels = kept.mainIn;
+        choice.outputChannels = kept.mainOut;
+        choice.totalInputs = kept.totalIn;
+        choice.totalOutputs = kept.totalOut;
+        choice.usedExtra = ExtraBusMode::opened;
+        choice.chosen = chosenFromMain(kept.mainIn, kept.mainOut);
+        if (kept.mainIn == 1 && kept.mainOut == 1)
+            choice.supportMono = true;
+        else if (kept.mainIn == 1 && kept.mainOut == 2)
+            choice.supportSide = true;
+        else if (kept.mainIn == 2 && kept.mainOut == 2)
+            choice.supportStereo = true;
+        choice.ok = true;
+        choice.attempts.add("kept opened layout main " + juce::String(kept.mainIn) + "/" + juce::String(kept.mainOut)
+                            + " total " + juce::String(kept.totalIn) + "/" + juce::String(kept.totalOut)
+                            + " reason=setBusesLayout did not accept another layout");
+        return choice;
+    }
+
+    choice.attempts.add("chose none");
     return choice;
 }
 
@@ -1607,7 +1639,11 @@ void PluginRack::beginLoad(int channel,
 
     tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
 
-    const bool background = restoreGeneration != 0 && catalogue_.prefersBackgroundInstance(description);
+    // The loader thread creates the instance. The message thread must stay in
+    // the runloop: a slow AudioComponentInstanceNew on this thread holds the
+    // message lock, and the audio callback can block on that lock.
+    const bool loaderBusy = backgroundInstantiate_ != nullptr && backgroundInstantiate_->isThreadRunning();
+    const bool background = ! loaderBusy && catalogue_.prefersBackgroundInstance(description);
     if (background)
     {
         StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
@@ -1739,12 +1775,25 @@ void PluginRack::finishLoad(int channel,
     const int left = channel & ~1;
     const bool unlinkedMono = ! stereoLink(left);
     if (instance != nullptr)
+    {
+        PhaseScope negotiating(kPhaseLoad);
         buses = configureBuses(*instance, unlinkedMono);
+    }
+    juce::String attemptText;
+    for (int index = 0; index < buses.attempts.size(); ++index)
+    {
+        if (index > 0)
+            attemptText += "; ";
+        attemptText += buses.attempts[index];
+    }
+    const auto failureReason = juce::String(pluginFailureLogReason(instance != nullptr,
+                                                                   error.toRawUTF8(),
+                                                                   attemptText.toRawUTF8()));
     if (settings_ != nullptr)
     {
         const auto prefix = "plugin \"" + description.name + "\" ch " + juce::String(channel + 1) + " slot " + juce::String(slot) + " ";
         if (instance == nullptr)
-            appendHostLog(*settings_, prefix + "instantiate failed: " + (error.isNotEmpty() ? error : juce::String("(no message from the host)")));
+            appendHostLog(*settings_, prefix + failureReason);
         for (const auto& attempt : buses.attempts)
             appendHostLog(*settings_, prefix + attempt);
     }
@@ -1839,7 +1888,8 @@ void PluginRack::finishLoad(int channel,
     }
     bury(std::move(previous), nullptr);
 
-    tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId);
+    tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId,
+                loaded ? juce::String() : failureReason);
 
     if (notify)
         notifyDirty();
@@ -2724,7 +2774,7 @@ void PluginRack::setBlockedIdentifiers(const juce::StringArray& identifiers)
     blocked_ = identifiers;
 }
 
-void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&)> trace)
+void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
 }
@@ -2811,10 +2861,10 @@ bool PluginRack::isBlocked(const juce::PluginDescription& description) const
     return created.isNotEmpty() && blocked_.contains(created);
 }
 
-void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)
+void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
 {
     if (trace_ != nullptr)
-        trace_(channel, slot, phase, name, identifier);
+        trace_(channel, slot, phase, name, identifier, reason);
 }
 
 void PluginRack::removePluginNow(int channel, int slot)

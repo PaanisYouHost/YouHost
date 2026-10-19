@@ -7,9 +7,11 @@
 namespace youhost
 {
 
-// AudioUnit (including AUv3) stays on the message thread and is created with
-// createPluginInstanceAsync. Anything else that does not need the message
-// thread unblocked can be constructed on a background thread.
+// Creating a plugin on the message thread holds the message lock for the
+// whole instantiate. A slow Audio Unit (a couple of seconds) then blocks
+// anything on the audio thread that needs that lock. Every plugin is created
+// on the loader thread. The message thread stays in the runloop and only
+// takes the instance back once it exists, for the bus layout and the editor.
 enum class PluginInstantiateWhere
 {
     messageAsync,
@@ -23,8 +25,8 @@ inline bool isAudioUnitFormat(const char* formatName) noexcept
 
 inline PluginInstantiateWhere pluginInstantiateWhere(bool audioUnit, bool requiresUnblockedMessageThread) noexcept
 {
-    if (audioUnit || requiresUnblockedMessageThread)
-        return PluginInstantiateWhere::messageAsync;
+    (void) audioUnit;
+    (void) requiresUnblockedMessageThread;
     return PluginInstantiateWhere::background;
 }
 
