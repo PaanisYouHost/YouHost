@@ -201,7 +201,17 @@ jobs:
         with:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: ${{ env.YOUHOST_ZIP }}
-          prerelease: true
-          make_latest: false
+          prerelease: false
+          make_latest: true
+          body: |
+            2026-10-19
+
+            - Help is in English, in a window you can scroll. The ? tooltip is one short line.
+            - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
+            - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. The sidechain stays on and is fed silence. If a plugin still will not open, youhost.log says why.
+            - A slow plugin load no longer stalls audio.
+            - The device list at startup no longer opens every audio card just to count its channels.
+            - Sitting idle is no longer written to youhost.log as a stall.
+            - New, Open, Save, and Save As are unchanged, and a 1.0.1 session still opens. The session format stays 7.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
