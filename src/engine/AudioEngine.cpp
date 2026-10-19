@@ -401,6 +401,7 @@ void AudioEngine::pollDeviceStats()
         deviceOpen_.store(false, std::memory_order_relaxed);
         deviceName_ = juce::String(kOfflineDeviceName);
         publishSessionChannelLimit();
+        refreshSampleRateWarning();
         return;
     }
 
@@ -1321,8 +1322,44 @@ void AudioEngine::noteClockRestored()
     appendHostLog(settings_, "sync restored");
 }
 
+void AudioEngine::refreshSampleRateWarning()
+{
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        if (! messages->isThisTheMessageThread())
+            return;
+    // Session open adopts the card rate before the warning is meaningful.
+    if (restoringSession_)
+        return;
+
+    juce::String next;
+    if (! offlineTemplate_
+        && deviceOpen_.load(std::memory_order_relaxed)
+        && recorder_ != nullptr)
+    {
+        const double sessionRate = recorder_->timelineSampleRate();
+        const double deviceRate = (nominalRateKnown_ && nominalRateSnapshot_ > 0.0)
+                                      ? nominalRateSnapshot_
+                                      : sampleRate_.load(std::memory_order_relaxed);
+        next = juce::String(sampleRateMismatchText(sessionRate, deviceRate));
+    }
+
+    if (next == rateWarning_)
+        return;
+    rateWarning_ = std::move(next);
+    if (rateWarning_.isNotEmpty())
+        appendHostLog(settings_, rateWarning_);
+}
+
 void AudioEngine::watchClockSync()
 {
+    // Clears the hint in Offline and while the card is down. Nominal-rate
+    // changes arrive through the property listener, then this timer.
+    struct Exit
+    {
+        AudioEngine& engine;
+        ~Exit() { engine.refreshSampleRateWarning(); }
+    } exit { *this };
+
     pollStartupDeviceList();
     if (offlineTemplate_)
     {
@@ -1543,8 +1580,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         beginDeviceOpenGrace(clockMemory_, steadyNowNs());
         clockSyncMissing_ = false;
     }
-    const double sessionRate = recorder_ != nullptr ? recorder_->timelineSampleRate() : 0.0;
-    rateWarning_ = juce::String(sampleRateWarningText(rate, sessionRate));
+    refreshSampleRateWarning();
 
     if (remember && (needPrepare || masksChanged || wantedName_ != live->getName()))
     {
@@ -1612,6 +1648,7 @@ void AudioEngine::clearDisplayedCpu() noexcept
 void AudioEngine::handleDeviceDown()
 {
     deviceOpen_.store(false, std::memory_order_relaxed);
+    refreshSampleRateWarning();
     clockSyncMissing_ = false;
     clockMemory_.reset();
     clearDisplayedCpu();
@@ -3364,6 +3401,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     }
     lastBackupMs_ = 0;
     restoringSession_ = false;
+    refreshSampleRateWarning();
     dropoutHeaderWritten_ = false;
     markers_.clear();
     for (const auto& marker : data.markers)

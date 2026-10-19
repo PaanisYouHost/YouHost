@@ -16,17 +16,6 @@ inline bool sampleRatesDiffer(double deviceRate, double sessionRate) noexcept
     return std::fabs(deviceRate - sessionRate) >= 1.0;
 }
 
-inline std::string sampleRateWarningText(double deviceRate, double sessionRate)
-{
-    if (! sampleRatesDiffer(deviceRate, sessionRate))
-        return {};
-
-    const auto device = std::to_string(static_cast<int>(std::llround(deviceRate)));
-    const auto session = std::to_string(static_cast<int>(std::llround(sessionRate)));
-    return "Device is " + device + " Hz. This session is " + session
-           + " Hz. Playback needs the same rate.";
-}
-
 // 48000 -> "48", 44100 -> "44.1", 96000 -> "96".
 inline std::string formatRateKhz(double rate)
 {
@@ -39,6 +28,20 @@ inline std::string formatRateKhz(double rate)
     if (tenth % 10 == 0)
         return std::to_string(tenth / 10);
     return std::to_string(tenth / 10) + "." + std::to_string(std::abs(tenth % 10));
+}
+
+// Empty when either rate is unknown or they already agree. Does not change audio.
+inline std::string sampleRateMismatchText(double sessionRate, double deviceRate)
+{
+    if (! sampleRatesDiffer(deviceRate, sessionRate))
+        return {};
+    return "Sample rate mismatch: session " + formatRateKhz(sessionRate)
+           + " kHz, audio device " + formatRateKhz(deviceRate) + " kHz";
+}
+
+inline std::string sampleRateWarningText(double deviceRate, double sessionRate)
+{
+    return sampleRateMismatchText(sessionRate, deviceRate);
 }
 
 struct SessionRateAdoption

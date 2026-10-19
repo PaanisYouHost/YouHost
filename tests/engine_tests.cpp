@@ -1683,7 +1683,14 @@ void testDeviceWatch()
     CHECK(! youhost::sampleRatesDiffer(48000.0, 48000.0));
     CHECK(youhost::sampleRatesDiffer(48000.0, 44100.0));
     CHECK(! youhost::sampleRatesDiffer(0.0, 48000.0));
-    CHECK(youhost::sampleRateWarningText(44100.0, 48000.0).find("44100") != std::string::npos);
+    CHECK(youhost::sampleRateMismatchText(48000.0, 44100.0)
+          == "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz");
+    CHECK(youhost::sampleRateMismatchText(48000.0, 48000.0).empty());
+    CHECK(youhost::sampleRateMismatchText(0.0, 44100.0).empty());
+    CHECK(youhost::sampleRateMismatchText(48000.0, 0.0).empty());
+    CHECK(youhost::sampleRateWarningText(44100.0, 48000.0)
+          == youhost::sampleRateMismatchText(48000.0, 44100.0));
+    CHECK(youhost::shortcutHelpText().find("Sample rate mismatch: a red line names both rates") != std::string::npos);
     CHECK(youhost::usableChannelCount(256) == 128);
     CHECK(youhost::usableChannelCount(48) == 48);
     CHECK(youhost::usableChannelCount(-1) == 0);
@@ -5638,6 +5645,23 @@ void testBeta090()
     CHECK(audioCallback.find("lifeLock_") == std::string::npos);
     CHECK(audioCallback.find("createPluginInstance") == std::string::npos);
     CHECK(audioCallback.find("createDevice") == std::string::npos);
+    CHECK(audioCallback.find("refreshSampleRateWarning") == std::string::npos);
+    CHECK(audioCallback.find("rateWarning_") == std::string::npos);
+    CHECK(audioCallback.find("kAudioDevicePropertyNominalSampleRate") == std::string::npos);
+    const auto rateRefresh = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                          "void AudioEngine::refreshSampleRateWarning",
+                                          "void AudioEngine::watchClockSync");
+    CHECK(rateRefresh.find("nominalRateSnapshot_") != std::string::npos);
+    CHECK(rateRefresh.find("appendHostLog") != std::string::npos);
+    CHECK(rateRefresh.find("recorder_->stop") == std::string::npos);
+    CHECK(rateRefresh.find("setTimelineSampleRate") == std::string::npos);
+    CHECK(rateRefresh.find("pressTransport") == std::string::npos);
+    CHECK(rateRefresh.find("noteClockLost") == std::string::npos);
+    const auto clockWatch = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                         "void AudioEngine::watchClockSync",
+                                         "void AudioEngine::changeListenerCallback");
+    CHECK(clockWatch.find("refreshSampleRateWarning") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Sample rate mismatch: session 48 kHz, audio device 44.1 kHz") != std::string::npos);
     const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
     CHECK(processBody.find("lifeLock_") == std::string::npos);
     CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);

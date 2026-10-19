@@ -212,6 +212,7 @@ jobs:
             - A slow plugin load no longer stalls audio.
             - The device list at startup no longer opens every audio card just to count its channels.
             - Sitting idle is no longer written to youhost.log as a stall.
+            - A sample-rate mismatch shows a red line, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
             - New, Open, Save, and Save As are unchanged, and a 1.0.1 session still opens. The session format stays 7.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
