@@ -42,24 +42,86 @@ inline bool isPluginBusMark(std::string_view text) noexcept
 inline constexpr int kPluginChannelCap = 8;
 inline constexpr int kPluginBusCap = 8;
 
-// How non-main buses are offered. Disable is tried first. Some Audio Units
-// refuse a disabled sidechain, so the same main layout is tried again with
-// the buses left as the plugin opened them, then with each extra bus set to
-// the main bus channel count. Extra inputs are silence.
+// How non-main buses are offered. Logic leaves a sidechain input enabled
+// (almost always mono) and does not disable it. JUCE's AudioUnit check
+// rejects a disabled sidechain, and it also rejects a mono sidechain next to
+// a stereo main bus, so a refused check is not the last word: the host still
+// asks the Audio Unit with setBusesLayout.
+//
+// `opened` keeps every bus at the channel count the plugin opened with.
+// `sidechainMono` is Logic's sidechain: extra inputs are mono.
+// `keepDefault` and `matchMain` are the other enabled layouts.
+// `disable` is last, for plugins that really have no sidechain.
 enum class ExtraBusMode
 {
     disable = 0,
     keepDefault = 1,
-    matchMain = 2
+    matchMain = 2,
+    sidechainMono = 3,
+    opened = 4
 };
 
 inline const char* extraBusModeName(ExtraBusMode mode) noexcept
 {
+    if (mode == ExtraBusMode::opened)
+        return "opened";
+    if (mode == ExtraBusMode::sidechainMono)
+        return "sidechain";
     if (mode == ExtraBusMode::keepDefault)
         return "keep";
     if (mode == ExtraBusMode::matchMain)
         return "match";
     return "disable";
+}
+
+// Plugins with a sidechain try the layout they opened with, then a mono
+// sidechain, then the other enabled layouts, and only then a disabled bus.
+// A plugin with no extra bus only needs "opened" and one forced main layout.
+inline int copyExtraBusAttemptOrder(bool hasExtraBuses, ExtraBusMode* dest, int capacity) noexcept
+{
+    const ExtraBusMode extraOrder[] = {
+        ExtraBusMode::opened,
+        ExtraBusMode::sidechainMono,
+        ExtraBusMode::keepDefault,
+        ExtraBusMode::matchMain,
+        ExtraBusMode::disable
+    };
+    const ExtraBusMode plainOrder[] = {
+        ExtraBusMode::opened,
+        ExtraBusMode::disable
+    };
+    const ExtraBusMode* source = hasExtraBuses ? extraOrder : plainOrder;
+    const int count = hasExtraBuses ? 5 : 2;
+    if (dest == nullptr || capacity < count)
+        return 0;
+    for (int index = 0; index < count; ++index)
+        dest[index] = source[index];
+    return count;
+}
+
+// Unlinked mono prefers 1/1, then the stereo layout the plugin may have
+// opened with. A linked pair prefers 2/2 and does not start by rewriting
+// the Audio Unit down to mono.
+inline void mainLayoutAttemptOrder(bool unlinkedMono, int* mainIn, int* mainOut) noexcept
+{
+    if (mainIn == nullptr || mainOut == nullptr)
+        return;
+    if (unlinkedMono)
+    {
+        mainIn[0] = 1;
+        mainOut[0] = 1;
+        mainIn[1] = 2;
+        mainOut[1] = 2;
+        mainIn[2] = 1;
+        mainOut[2] = 2;
+        return;
+    }
+    mainIn[0] = 2;
+    mainOut[0] = 2;
+    mainIn[1] = 1;
+    mainOut[1] = 1;
+    mainIn[2] = 1;
+    mainOut[2] = 2;
 }
 
 struct LayoutPlan
@@ -127,13 +189,18 @@ inline LayoutPlan planPluginLayout(const int* inputDefaults,
             int channels = 0;
             if (bus == 0)
             {
+                if (extra == ExtraBusMode::opened && opened != mainChannels)
+                {
+                    plan.reason = "opened main bus does not match";
+                    return false;
+                }
                 channels = mainChannels;
             }
             else if (extra == ExtraBusMode::disable)
             {
                 channels = 0;
             }
-            else if (extra == ExtraBusMode::keepDefault)
+            else if (extra == ExtraBusMode::keepDefault || extra == ExtraBusMode::opened)
             {
                 if (! pluginBusCountOk(opened))
                 {
@@ -141,6 +208,24 @@ inline LayoutPlan planPluginLayout(const int* inputDefaults,
                     return false;
                 }
                 channels = opened;
+            }
+            else if (extra == ExtraBusMode::sidechainMono)
+            {
+                // Extra inputs are the sidechain Logic leaves on, as mono.
+                // Extra outputs stay as the plugin opened them.
+                if (inputs)
+                {
+                    channels = 1;
+                }
+                else if (! pluginBusCountOk(opened))
+                {
+                    plan.reason = "an output bus is wider than stereo";
+                    return false;
+                }
+                else
+                {
+                    channels = opened;
+                }
             }
             else
             {
