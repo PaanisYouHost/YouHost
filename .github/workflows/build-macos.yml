@@ -17,12 +17,11 @@ permissions:
 jobs:
   macos:
     name: macOS universal
-    # macos-latest is macOS 26 arm64. That pool failed to hand out a runner
-    # ("not acquired by Runner of type hosted"). macos-15 is the free standard
-    # arm64 image and can still build an arm64 + x86_64 universal binary.
-    # Run 37815795731 was cancelled the same way before any step ran; a push
-    # retriggers the job because this token cannot rerun workflows.
-    runs-on: macos-15
+    # macos-latest and macos-15 are arm64. That pool has been refusing jobs
+    # ("not acquired by Runner of type hosted") before any step runs.
+    # macos-15-intel is a different pool and still cross-builds the universal
+    # arm64 + x86_64 binary. A push retriggers the job; this token cannot rerun.
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -202,5 +201,19 @@ jobs:
         with:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: ${{ env.YOUHOST_ZIP }}
+          prerelease: false
+          make_latest: true
+          body: |
+            2026-10-19
+
+            - Help is in English, in a window you can scroll. The ? tooltip is one short line.
+            - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
+            - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. The sidechain stays on and is fed silence. If a plugin still will not open, youhost.log says why.
+            - A slow plugin load no longer stalls audio.
+            - Opening several plugins at once no longer freezes the app.
+            - The device list at startup no longer opens every audio card just to count its channels.
+            - Sitting idle is no longer written to youhost.log as a stall.
+            - A sample-rate mismatch shows a red line, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
+            - New, Open, Save, and Save As are unchanged, and a 1.0.1 session still opens. The session format stays 7.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

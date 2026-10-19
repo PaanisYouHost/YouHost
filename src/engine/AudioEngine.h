@@ -323,6 +323,7 @@ private:
     void installClockListeners(std::uint32_t deviceId);
     void removeClockListeners() noexcept;
     void sampleClockProperties(bool& aliveDown, bool& runningDown, bool& sourceChanged, bool& rateChanged);
+    void refreshSampleRateWarning();
     void noteClockLost();
     void noteClockRestored();
     void resetClockWatch() noexcept;
@@ -354,7 +355,7 @@ private:
     void installDeviceListListener();
     void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
-    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
+    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason);
     void rememberSavedSetup(const juce::XmlElement* saved);
 
     AppSettings& settings_;

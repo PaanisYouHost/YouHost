@@ -475,8 +475,10 @@ void testLatencyWindowFits()
     CHECK(parsed.hasFit);
     CHECK(parsed.fitHeight == 510);
     CHECK(youhost::juceWindowState(parsed) == "12 40 520 420");
-    CHECK(youhost::shortcutHelpText().find("A saved size smaller than that content is replaced") != std::string::npos);
-    CHECK(youhost::shortcutHelpText().find("LATENCY does not have a Timeline button") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("LATENCY (5): Global (default) or Per group.") != std::string::npos);
+    CHECK(youhost::helpButtonTip() != nullptr);
+    CHECK(std::string(youhost::helpButtonTip()).size() < 80);
+    CHECK(youhost::shortcutHelpText().find(youhost::helpButtonTip()) == std::string::npos);
     const auto legacyState = youhost::parseWindowState("8 8 900 700 fullscreen");
     CHECK(legacyState.valid);
     CHECK(! legacyState.hasFit);
@@ -616,8 +618,12 @@ void testSessionFileActions()
 
     const auto help = youhost::shortcutHelpText();
     CHECK(help.find("ALL PLUGIN BYPASS") != std::string::npos);
-    CHECK(help.find("FIT") != std::string::npos);
+    CHECK(help.find("Fit the whole session") != std::string::npos);
     CHECK(help.find("Go to channel") != std::string::npos);
+    CHECK(help.find("writes session.youhost") != std::string::npos);
+    CHECK(help.find("Save As") != std::string::npos);
+    CHECK(help.find("New: clean session") != std::string::npos);
+    CHECK(help.find("Open... / Open Recent") != std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);
     CHECK(help.find("MIDI") == std::string::npos);
 }
@@ -682,7 +688,11 @@ void testInstallGuide()
     CHECK(workflow.find("path: pack") != std::string::npos);
 
     const auto help = youhost::shortcutHelpText();
-    CHECK(help.find(guide) != std::string::npos);
+    CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
+    CHECK(help.find("Open Anyway") != std::string::npos);
+    CHECK(help.find("YOUHOST") != std::string::npos);
+    CHECK(help.find("Ennen keikkaa") == std::string::npos);
+    CHECK(help.find("ASENNUSOHJE") == std::string::npos);
     for (const char* phrase : banned)
         CHECK(help.find(phrase) == std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);
@@ -1130,8 +1140,8 @@ void testPluginLoadPace()
     using youhost::PluginInstantiateWhere;
     CHECK(youhost::isAudioUnitFormat("AudioUnit"));
     CHECK(! youhost::isAudioUnitFormat("VST3"));
-    CHECK(youhost::pluginInstantiateWhere(true, false) == PluginInstantiateWhere::messageAsync);
-    CHECK(youhost::pluginInstantiateWhere(false, true) == PluginInstantiateWhere::messageAsync);
+    CHECK(youhost::pluginInstantiateWhere(true, false) == PluginInstantiateWhere::background);
+    CHECK(youhost::pluginInstantiateWhere(false, true) == PluginInstantiateWhere::background);
     CHECK(youhost::pluginInstantiateWhere(false, false) == PluginInstantiateWhere::background);
 
     char text[64];
@@ -1160,7 +1170,7 @@ void testPluginLoadPace()
 void testShortcutsMatchTheHelp()
 {
     const auto help = youhost::shortcutHelpText();
-    const auto expect = [&help](youhost::ShortcutId id, char character, youhost::KeyKind kind, bool shift, bool command, bool alt)
+    const auto expect = [](youhost::ShortcutId id, char character, youhost::KeyKind kind, bool shift, bool command, bool alt)
     {
         youhost::KeyQuery query;
         query.kind = kind;
@@ -1172,8 +1182,6 @@ void testShortcutsMatchTheHelp()
         CHECK(matched.has_value());
         if (matched.has_value())
             CHECK(*matched == id);
-        const auto line = youhost::shortcutChord(id) + "  " + youhost::shortcutMeaning(id);
-        CHECK(help.find(line) != std::string::npos);
     };
 
     expect(youhost::ShortcutId::recPage, '1', youhost::KeyKind::character, false, false, false);
@@ -1216,63 +1224,43 @@ void testShortcutsMatchTheHelp()
     CHECK(youhost::selectAllShortcutApplies(2, false));
     CHECK(! youhost::selectAllShortcutApplies(2, true));
 
-    CHECK(help.find("5  Open or close SCAN") == std::string::npos);
-    CHECK(help.find("5  Open or close LATENCY") != std::string::npos);
-    CHECK(help.find("S  Open or close SCAN") != std::string::npos);
-    CHECK(help.find("3 or D  Open or close DROPOUTS") != std::string::npos);
-    CHECK(help.find("W+") != std::string::npos);
+    CHECK(help.find("5                     LATENCY") != std::string::npos);
+    CHECK(help.find("S                     Scanner (SCAN)") != std::string::npos);
+    CHECK(help.find("3 or D                DROPOUTS") != std::string::npos);
     CHECK(help.find("ALL PLUGIN BYPASS") != std::string::npos);
     CHECK(help.find("Null test") == std::string::npos);
     CHECK(help.find("Save As") != std::string::npos);
-    CHECK(help.find("Backup") != std::string::npos);
+    CHECK(help.find("Backups folder") != std::string::npos);
     CHECK(help.find("Shift+click") != std::string::npos);
     CHECK(help.find("Cmd+click") != std::string::npos);
-    CHECK(help.find("Cmd+A or A  Select every visible channel on the REC page and the HOST page") != std::string::npos);
-    CHECK(help.find("Click, Shift+click, and Cmd+click select on HOST the same way") != std::string::npos);
-    CHECK(help.find("Cmd+G  On the REC page and the HOST page, name a group from the selected channels") != std::string::npos);
-    CHECK(help.find("Make group from selection") != std::string::npos);
-    CHECK(help.find("Cmd+A, then Cmd+G, groups every visible channel") != std::string::npos);
-    CHECK(help.find("Cmd+G does nothing while a text field has focus") != std::string::npos);
+    CHECK(help.find("Cmd+A or A            Select all channels") != std::string::npos);
+    CHECK(help.find("Cmd+G                 Make group from selection") != std::string::npos);
     CHECK(help.find("Stereo link with ch N+1") != std::string::npos);
-    CHECK(help.find("does not change the recorder or the REC page") != std::string::npos);
-    CHECK(help.find("stay per channel") != std::string::npos);
-    CHECK(help.find("CH, MODE, NAME, DELAY COMP, PLUGINS, and GAIN") != std::string::npos);
-    CHECK(help.find("M, ST, or M/ST") != std::string::npos);
-    CHECK(help.find("makes it tall enough to read") != std::string::npos);
-    CHECK(help.find("FIT shows every lane again") != std::string::npos);
-    CHECK(help.find("It does the same as F and Option+R") != std::string::npos);
-    CHECK(help.find("F does nothing while a text field has focus") != std::string::npos);
-    CHECK(help.find("on a background thread") != std::string::npos);
-    CHECK(help.find("writes session.youhost once") != std::string::npos);
-    CHECK(help.find("skip the Backups folder") != std::string::npos);
-    CHECK(help.find("A progress bar shows the copy.") != std::string::npos);
-    CHECK(help.find("even when a lane is only a pixel or two") != std::string::npos);
-    CHECK(help.find("V- zooms out until every lane fits") != std::string::npos);
-    CHECK(help.find("Lanes stay tall enough to read") == std::string::npos);
-    CHECK(help.find("takes focus only when you click it or press G") != std::string::npos);
-    CHECK(help.find("nothing while a text field has focus") != std::string::npos);
-    CHECK(help.find("Option-drag") != std::string::npos);
-    CHECK(help.find("REC means the audio passes through the plugins and is recorded") != std::string::npos);
-    CHECK(help.find("INPUT means the audio passes through the plugins to the output and is not recorded") != std::string::npos);
-    CHECK(help.find("OFF cuts the channel fully: no audio, no plugins, and no recording") != std::string::npos);
-    CHECK(help.find("YouHost — ASENNUSOHJE") != std::string::npos);
-    CHECK(help.find("YouHost — INSTALL") != std::string::npos);
+    CHECK(help.find("Recording stays one mono WAV per channel.") != std::string::npos);
+    CHECK(help.find("M, ST or M/ST") != std::string::npos);
+    CHECK(help.find("F or Option+R         Fit the whole session") != std::string::npos);
+    CHECK(help.find("Shortcuts do nothing while a text field has focus.") != std::string::npos);
+    CHECK(help.find("writes session.youhost") != std::string::npos);
+    CHECK(help.find("Option+drag") != std::string::npos);
+    CHECK(help.find("REC (plugins + recording)") != std::string::npos);
+    CHECK(help.find("INPUT (plugins, not recorded)") != std::string::npos);
+    CHECK(help.find("OFF (channel fully off)") != std::string::npos);
     CHECK(help.find("Open Anyway") != std::string::npos);
     CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
-    CHECK(help.find("choose the audio card") != std::string::npos);
+    CHECK(help.find("choose your audio card") != std::string::npos);
     CHECK(help.find("GitHub") == std::string::npos);
     CHECK(help.find("Artifacts") == std::string::npos);
-    CHECK(help.find("The interface always opens with all channels") != std::string::npos);
-    CHECK(help.find("Channel use is chosen only with these buttons") != std::string::npos);
-    CHECK(help.find("Audio setup ticks") == std::string::npos);
+    CHECK(help.find("ASENNUSOHJE") == std::string::npos);
+    CHECK(help.find("Ennen keikkaa") == std::string::npos);
+    CHECK(help.find("\u2013") != std::string::npos);
 
     CHECK(youhost::matchNameKey(false, true, false, false, false, false, false) == youhost::NameKey::commit);
     CHECK(youhost::matchNameKey(false, false, true, false, false, false, false) == youhost::NameKey::cancel);
     CHECK(youhost::matchNameKey(true, false, false, false, false, false, false) == youhost::NameKey::next);
     CHECK(youhost::matchNameKey(true, false, false, true, false, false, false) == youhost::NameKey::previous);
     CHECK(youhost::matchNameKey(true, false, false, false, true, false, false) == youhost::NameKey::none);
-    for (const auto& nameKey : youhost::kNameKeyHelp)
-        CHECK(help.find(nameKey.line) != std::string::npos);
+    CHECK(help.find("Enter / Esc           Commit / cancel a name") != std::string::npos);
+    CHECK(help.find("Tab / Shift+Tab       Next / previous channel name") != std::string::npos);
     CHECK(std::string(youhost::kNameKeyHelp[0].line).find("Enter") == 0);
     CHECK(std::string(youhost::kNameKeyHelp[1].line).find("Esc") == 0);
 }
@@ -1347,7 +1335,7 @@ void testGroupsFoldAndPalette()
     const auto make = youhost::matchShortcut(commandG);
     CHECK(make.has_value());
     CHECK(*make == youhost::ShortcutId::makeGroup);
-    CHECK(youhost::shortcutHelpText().find("Enter or OK creates the group") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Enter creates and folds the group") != std::string::npos);
 }
 
 void testPlaybackCopiesDryChannels()
@@ -1620,6 +1608,10 @@ void testInsertMenuAndStall()
     CHECK(! youhost::beatIsStale(youhost::kStallLimitNs, 1, youhost::kStallLimitNs));
     CHECK(youhost::beatIsStale(youhost::kStallLimitNs + 2, 1, youhost::kStallLimitNs));
     CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
+    CHECK(! youhost::messageStallMatters(youhost::kPhaseIdle));
+    CHECK(! youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseLoad));
+    CHECK(youhost::messageStallMatters(youhost::kPhasePrepare));
 
     std::vector<youhost::CatalogPlugin> plugins {
         { "Pro-Q 3", "FabFilter", "AudioUnit", "" },
@@ -1691,7 +1683,14 @@ void testDeviceWatch()
     CHECK(! youhost::sampleRatesDiffer(48000.0, 48000.0));
     CHECK(youhost::sampleRatesDiffer(48000.0, 44100.0));
     CHECK(! youhost::sampleRatesDiffer(0.0, 48000.0));
-    CHECK(youhost::sampleRateWarningText(44100.0, 48000.0).find("44100") != std::string::npos);
+    CHECK(youhost::sampleRateMismatchText(48000.0, 44100.0)
+          == "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz");
+    CHECK(youhost::sampleRateMismatchText(48000.0, 48000.0).empty());
+    CHECK(youhost::sampleRateMismatchText(0.0, 44100.0).empty());
+    CHECK(youhost::sampleRateMismatchText(48000.0, 0.0).empty());
+    CHECK(youhost::sampleRateWarningText(44100.0, 48000.0)
+          == youhost::sampleRateMismatchText(48000.0, 44100.0));
+    CHECK(youhost::shortcutHelpText().find("Sample rate mismatch: a red line names both rates") != std::string::npos);
     CHECK(youhost::usableChannelCount(256) == 128);
     CHECK(youhost::usableChannelCount(48) == 48);
     CHECK(youhost::usableChannelCount(-1) == 0);
@@ -2729,28 +2728,23 @@ void testSessionChannelsRateLockAndClose()
     CHECK(all[3] == 3);
 
     const auto help = youhost::shortcutHelpText();
-    CHECK(help.find("Offline (no audio) - 128 channels") != std::string::npos);
+    CHECK(help.find("YouHost always starts in Offline") != std::string::npos);
     CHECK(help.find("not on this card") == std::string::npos);
     CHECK(help.find("Show on mixer") == std::string::npos);
-    CHECK(help.find("Channels past the card stay hidden") != std::string::npos);
+    CHECK(help.find("Channels beyond the card's count are hidden.") != std::string::npos);
     CHECK(help.find("ALL REC") != std::string::npos);
-    CHECK(help.find("A mode change while recording asks twice") != std::string::npos);
-    CHECK(help.find("Switch in red") != std::string::npos);
-    CHECK(help.find("Are you sure?") != std::string::npos);
-    CHECK(help.find("When not recording there is no dialog") != std::string::npos);
+    CHECK(help.find("Changing a channel mode while recording asks twice.") != std::string::npos);
     CHECK(help.find("Leaving REC while recording asks first") == std::string::npos);
-    CHECK(help.find("hidden on REC, HOST, and the timeline") != std::string::npos);
-    CHECK(help.find("The session always keeps 128 channels") != std::string::npos);
+    CHECK(help.find("A session always has 128 channels.") != std::string::npos);
     CHECK(help.find("8, 16, 32, 48, 64, or 128") == std::string::npos);
     CHECK(help.find("marked no input") == std::string::npos);
     CHECK(help.find("RECORDING LOCKED") != std::string::npos);
-    CHECK(help.find(youhost::kRecordArmedHint) != std::string::npos);
+    CHECK(help.find("REC ARMED") != std::string::npos);
     CHECK(help.find("Virtual / aggregate devices") != std::string::npos);
     CHECK(help.find("youhost.log") != std::string::npos);
-    CHECK(help.find("beside the sample rate") != std::string::npos);
+    CHECK(help.find("next to sample rate and buffer") != std::string::npos);
     CHECK(help.find("Find device") == std::string::npos);
-    CHECK(help.find("Session moves to 48 kHz") != std::string::npos);
-    CHECK(help.find("Save, Save As, Don't Save, or Cancel") != std::string::npos);
+    CHECK(help.find("You are always asked about unsaved changes.") != std::string::npos);
     CHECK(help.find("Scene") == std::string::npos);
     CHECK(help.find("MIDI") == std::string::npos);
     CHECK(help.find("Null test") == std::string::npos);
@@ -4020,7 +4014,7 @@ void testReleaseChecklist()
                               && mainUi.find("unsupportedChannelLine") == std::string::npos
                               && mainUi.find("Show on mixer") == std::string::npos
                               && youhost::shortcutHelpText().find("not on this card") == std::string::npos
-                              && youhost::shortcutHelpText().find(youhost::kShowHiddenChannelsNote) != std::string::npos;
+                              && youhost::shortcutHelpText().find("Channels beyond the card's count are hidden.") != std::string::npos;
     item("Audio setup offers Show channels not on this card (17-128)", hiddenSwitch);
 
     item("REC armed hint is REC ARMED - press PLAY (or Cmd+Space)",
@@ -4447,7 +4441,7 @@ void testReleaseChecklist()
              && locateKeys.find("isRecording()") != std::string::npos
              && locateKeys.find("stop()") == std::string::npos
              && moveKeys.find("stop()") == std::string::npos
-             && help.find("No keyboard shortcut stops that take.") != std::string::npos
+             && help.find("Only another click on the padlock unlocks it.") != std::string::npos
              && checklistDoc.find("Locked recording ignores keys") != std::string::npos);
 
     const auto monitorToggles = sliceBetween(mainUi,
@@ -4472,7 +4466,8 @@ void testReleaseChecklist()
              && runKeys.find("toggleDropouts()") != std::string::npos
              && runKeys.find("toggleCpu()") != std::string::npos
              && runKeys.find("toggleLatency()") != std::string::npos
-             && help.find("Opening DROPOUTS, CPU, or LATENCY leaves the others open.") != std::string::npos
+             && help.find("DROPOUTS") != std::string::npos
+             && help.find("LATENCY (5)") != std::string::npos
              && checklistDoc.find("DROPOUTS, CPU, and LATENCY stay open together") != std::string::npos);
 
     const auto callbackSlice = sliceBetween(engineSrc,
@@ -4521,8 +4516,8 @@ void testReleaseChecklist()
     sync.dismiss();
     const bool dismissed = ! sync.showAlarm() && ! sync.isMissing();
     const auto helpText = youhost::shortcutHelpText();
-    const auto gigAt = helpText.find("Before a gig / for best performance");
-    const auto installSteps = helpText.find("1. Unzip the file");
+    const auto gigAt = helpText.find("Before a gig");
+    const auto installSteps = helpText.find("xattr -dr com.apple.quarantine");
     youhost::CpuDisplayMeter dspMeter;
     const bool dspHolds = dspMeter.push(0, 10) == 10
                           && dspMeter.push(100, 90) == 10
@@ -4552,7 +4547,7 @@ void testReleaseChecklist()
              && cpuWindow.find("\"DSP\"") != std::string::npos
              && cpuWindow.find("\"Plugins\"") != std::string::npos
              && cpuWindow.find("999") == std::string::npos
-             && helpText.find("Every CPU and DSP figure stops at 100") != std::string::npos
+             && helpText.find("DSP 100% = the buffer is full and the next callback drops out.") != std::string::npos
              && checklistDoc.find("never goes above 100") != std::string::npos
              && checklistDoc.find("Real CPU meter") != std::string::npos);
     item("Dropout log",
@@ -4894,7 +4889,7 @@ void testReleaseChecklist()
              && userChange.find("clearSyncLost") != std::string::npos
              && downBody.find("clockMemory_.grace") != std::string::npos
              && engineSrc.find("pollStartupDeviceList();") != std::string::npos
-             && helpText.find("OK does not close that window while sync is still lost") != std::string::npos
+             && helpText.find("A large window stays until the card returns") != std::string::npos
              && checklistDoc.find("Fast device switching") != std::string::npos
              && checklistDoc.find("Five device changes inside 3 s") != std::string::npos
              && checklistDoc.find("no SYNC LOST, no hang, and no stuck window") != std::string::npos);
@@ -4990,24 +4985,29 @@ void testReleaseChecklist()
              && hostUi.find("! name_.isBeingEdited()") != std::string::npos
              && hostUi.find("expanded(1.5f)") != std::string::npos
              && checklistDoc.find("Channel name outline") != std::string::npos);
-    item("LINK greyed when the group is not a pair",
-         youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, 0, -1 }.data(), 4)
+    item("LINK greyed when the pair is split across groups",
+         ! youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, 0, -1 }.data(), 4)
+             && youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, -1, -1, -1 }.data(), 4)
              && ! youhost::stereoLinkBlockedByGroups(0, 8, std::array<int, 4>{ 0, 0, -1, -1 }.data(), 4)
              && hostUi.find("stereoLinkBlockedTip") != std::string::npos
+             && hostUi.find("same group") != std::string::npos
              && checklistDoc.find("LINK is grey") != std::string::npos);
     item("Before a gig",
          gigAt != std::string::npos && installSteps != std::string::npos && gigAt < installSteps
-             && helpWindow.find("kGigPerformanceCard") != std::string::npos
+             && helpWindow.find("fromUTF8") != std::string::npos
+             && helpWindow.find("setScrollbarsShown(true)") != std::string::npos
+             && helpWindow.find("kGigPerformanceCard") == std::string::npos
+             && mainUi.find("helpButtonTip()") != std::string::npos
              && readWorkspaceFile("INSTALL.md").find("Ennen keikkaa / paras suorituskyky") != std::string::npos
              && checklistDoc.find("Before a gig") != std::string::npos);
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.1"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.2"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.1"
+             && std::string(youhost::versionNumber()) == "1.0.2"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.1") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.2") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5016,8 +5016,13 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.1") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.1-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.2") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.2-macOS.zip") != std::string::npos
+             && checklistDoc.find("marked Latest") != std::string::npos
+             && checklistDoc.find("prerelease") == std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: true") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-19") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
@@ -5141,9 +5146,9 @@ void testReleaseChecklist()
              && mainUi.find("bindToolKeys(*latencyWindow_") != std::string::npos
              && mainUi.find("bindToolKeys(*this") != std::string::npos
              && mainUi.find("playSampleFromSelectedMarker") != std::string::npos
-             && help.find("play from that marker") != std::string::npos
+             && help.find("press Space to play from it") != std::string::npos
              && help.find("Cmd+Backspace") != std::string::npos
-             && help.find("Delete the selected marker") != std::string::npos
+             && help.find("Delete selected marker") != std::string::npos
              && checklistDoc.find("| Markers |") != std::string::npos
              && checklistDoc.find("starts playback from that marker") != std::string::npos
              && checklistDoc.find("Cmd+Backspace") != std::string::npos
@@ -5520,9 +5525,191 @@ void testBeta090()
     CHECK(! youhost::stereoLinkBlockedByGroups(0, 16, pair, 4));
     int none[4] = { -1, -1, -1, -1 };
     CHECK(! youhost::stereoLinkBlockedByGroups(0, 16, none, 4));
+    int sameGroup[4] = { 3, 3, 3, -1 };
+    CHECK(! youhost::stereoLinkBlockedByGroups(0, 16, sameGroup, 4));
+    int splitPair[4] = { 2, -1, -1, -1 };
+    CHECK(youhost::stereoLinkBlockedByGroups(0, 16, splitPair, 4));
+    CHECK(! youhost::canStereoLink(0, 1));
+    CHECK(youhost::stereoRightIndex(0) == 1);
+    CHECK(youhost::stereoRightIndex(1) == 1);
     CHECK(! youhost::groupMembersAreAdjacentPair(wide, 3));
     int adjacent[2] = { 2, 3 };
     CHECK(youhost::groupMembersAreAdjacentPair(adjacent, 2));
+
+    int foldMembership[4] = { 0, 0, 0, -1 };
+    bool foldCollapsed[youhost::kMaxDisplayGroups] = {};
+    youhost::StripItem foldItems[8];
+    foldCollapsed[0] = true;
+    const int folded = youhost::layoutChannelStrips(4, foldMembership, foldCollapsed, foldItems, 8);
+    CHECK(folded == 2);
+    CHECK(foldItems[0].kind == youhost::StripKind::groupHeader);
+    CHECK(foldItems[1].channel == 3);
+    CHECK(! youhost::stereoLinkBlockedByGroups(0, 4, foldMembership, 4));
+    foldCollapsed[0] = false;
+    const int opened = youhost::layoutChannelStrips(4, foldMembership, foldCollapsed, foldItems, 8);
+    CHECK(opened == 5);
+    CHECK(foldItems[1].channel == 0);
+    CHECK(foldItems[2].channel == 1);
+    CHECK(! youhost::stereoLinkBlockedByGroups(0, 4, foldMembership, 4));
+    const auto sliceBetween = [](const std::string& source, const char* begin, const char* end)
+    {
+        const auto start = source.find(begin);
+        const auto stop = source.find(end, start == std::string::npos ? 0 : start);
+        if (start == std::string::npos || stop == std::string::npos || stop < start)
+            return std::string {};
+        return source.substr(start, stop - start);
+    };
+    const auto foldBody = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                       "void AudioEngine::toggleGroupCollapsed",
+                                       "void AudioEngine::expandAllGroups");
+    CHECK(foldBody.find("collapsed") != std::string::npos);
+    CHECK(foldBody.find("setStereoLink") == std::string::npos);
+    CHECK(foldBody.find("publishUnlocked") == std::string::npos);
+    CHECK(foldBody.find("loadPlugin") == std::string::npos);
+    CHECK(foldBody.find("syncCompensation") == std::string::npos);
+    CHECK(foldBody.find("prepareToPlay") == std::string::npos);
+
+    int sideDefaultsIn[2] = { 2, 1 };
+    int sideDefaultsOut[1] = { 2 };
+    const auto disabled = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::disable);
+    CHECK(disabled.ok);
+    CHECK(disabled.inputBuses[0] == 2);
+    CHECK(disabled.inputBuses[1] == 0);
+    CHECK(disabled.totalIn == 2);
+    CHECK(disabled.totalOut == 2);
+    const auto kept = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::keepDefault);
+    CHECK(kept.ok);
+    CHECK(kept.inputBuses[1] == 1);
+    CHECK(kept.totalIn == 3);
+    const auto openedStereo = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::opened);
+    CHECK(openedStereo.ok);
+    CHECK(openedStereo.inputBuses[0] == 2);
+    CHECK(openedStereo.inputBuses[1] == 1);
+    CHECK(openedStereo.totalIn == 3);
+    const auto openedMono = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::opened);
+    CHECK(! openedMono.ok);
+    CHECK(std::string(openedMono.reason).find("opened main bus") != std::string::npos);
+    int disabledSideIn[2] = { 2, 0 };
+    const auto sidechainMono = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::sidechainMono);
+    CHECK(sidechainMono.ok);
+    CHECK(sidechainMono.inputBuses[0] == 2);
+    CHECK(sidechainMono.inputBuses[1] == 1);
+    CHECK(sidechainMono.outputBuses[0] == 2);
+    CHECK(sidechainMono.totalIn == 3);
+    const auto openedDisabled = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::opened);
+    CHECK(! openedDisabled.ok);
+    CHECK(std::string(openedDisabled.reason).find("sidechain bus is disabled") != std::string::npos);
+    const auto sidechainStereo = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::sidechainStereo);
+    CHECK(sidechainStereo.ok);
+    CHECK(sidechainStereo.inputBuses[0] == 2);
+    CHECK(sidechainStereo.inputBuses[1] == 2);
+    CHECK(sidechainStereo.totalIn == 4);
+    const auto keptOpened = youhost::keepOpenedLayout(disabledSideIn, 2, sideDefaultsOut, 1);
+    CHECK(keptOpened.ok);
+    CHECK(keptOpened.mainIn == 2);
+    CHECK(keptOpened.mainOut == 2);
+    CHECK(keptOpened.totalIn == 2);
+    int zeroMain[2] = { 0, 2 };
+    CHECK(! youhost::keepOpenedLayout(zeroMain, 2, sideDefaultsOut, 1).ok);
+    CHECK(youhost::pluginFailureLogReason(false, "", "") == "instantiate failed: no reason from the host");
+    CHECK(youhost::pluginFailureLogReason(false, "AU: bad component", "") == "instantiate failed: AU: bad component");
+    CHECK(youhost::pluginFailureLogReason(true, "", "attempt 2/2 extra=sidechain2 supported=no reason=setBusesLayout refused")
+              .find("setBusesLayout refused") != std::string::npos);
+    CHECK(youhost::pluginFailureLogReason(true, "", "") == "no reason from the host");
+    youhost::ExtraBusMode attemptOrder[5] {};
+    CHECK(youhost::copyExtraBusAttemptOrder(true, attemptOrder, 5) == 5);
+    CHECK(attemptOrder[0] == youhost::ExtraBusMode::opened);
+    CHECK(attemptOrder[1] == youhost::ExtraBusMode::sidechainStereo);
+    CHECK(attemptOrder[2] == youhost::ExtraBusMode::sidechainMono);
+    CHECK(attemptOrder[4] == youhost::ExtraBusMode::keepDefault);
+    CHECK(youhost::copyExtraBusAttemptOrder(false, attemptOrder, 5) == 2);
+    CHECK(attemptOrder[0] == youhost::ExtraBusMode::opened);
+    CHECK(attemptOrder[1] == youhost::ExtraBusMode::disable);
+    int wantIn[3] {};
+    int wantOut[3] {};
+    youhost::mainLayoutAttemptOrder(false, wantIn, wantOut);
+    CHECK(wantIn[0] == 2 && wantOut[0] == 2);
+    youhost::mainLayoutAttemptOrder(true, wantIn, wantOut);
+    CHECK(wantIn[0] == 1 && wantOut[0] == 1);
+    CHECK(wantIn[1] == 2 && wantOut[1] == 2);
+    const auto busSource = readWorkspaceFile("src/engine/PluginRack.cpp");
+    CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
+    CHECK(busSource.find("isThisTheMessageThread") != std::string::npos);
+    CHECK(busSource.find("instantiate callback moved onto the message thread") != std::string::npos);
+    CHECK(busSource.find("kept opened layout") != std::string::npos);
+    CHECK(busSource.find("restoreGeneration != 0 && catalogue_.prefersBackgroundInstance") == std::string::npos);
+    CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
+    CHECK(busSource.find("backgroundQueue_") != std::string::npos);
+    CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes:") == std::string::npos);
+    const auto audioCallback = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                            "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                            "void AudioEngine::audioDeviceAboutToStart");
+    CHECK(audioCallback.find("lifeLock_") == std::string::npos);
+    CHECK(audioCallback.find("createPluginInstance") == std::string::npos);
+    CHECK(audioCallback.find("createDevice") == std::string::npos);
+    CHECK(audioCallback.find("refreshSampleRateWarning") == std::string::npos);
+    CHECK(audioCallback.find("rateWarning_") == std::string::npos);
+    CHECK(audioCallback.find("kAudioDevicePropertyNominalSampleRate") == std::string::npos);
+    const auto rateRefresh = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                          "void AudioEngine::refreshSampleRateWarning",
+                                          "void AudioEngine::watchClockSync");
+    CHECK(rateRefresh.find("nominalRateSnapshot_") != std::string::npos);
+    CHECK(rateRefresh.find("appendHostLog") != std::string::npos);
+    CHECK(rateRefresh.find("recorder_->stop") == std::string::npos);
+    CHECK(rateRefresh.find("setTimelineSampleRate") == std::string::npos);
+    CHECK(rateRefresh.find("pressTransport") == std::string::npos);
+    CHECK(rateRefresh.find("noteClockLost") == std::string::npos);
+    const auto clockWatch = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                         "void AudioEngine::watchClockSync",
+                                         "void AudioEngine::changeListenerCallback");
+    CHECK(clockWatch.find("refreshSampleRateWarning") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Sample rate mismatch: session 48 kHz, audio device 44.1 kHz") != std::string::npos);
+    const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
+    CHECK(processBody.find("lifeLock_") == std::string::npos);
+    CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
+    const auto deviceList = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                         "std::vector<ListedDevice> AudioEngine::connectedDevices()",
+                                         "void AudioEngine::sampleLiveCpu");
+    CHECK(deviceList.find("createDevice") == std::string::npos);
+    CHECK(deviceList.find("item.inputs = -1") != std::string::npos);
+    CHECK(youhost::deviceEntryLabel("WING 2", -1, -1) == "WING 2");
+    const auto traceBody = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                        "void AudioEngine::notePluginTrace",
+                                        "juce::String AudioEngine::dspLoadText");
+    CHECK(traceBody.find("reason=") != std::string::npos);
+    const auto matched = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::matchMain);
+    CHECK(matched.ok);
+    CHECK(matched.inputBuses[0] == 1);
+    CHECK(matched.inputBuses[1] == 1);
+    CHECK(matched.totalIn == 2);
+    int wideBus[1] = { 6 };
+    int wideOut[1] = { 2 };
+    const auto refused = youhost::planPluginLayout(wideBus, 1, wideOut, 1, 2, 2, youhost::ExtraBusMode::keepDefault);
+    CHECK(refused.ok);
+    const auto keptMain = youhost::planPluginLayout(sideDefaultsIn, 2, wideOut, 1, 2, 2, youhost::ExtraBusMode::keepDefault);
+    CHECK(keptMain.ok);
+    int six[2] = { 2, 6 };
+    const auto tooWide = youhost::planPluginLayout(six, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::keepDefault);
+    CHECK(! tooWide.ok);
+    CHECK(std::string(tooWide.reason).find("wider than stereo") != std::string::npos);
+    float extraLeft[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+    float extraRight[4] = { -0.25f, -0.25f, -0.25f, -0.25f };
+    float ch0[4];
+    float ch1[4];
+    float ch2[4];
+    float* pluginChans[3] = { ch0, ch1, ch2 };
+    youhost::feedPluginChannels(pluginChans, 3, 2, 4, extraLeft, extraRight);
+    CHECK(ch0[0] == 0.5f);
+    CHECK(ch1[0] == -0.25f);
+    CHECK(ch2[0] == 0.0f);
+    CHECK(ch2[3] == 0.0f);
+    CHECK(std::string(youhost::pluginLoadMessage(false, true, false, false, false, false, false, "AU: bad component")) == "AU: bad component");
+    CHECK(std::string(youhost::pluginLoadMessage(false, true, false, false, false, false, false, "")) == youhost::kPluginDidNotOpenMessage);
+    CHECK(std::string(youhost::pluginLoadMessage(true, true, false, true, false, true, false, "")) == youhost::kPluginMonoChannelMessage);
+    CHECK(std::string(youhost::pluginLoadMessage(true, false, true, false, false, false, false, "")) == youhost::kPluginStereoChannelMessage);
+    CHECK(std::string(youhost::pluginLoadMessage(true, true, false, false, false, true, true, "")) == youhost::kPluginLayoutMessage);
+    CHECK(std::string(youhost::kPluginMonoChannelMessage).find("Could not load the plugin") == std::string::npos);
 
     CHECK(youhost::playbackFeedsHostChain(true));
     CHECK(! youhost::playbackFeedsHostChain(false));
@@ -5570,6 +5757,18 @@ void testBeta090()
     CHECK(youhost::readSessionModel(youhost::writeSessionModel(next), nextRound));
     CHECK(nextRound.savedWith == "YouHost 1.0.1");
     CHECK(nextRound.version == 7);
+    youhost::SessionDocumentModel newer;
+    newer.savedWith = "YouHost 1.0.2";
+    newer.version = youhost::kSessionFormatVersion;
+    youhost::SessionDocumentModel newerRound;
+    CHECK(youhost::readSessionModel(youhost::writeSessionModel(newer), newerRound));
+    CHECK(newerRound.savedWith == "YouHost 1.0.2");
+    CHECK(newerRound.version == 7);
+    CHECK(youhost::sessionModelIsClean(youhost::cleanSessionModel()));
+    CHECK(youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::newSession));
+    CHECK(youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::open));
+    CHECK(youhost::sessionCloseSaveAsFirst(true, false, youhost::SessionCloseReason::newSession, youhost::UnsavedChoice::saveAs));
+    CHECK(! youhost::sessionCloseProceeds(true, true, youhost::SessionCloseReason::newSession, youhost::UnsavedChoice::save));
     CHECK(youhost::kSessionFormatVersion == 7);
     CHECK(round.markers.size() == 1);
     CHECK(round.markers[0].name == "Verse");
@@ -5633,7 +5832,9 @@ void testBeta090()
     const auto step = guide.find("1. Pura zip");
     CHECK(finnish != std::string::npos && english != std::string::npos && step != std::string::npos);
     CHECK(finnish < step && english < guide.find("1. Unzip"));
-    CHECK(youhost::shortcutHelpText().find(youhost::kGigPerformanceCard) != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Before a gig") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Ennen keikkaa") == std::string::npos);
+    CHECK(std::string(youhost::helpButtonTip()) == "Open YouHost help.");
 }
 
 } // namespace

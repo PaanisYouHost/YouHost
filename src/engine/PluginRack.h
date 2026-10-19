@@ -156,7 +156,7 @@ public:
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
-    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)> trace);
+    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
@@ -174,6 +174,8 @@ private:
         bool bypassed = false;
         int inputChannels = 1;
         int outputChannels = 1;
+        int totalInputs = 1;
+        int totalOutputs = 1;
         int processChannels = 1;
         bool prepared = false;
         int latencySamples = 0;
@@ -235,6 +237,7 @@ private:
     void completeRestoreStep(std::uint64_t generation);
     void finishRestore();
     void noteSlot(int channel);
+    void pumpBackgroundQueue();
     void launchBackgroundLoad();
     void deliverOffThreadInstance();
     class BackgroundInstantiate;
@@ -252,7 +255,7 @@ private:
     void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
-    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier);
+    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {});
     bool validSlot(int channel, int slot) const noexcept;
 
     PluginCatalogue& catalogue_;
@@ -306,6 +309,23 @@ private:
     };
     std::vector<RestorePlugin> restoreQueue_;
     std::function<void(int)> slotHandler_;
+    struct BackgroundJob
+    {
+        int channel = 0;
+        int slot = 0;
+        std::uint64_t ticket = 0;
+        std::uint64_t generation = 0;
+        bool markDirty = false;
+        bool bypassed = false;
+        bool open = false;
+        int stereoFold = 0;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        double rate = 48000.0;
+        int block = 512;
+    };
+    std::vector<BackgroundJob> backgroundQueue_;
+    bool backgroundBusy_ = false;
     std::unique_ptr<BackgroundInstantiate> backgroundInstantiate_;
     std::mutex offThreadMutex_;
     std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
@@ -373,7 +393,7 @@ private:
     bool condemnPosted_ = false;
     bool quitting_ = false;
     juce::StringArray blocked_;
-    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&)> trace_;
+    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 
 } // namespace youhost

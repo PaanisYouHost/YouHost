@@ -34,7 +34,7 @@ inline bool canStereoLink(int channel, int channelCount) noexcept
     return left + 1 < limit;
 }
 
-// A group may use LINK only when its members are exactly one adjacent pair.
+// Still used by tests. A group of any size may contain a linked pair.
 inline bool groupMembersAreAdjacentPair(const int* channels, int count) noexcept
 {
     if (channels == nullptr || count != 2)
@@ -52,11 +52,14 @@ inline bool groupMembersAreAdjacentPair(const int* channels, int count) noexcept
 
 inline const char* stereoLinkBlockedTip() noexcept
 {
-    return "LINK joins an adjacent pair (1-2, 3-4, and so on). It is off because this channel is in a group whose members are not that pair.";
+    return "LINK joins an adjacent pair (1-2, 3-4, and so on) when both channels are in the same group, or both are ungrouped. It is off because these two channels are not in the same group.";
 }
 
-// `groupOf[i]` is the group id, or -1. Members are scanned across `storedChannels`,
-// so a channel past the card still counts. Ungrouped adjacent pairs stay linkable.
+// `groupOf[i]` is the group id, or -1. An adjacent pair may link when both
+// channels are in the same group or both are ungrouped. Other members of that
+// group do not matter. One grouped and one ungrouped, or two different groups,
+// blocks the link. Non-adjacent channels are not a pair, so canStereoLink
+// already refuses them.
 inline bool stereoLinkBlockedByGroups(int channel, int visibleChannels, const int* groupOf, int storedChannels) noexcept
 {
     if (! canStereoLink(channel, visibleChannels) || groupOf == nullptr)
@@ -64,21 +67,13 @@ inline bool stereoLinkBlockedByGroups(int channel, int visibleChannels, const in
     const int left = stereoLeftIndex(channel);
     const int right = left + 1;
     const int limit = storedChannels < kMaxChannels ? storedChannels : kMaxChannels;
-    auto blocks = [&](int channelIndex)
-    {
-        if (channelIndex < 0 || channelIndex >= limit)
-            return false;
-        const int group = groupOf[channelIndex];
-        if (group < 0)
-            return false;
-        int members[kMaxChannels];
-        int count = 0;
-        for (int index = 0; index < limit; ++index)
-            if (groupOf[index] == group)
-                members[count++] = index;
-        return ! groupMembersAreAdjacentPair(members, count);
-    };
-    return blocks(left) || blocks(right);
+    if (left < 0 || right < 0 || left >= limit || right >= limit)
+        return false;
+    const int leftGroup = groupOf[left];
+    const int rightGroup = groupOf[right];
+    if (leftGroup < 0 && rightGroup < 0)
+        return false;
+    return leftGroup != rightGroup;
 }
 
 // Right-click on a HOST strip. N is the odd channel's number, so ch 1 says
