@@ -1140,8 +1140,8 @@ void testPluginLoadPace()
     using youhost::PluginInstantiateWhere;
     CHECK(youhost::isAudioUnitFormat("AudioUnit"));
     CHECK(! youhost::isAudioUnitFormat("VST3"));
-    CHECK(youhost::pluginInstantiateWhere(true, false) == PluginInstantiateWhere::messageAsync);
-    CHECK(youhost::pluginInstantiateWhere(false, true) == PluginInstantiateWhere::messageAsync);
+    CHECK(youhost::pluginInstantiateWhere(true, false) == PluginInstantiateWhere::background);
+    CHECK(youhost::pluginInstantiateWhere(false, true) == PluginInstantiateWhere::background);
     CHECK(youhost::pluginInstantiateWhere(false, false) == PluginInstantiateWhere::background);
 
     char text[64];
@@ -1608,6 +1608,10 @@ void testInsertMenuAndStall()
     CHECK(! youhost::beatIsStale(youhost::kStallLimitNs, 1, youhost::kStallLimitNs));
     CHECK(youhost::beatIsStale(youhost::kStallLimitNs + 2, 1, youhost::kStallLimitNs));
     CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
+    CHECK(! youhost::messageStallMatters(youhost::kPhaseIdle));
+    CHECK(! youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseLoad));
+    CHECK(youhost::messageStallMatters(youhost::kPhasePrepare));
 
     std::vector<youhost::CatalogPlugin> plugins {
         { "Pro-Q 3", "FabFilter", "AudioUnit", "" },
@@ -5581,11 +5585,32 @@ void testBeta090()
     CHECK(sidechainMono.inputBuses[1] == 1);
     CHECK(sidechainMono.outputBuses[0] == 2);
     CHECK(sidechainMono.totalIn == 3);
+    const auto openedDisabled = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::opened);
+    CHECK(! openedDisabled.ok);
+    CHECK(std::string(openedDisabled.reason).find("sidechain bus is disabled") != std::string::npos);
+    const auto sidechainStereo = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::sidechainStereo);
+    CHECK(sidechainStereo.ok);
+    CHECK(sidechainStereo.inputBuses[0] == 2);
+    CHECK(sidechainStereo.inputBuses[1] == 2);
+    CHECK(sidechainStereo.totalIn == 4);
+    const auto keptOpened = youhost::keepOpenedLayout(disabledSideIn, 2, sideDefaultsOut, 1);
+    CHECK(keptOpened.ok);
+    CHECK(keptOpened.mainIn == 2);
+    CHECK(keptOpened.mainOut == 2);
+    CHECK(keptOpened.totalIn == 2);
+    int zeroMain[2] = { 0, 2 };
+    CHECK(! youhost::keepOpenedLayout(zeroMain, 2, sideDefaultsOut, 1).ok);
+    CHECK(youhost::pluginFailureLogReason(false, "", "") == "instantiate failed: no reason from the host");
+    CHECK(youhost::pluginFailureLogReason(false, "AU: bad component", "") == "instantiate failed: AU: bad component");
+    CHECK(youhost::pluginFailureLogReason(true, "", "attempt 2/2 extra=sidechain2 supported=no reason=setBusesLayout refused")
+              .find("setBusesLayout refused") != std::string::npos);
+    CHECK(youhost::pluginFailureLogReason(true, "", "") == "no reason from the host");
     youhost::ExtraBusMode attemptOrder[5] {};
     CHECK(youhost::copyExtraBusAttemptOrder(true, attemptOrder, 5) == 5);
     CHECK(attemptOrder[0] == youhost::ExtraBusMode::opened);
-    CHECK(attemptOrder[1] == youhost::ExtraBusMode::sidechainMono);
-    CHECK(attemptOrder[4] == youhost::ExtraBusMode::disable);
+    CHECK(attemptOrder[1] == youhost::ExtraBusMode::sidechainStereo);
+    CHECK(attemptOrder[2] == youhost::ExtraBusMode::sidechainMono);
+    CHECK(attemptOrder[4] == youhost::ExtraBusMode::keepDefault);
     CHECK(youhost::copyExtraBusAttemptOrder(false, attemptOrder, 5) == 2);
     CHECK(attemptOrder[0] == youhost::ExtraBusMode::opened);
     CHECK(attemptOrder[1] == youhost::ExtraBusMode::disable);
@@ -5600,6 +5625,28 @@ void testBeta090()
     CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
     CHECK(busSource.find("isThisTheMessageThread") != std::string::npos);
     CHECK(busSource.find("instantiate callback moved onto the message thread") != std::string::npos);
+    CHECK(busSource.find("kept opened layout") != std::string::npos);
+    CHECK(busSource.find("restoreGeneration != 0 && catalogue_.prefersBackgroundInstance") == std::string::npos);
+    CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
+    const auto audioCallback = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                            "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                            "void AudioEngine::audioDeviceAboutToStart");
+    CHECK(audioCallback.find("lifeLock_") == std::string::npos);
+    CHECK(audioCallback.find("createPluginInstance") == std::string::npos);
+    CHECK(audioCallback.find("createDevice") == std::string::npos);
+    const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
+    CHECK(processBody.find("lifeLock_") == std::string::npos);
+    CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
+    const auto deviceList = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                         "std::vector<ListedDevice> AudioEngine::connectedDevices()",
+                                         "void AudioEngine::sampleLiveCpu");
+    CHECK(deviceList.find("createDevice") == std::string::npos);
+    CHECK(deviceList.find("item.inputs = -1") != std::string::npos);
+    CHECK(youhost::deviceEntryLabel("WING 2", -1, -1) == "WING 2");
+    const auto traceBody = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                        "void AudioEngine::notePluginTrace",
+                                        "juce::String AudioEngine::dspLoadText");
+    CHECK(traceBody.find("reason=") != std::string::npos);
     const auto matched = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::matchMain);
     CHECK(matched.ok);
     CHECK(matched.inputBuses[0] == 1);

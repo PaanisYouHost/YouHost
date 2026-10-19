@@ -119,7 +119,9 @@ private:
         const auto now = steadyNowNs();
         const auto messageBeat = clock.messageNs.load(std::memory_order_relaxed);
         const auto audioBeat = clock.audioNs.load(std::memory_order_relaxed);
-        const bool message = beatIsStale(now, messageBeat, kStallLimitNs);
+        const int messagePhase = clock.messagePhase.load(std::memory_order_relaxed);
+        const bool message = messageStallMatters(messagePhase)
+                             && beatIsStale(now, messageBeat, kStallLimitNs);
         const bool audio = clock.audioLive.load(std::memory_order_relaxed) != 0
                            && beatIsStale(now, audioBeat, kStallLimitNs);
         if (! message && ! audio)
@@ -134,7 +136,7 @@ private:
         juce::String line = "stall";
         if (message)
             line += " message " + juce::String(static_cast<std::int64_t>((now - messageBeat) / 1000000))
-                    + " ms phase=" + stallPhaseName(clock.messagePhase.load(std::memory_order_relaxed));
+                    + " ms phase=" + stallPhaseName(messagePhase);
         if (audio)
             line += " audio " + juce::String(static_cast<std::int64_t>((now - audioBeat) / 1000000))
                     + " ms phase=" + stallPhaseName(clock.audioPhase.load(std::memory_order_relaxed));
@@ -295,9 +297,9 @@ AudioEngine::AudioEngine(AppSettings& settings)
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
-    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier)
+    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
     {
-        notePluginTrace(channel, slot, phase, name, identifier);
+        notePluginTrace(channel, slot, phase, name, identifier, reason);
     });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
@@ -1904,7 +1906,8 @@ void AudioEngine::notePluginTrace(int channel,
                                   int slot,
                                   const juce::String& phase,
                                   const juce::String& name,
-                                  const juce::String& identifier)
+                                  const juce::String& identifier,
+                                  const juce::String& reason)
 {
     if (quitPrepared_)
         return;
@@ -1924,8 +1927,10 @@ void AudioEngine::notePluginTrace(int channel,
 
     journal_.clean = false;
     storeCrashJournal(settings_, journal_);
-    appendHostLog(settings_,
-                  phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name);
+    juce::String line = phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name;
+    if (reason.isNotEmpty())
+        line += "  reason=" + reason;
+    appendHostLog(settings_, line);
 }
 
 juce::String AudioEngine::dspLoadText() const
@@ -2629,12 +2634,11 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
                     continue;
                 }
             }
-            const std::unique_ptr<juce::AudioIODevice> probe(type->createDevice(name, name));
-            if (probe != nullptr)
-            {
-                item.inputs = probe->getInputChannelNames().size();
-                item.outputs = probe->getOutputChannelNames().size();
-            }
+            // Channel counts need an open device. Creating every card here
+            // just to label the menu blocks the message thread at startup.
+            // Unknown cards are listed by name. The open card reports its counts.
+            item.inputs = -1;
+            item.outputs = -1;
             found.push_back(std::move(item));
         }
     }

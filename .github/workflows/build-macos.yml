@@ -17,12 +17,11 @@ permissions:
 jobs:
   macos:
     name: macOS universal
-    # macos-latest is macOS 26 arm64. That pool failed to hand out a runner
-    # ("not acquired by Runner of type hosted"). macos-15 is the free standard
-    # arm64 image and can still build an arm64 + x86_64 universal binary.
-    # Run 37815795731 was cancelled the same way before any step ran; a push
-    # retriggers the job because this token cannot rerun workflows.
-    runs-on: macos-15
+    # macos-latest and macos-15 are arm64. That pool has been refusing jobs
+    # ("not acquired by Runner of type hosted") before any step runs.
+    # macos-15-intel is a different pool and still cross-builds the universal
+    # arm64 + x86_64 binary. A push retriggers the job; this token cannot rerun.
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
