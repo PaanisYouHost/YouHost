@@ -923,7 +923,7 @@ public:
             link_.setTooltip(stereoLinkBlockedTip());
         else
             link_.setTooltip("Stereo link with ch " + juce::String(stereoLeftIndex(channel_) + 2)
-                             + ". One plugin row for the pair. REC, INPUT, OFF, name, colour, and group stay per channel. Recording stays one mono WAV per channel.");
+                             + ". Both channels must be in the same group, or both ungrouped. One plugin row for the pair. Recording stays one mono WAV per channel.");
         linkedNote_.setVisible(linked && ! showSlots);
         if (linked && ! showSlots)
             linkedNote_.setText("Linked to ch " + juce::String(channel_), juce::dontSendNotification);

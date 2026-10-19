@@ -116,8 +116,11 @@ inline int helpWindowWidth() noexcept
 inline int helpWindowHeightFor(int characters) noexcept
 {
     const int content = helpContentHeight(characters, helpWindowWidth() - 48);
-    const int window = content + 36;
-    return window > 860 ? 860 : window;
+    const int wanted = content + 36;
+    // windowOpenSize keeps a 48 px margin on a 1080-tall screen. The help
+    // text is taller than that, so the window opens at the screen and scrolls.
+    constexpr int kFitsScreen = 1080 - 48;
+    return wanted < kFitsScreen ? wanted : kFitsScreen;
 }
 
 inline int audioSetupRowHeight() noexcept

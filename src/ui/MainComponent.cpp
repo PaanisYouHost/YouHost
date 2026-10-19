@@ -1418,7 +1418,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     stopButton_.setTooltip("Stop (Space).");
     playButton_.setTooltip("Play the recorded takes (Space). If Record is armed, Play starts the take.");
     recButton_.setTooltip("Arm recording. The button blinks red. Press Play to start, or Cmd+Space to record immediately.");
-    helpButton_.setTooltip(juce::String(shortcutHelpText()));
+    helpButton_.setTooltip(juce::String::fromUTF8(helpButtonTip()));
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
     globalRecButton_.onClick = [this] { applyGlobalListen(ChannelListen::record); };
@@ -2837,33 +2837,24 @@ private:
     public:
         Body()
         {
-            card_.setText(kGigPerformanceCard, juce::dontSendNotification);
-            card_.setJustificationType(juce::Justification::topLeft);
-            card_.setColour(juce::Label::backgroundColourId, juce::Colour(0xff3d3418));
-            card_.setColour(juce::Label::textColourId, juce::Colour(0xffffe08a));
-            card_.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
             text_.setMultiLine(true, true);
             text_.setReadOnly(true);
             text_.setScrollbarsShown(true);
             text_.setCaretVisible(false);
-            text_.setText(juce::String(shortcutHelpText()), juce::dontSendNotification);
+            text_.setText(juce::String::fromUTF8(shortcutHelpText().c_str()), juce::dontSendNotification);
             text_.setColour(juce::TextEditor::backgroundColourId, theme::background);
             text_.setColour(juce::TextEditor::textColourId, theme::text);
             text_.setColour(juce::TextEditor::outlineColourId, theme::panelEdge);
-            text_.setFont(juce::Font(juce::FontOptions(14.0f)));
-            addAndMakeVisible(card_);
+            text_.setFont(juce::Font(juce::FontOptions(14.0f).withName(juce::Font::getDefaultMonospacedFontName())));
             addAndMakeVisible(text_);
         }
 
         void resized() override
         {
-            auto area = getLocalBounds();
-            card_.setBounds(area.removeFromTop(148).reduced(8));
-            text_.setBounds(area);
+            text_.setBounds(getLocalBounds().reduced(8));
         }
 
     private:
-        juce::Label card_;
         juce::TextEditor text_;
     };
 

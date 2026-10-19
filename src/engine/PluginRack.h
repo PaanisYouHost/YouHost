@@ -177,6 +177,8 @@ private:
         bool bypassed = false;
         int inputChannels = 1;
         int outputChannels = 1;
+        int totalInputs = 1;
+        int totalOutputs = 1;
         int processChannels = 1;
         bool prepared = false;
         int latencySamples = 0;

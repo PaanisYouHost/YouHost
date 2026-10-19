@@ -698,7 +698,7 @@ bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& desc
             error = message;
         });
     if (! called && error.isEmpty())
-        error = "Could not load the plugin.";
+        error = "The plugin did not open. See youhost.log.";
     return instance != nullptr;
 }
 
