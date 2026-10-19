@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <tuple>
 
 #if defined(__APPLE__)
@@ -121,8 +122,19 @@ juce::AudioChannelSet channelSetForCount(int channels, const juce::AudioChannelS
     return fallback;
 }
 
-// One layout offer. `why` is the exact refusal, including the plugin's own
-// answer when checkBusesLayoutSupported or setBusesLayout says no.
+juce::AudioChannelSet channelSetForBus(int channels, const juce::AudioChannelSet& opened)
+{
+    // Keep the set the Audio Unit opened with when the width already matches.
+    // Replacing it with stereo() or mono() can fail the equality check even
+    // though it is the same number of channels.
+    if (! opened.isDisabled() && opened.size() == channels)
+        return opened;
+    return channelSetForCount(channels, opened);
+}
+
+// One layout offer. JUCE's AudioUnit check rejects a disabled sidechain and
+// also rejects Logic's stereo-main plus mono-sidechain layout. The check is
+// logged and is not a veto. setBusesLayout is what the Audio Unit answers.
 bool offerLayout(juce::AudioPluginInstance& instance,
                  const LayoutPlan& plan,
                  const juce::AudioProcessor::BusesLayout& original,
@@ -139,39 +151,50 @@ bool offerLayout(juce::AudioPluginInstance& instance,
     for (int bus = 0; bus < plan.inputBusCount; ++bus)
     {
         const auto& opened = bus < original.inputBuses.size() ? original.inputBuses.getReference(bus) : juce::AudioChannelSet::disabled();
-        if (bus > 0 && plan.extra == ExtraBusMode::keepDefault)
-            layout.inputBuses.getReference(bus) = opened;
-        else
-            layout.inputBuses.getReference(bus) = channelSetForCount(plan.inputBuses[bus], opened);
+        layout.inputBuses.getReference(bus) = channelSetForBus(plan.inputBuses[bus], opened);
     }
     for (int bus = 0; bus < plan.outputBusCount; ++bus)
     {
         const auto& opened = bus < original.outputBuses.size() ? original.outputBuses.getReference(bus) : juce::AudioChannelSet::disabled();
-        if (bus > 0 && plan.extra == ExtraBusMode::keepDefault)
-            layout.outputBuses.getReference(bus) = opened;
-        else
-            layout.outputBuses.getReference(bus) = channelSetForCount(plan.outputBuses[bus], opened);
+        layout.outputBuses.getReference(bus) = channelSetForBus(plan.outputBuses[bus], opened);
     }
-    if (! instance.checkBusesLayoutSupported(layout))
+    const bool checkAccepted = instance.checkBusesLayoutSupported(layout);
+    const bool setAccepted = instance.setBusesLayout(layout);
+    if (! setAccepted)
     {
-        why = "checkBusesLayoutSupported refused";
-        return false;
-    }
-    if (! instance.setBusesLayout(layout))
-    {
-        why = "setBusesLayout refused";
+        why = checkAccepted ? juce::String("setBusesLayout refused")
+                            : juce::String("checkBusesLayoutSupported refused; setBusesLayout refused");
         return false;
     }
     if (! countsMatchPlan(instance, plan, why))
         return false;
-    why = "ok";
+    why = checkAccepted ? juce::String("ok")
+                        : juce::String("checkBusesLayoutSupported refused; setBusesLayout accepted");
     return true;
 }
 
-// Keep the layout the plugin opened with, then try mono, side, and stereo.
-// Each main layout is offered three ways: extra buses disabled, left at the
-// layout the plugin opened with, then set to the main channel count. The
-// first way that the plugin accepts is the one that is used.
+const char* layoutNameFor(int mainIn, int mainOut) noexcept
+{
+    if (mainIn == 1 && mainOut == 1)
+        return "1/1";
+    if (mainIn == 1 && mainOut == 2)
+        return "1/2";
+    if (mainIn == 2 && mainOut == 2)
+        return "2/2";
+    return "other";
+}
+
+ChosenLayout chosenFromMain(int mainIn, int mainOut) noexcept
+{
+    if (mainIn == 1 && mainOut == 1)
+        return ChosenLayout::mono;
+    if (mainIn == 1 && mainOut == 2)
+        return ChosenLayout::side;
+    return ChosenLayout::stereo;
+}
+
+// The layout the plugin opened with is tried first, and a mono sidechain is
+// tried before a disabled one. The first layout the Audio Unit accepts is kept.
 BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
 {
     BusChoice choice;
@@ -198,93 +221,59 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     for (int bus = 0; bus < outputBusCount; ++bus)
         outputDefaults[bus] = instance.getChannelCountOfBus(false, bus);
 
-    struct Fit
-    {
-        bool ok = false;
-        ExtraBusMode mode = ExtraBusMode::disable;
-        LayoutPlan plan {};
-    };
-    Fit fits[3];
-
-    const ExtraBusMode modes[] = { ExtraBusMode::disable, ExtraBusMode::keepDefault, ExtraBusMode::matchMain };
-    const int mainIn[3] = { 1, 1, 2 };
-    const int mainOut[3] = { 1, 2, 2 };
-    const char* layoutName[3] = { "1/1", "1/2", "2/2" };
+    int wantIn[3] {};
+    int wantOut[3] {};
+    const ChosenLayout preferred = layoutForChannel(choice.openedStereo ? ChosenLayout::stereo : ChosenLayout::mono,
+                                                    unlinkedMono,
+                                                    true);
+    mainLayoutAttemptOrder(preferred == ChosenLayout::mono, wantIn, wantOut);
+    ExtraBusMode modes[5] {};
+    const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
 
     for (int layout = 0; layout < 3; ++layout)
     {
-        for (const auto mode : modes)
+        for (int modeIndex = 0; modeIndex < modeCount; ++modeIndex)
         {
+            const auto mode = modes[modeIndex];
             const auto plan = planPluginLayout(inputDefaults, inputBusCount, outputDefaults, outputBusCount,
-                                               mainIn[layout], mainOut[layout], mode);
+                                               wantIn[layout], wantOut[layout], mode);
             juce::String why;
             const bool ok = offerLayout(instance, plan, remember, why);
             juce::String line;
-            line << "attempt " << layoutName[layout]
+            line << "attempt " << layoutNameFor(wantIn[layout], wantOut[layout])
                  << " extra=" << extraBusModeName(mode)
                  << " supported=" << (ok ? "yes" : "no")
                  << " reason=" << (why.isNotEmpty() ? why : juce::String("none"));
             if (ok)
                 line << " total " << plan.totalIn << "/" << plan.totalOut;
             choice.attempts.add(line);
-            if (ok && ! fits[layout].ok)
+            if (! ok)
             {
-                fits[layout].ok = true;
-                fits[layout].mode = mode;
-                fits[layout].plan = plan;
+                instance.setBusesLayout(remember);
+                continue;
             }
+
+            if (wantIn[layout] == 1 && wantOut[layout] == 1)
+                choice.supportMono = true;
+            else if (wantIn[layout] == 1 && wantOut[layout] == 2)
+                choice.supportSide = true;
+            else if (wantIn[layout] == 2 && wantOut[layout] == 2)
+                choice.supportStereo = true;
+            choice.inputChannels = plan.mainIn;
+            choice.outputChannels = plan.mainOut;
+            choice.totalInputs = plan.totalIn;
+            choice.totalOutputs = plan.totalOut;
+            choice.usedExtra = mode;
+            choice.chosen = chosenFromMain(plan.mainIn, plan.mainOut);
+            choice.ok = true;
+            choice.attempts.add("chose " + juce::String(layoutNameFor(plan.mainIn, plan.mainOut))
+                                + " extra=" + juce::String(extraBusModeName(mode))
+                                + " main " + juce::String(choice.inputChannels) + "/" + juce::String(choice.outputChannels)
+                                + " total " + juce::String(choice.totalInputs) + "/" + juce::String(choice.totalOutputs));
+            return choice;
         }
-        instance.setBusesLayout(remember);
     }
 
-    choice.supportMono = fits[0].ok;
-    choice.supportSide = fits[1].ok;
-    choice.supportStereo = fits[2].ok;
-
-    OpenedLayout offer;
-    offer.openInputs = choice.openInputs;
-    offer.openOutputs = choice.openOutputs;
-    offer.mono = choice.supportMono;
-    offer.side = choice.supportSide;
-    offer.stereo = choice.supportStereo;
-    const ChosenLayout preferred = layoutForChannel(chooseOpenedLayout(offer), unlinkedMono, choice.supportMono);
-
-    auto apply = [&](ChosenLayout layout)
-    {
-        int index = -1;
-        if (layout == ChosenLayout::mono)
-            index = 0;
-        else if (layout == ChosenLayout::side)
-            index = 1;
-        else if (layout == ChosenLayout::stereo)
-            index = 2;
-        if (index < 0 || ! fits[index].ok)
-            return false;
-        juce::String why;
-        if (! offerLayout(instance, fits[index].plan, remember, why))
-        {
-            choice.attempts.add("reapply " + juce::String(layoutName[index]) + " failed: " + why);
-            instance.setBusesLayout(remember);
-            return false;
-        }
-        choice.inputChannels = fits[index].plan.mainIn;
-        choice.outputChannels = fits[index].plan.mainOut;
-        choice.totalInputs = fits[index].plan.totalIn;
-        choice.totalOutputs = fits[index].plan.totalOut;
-        choice.usedExtra = fits[index].mode;
-        choice.chosen = layout;
-        choice.ok = true;
-        choice.attempts.add("chose " + juce::String(layoutName[index])
-                            + " extra=" + juce::String(extraBusModeName(fits[index].mode))
-                            + " main " + juce::String(choice.inputChannels) + "/" + juce::String(choice.outputChannels)
-                            + " total " + juce::String(choice.totalInputs) + "/" + juce::String(choice.totalOutputs));
-        return true;
-    };
-
-    if (apply(preferred))
-        return choice;
-    if (apply(ChosenLayout::stereo) || apply(ChosenLayout::mono) || apply(ChosenLayout::side))
-        return choice;
     choice.attempts.add("chose none");
     instance.setBusesLayout(remember);
     return choice;
@@ -1102,10 +1091,18 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 auto runExtra = [&](float* left, float* partner)
                 {
                     const int fed = outputsN >= 2 ? inputs : 1;
-                    feedPluginChannels(scratch, width, fed, count, left, partner);
+                    // A mono channel through a stereo main bus (sidechain kept
+                    // on) feeds both sides the same signal, then folds.
+                    const float* rightFeed = partner != nullptr ? partner : (inputs >= 2 ? left : nullptr);
+                    feedPluginChannels(scratch, width, fed, count, left, rightFeed);
                     midi.clear();
                     juce::AudioBuffer<float> view(scratch, width, count);
                     instance->processBlock(view, midi);
+                    if (partner == nullptr && outputsN >= 2)
+                    {
+                        takeFoldedChannel(left, scratch, outputsN, count, fold);
+                        return;
+                    }
                     if (scratch[0] != nullptr && left != nullptr && scratch[0] != left)
                         std::memcpy(left, scratch[0], sizeof(float) * static_cast<std::size_t>(count));
                     if (outputsN >= 2 && partner != nullptr && scratch[1] != nullptr && scratch[1] != partner)
@@ -1658,6 +1655,40 @@ void PluginRack::beginLoad(int channel,
                     destroyInstance(nullptr, instance.release());
                 return;
             }
+
+            // AUv2 finishes inside this call, on the message thread. AUv3's
+            // AudioComponentInstantiate completion can arrive on another
+            // thread. Bus layout and the editor have to run on the message thread.
+            if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            {
+                if (! messages->isThisTheMessageThread())
+                {
+                    struct Held
+                    {
+                        std::unique_ptr<juce::AudioPluginInstance> instance;
+                        juce::String error;
+                    };
+                    auto held = std::make_shared<Held>();
+                    held->instance = std::move(instance);
+                    held->error = error;
+                    juce::MessageManager::callAsync(
+                        [this, alive, channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, restoreGeneration, held]
+                        {
+                            if (! alive->load(std::memory_order_acquire))
+                            {
+                                if (held->instance != nullptr)
+                                    destroyInstance(nullptr, held->instance.release());
+                                return;
+                            }
+                            if (settings_ != nullptr)
+                                appendHostLog(*settings_, "plugin \"" + description.name + "\" instantiate callback moved onto the message thread");
+                            finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold,
+                                       description, state, std::move(held->instance), held->error, restoreGeneration);
+                        });
+                    return;
+                }
+            }
+
             finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold, description, state, std::move(instance), error, restoreGeneration);
         });
 }
