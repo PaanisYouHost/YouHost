@@ -5003,11 +5003,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.2"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.3"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.2"
+             && std::string(youhost::versionNumber()) == "1.0.3"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.2") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.3") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5016,13 +5016,12 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.2") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.2-macOS.zip") != std::string::npos
-             && checklistDoc.find("marked Latest") != std::string::npos
-             && checklistDoc.find("prerelease") == std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: true") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-19") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.3") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.3-macOS.zip") != std::string::npos
+             && checklistDoc.find("prerelease, not Latest") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-20") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
@@ -5632,6 +5631,58 @@ void testBeta090()
     youhost::mainLayoutAttemptOrder(true, wantIn, wantOut);
     CHECK(wantIn[0] == 1 && wantOut[0] == 1);
     CHECK(wantIn[1] == 2 && wantOut[1] == 2);
+    CHECK(youhost::sidechainKeepsStereoMain(true, true));
+    CHECK(! youhost::sidechainKeepsStereoMain(true, false));
+    CHECK(! youhost::sidechainKeepsStereoMain(false, true));
+    youhost::mainLayoutAttemptOrder(! youhost::sidechainKeepsStereoMain(true, true), wantIn, wantOut);
+    CHECK(wantIn[0] == 2 && wantOut[0] == 2);
+    CHECK(youhost::pluginProcessWidth(3, 2) == 3);
+    CHECK(youhost::pluginProcessWidth(4, 2) == 4);
+    CHECK(youhost::pluginProcessWidth(2, 1) == 2);
+    CHECK(youhost::pluginProcessWidth(0, 2) == 0);
+    // Stereo main plus a mono sidechain, one minute of 32-sample blocks.
+    // A short buffer (the host channel alone) is a failed block.
+    {
+        constexpr int kBlock = 32;
+        constexpr int kBlocks = 48000 * 60 / kBlock;
+        constexpr int kTotalIn = 3;
+        constexpr int kTotalOut = 2;
+        constexpr int kMainIn = 2;
+        const int width = youhost::pluginProcessWidth(kTotalIn, kTotalOut);
+        float storage[8][kBlock];
+        float* channels[8];
+        for (int index = 0; index < 8; ++index)
+            channels[index] = storage[index];
+        float left[kBlock];
+        float right[kBlock];
+        int faults = 0;
+        for (int block = 0; block < kBlocks; ++block)
+        {
+            for (int sample = 0; sample < kBlock; ++sample)
+            {
+                left[sample] = 0.1f;
+                right[sample] = -0.05f;
+                for (int channel = 0; channel < width; ++channel)
+                    storage[channel][sample] = 99.0f;
+            }
+            youhost::feedPluginChannels(channels, width, kMainIn, kBlock, left, right);
+            if (width < kTotalIn || width < kTotalOut)
+                ++faults;
+            for (int sample = 0; sample < kBlock; ++sample)
+            {
+                if (storage[0][sample] != 0.1f || storage[1][sample] != -0.05f)
+                    ++faults;
+                if (storage[2][sample] != 0.0f)
+                    ++faults;
+                storage[0][sample] *= 0.5f;
+                storage[1][sample] *= 0.5f;
+            }
+            if (storage[2][0] != 0.0f)
+                ++faults;
+        }
+        CHECK(faults == 0);
+        std::cout << "sidechain process 60 s, width " << width << ", faults " << faults << "\n";
+    }
     const auto busSource = readWorkspaceFile("src/engine/PluginRack.cpp");
     CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
     CHECK(busSource.find("isThisTheMessageThread") != std::string::npos);
@@ -5639,6 +5690,23 @@ void testBeta090()
     CHECK(busSource.find("kept opened layout") != std::string::npos);
     CHECK(busSource.find("restoreGeneration != 0 && catalogue_.prefersBackgroundInstance") == std::string::npos);
     CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
+    CHECK(busSource.find("sidechainKeepsStereoMain") != std::string::npos);
+    CHECK(busSource.find("pluginProcessWidth") != std::string::npos);
+    CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
+    const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
+    CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
+    CHECK(finishLoad.find("openEditor(") == std::string::npos);
+    CHECK(finishLoad.find("createEditor") == std::string::npos);
+    const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
+    CHECK(deferredEditor.find("callAsync") != std::string::npos);
+    CHECK(deferredEditor.find("backgroundBusy_") != std::string::npos);
+    CHECK(deferredEditor.find("lifeLock_") == std::string::npos);
+    const auto editorBody = sliceBetween(busSource, "void PluginRack::openEditor", "void PluginRack::setGlobalKeyListener");
+    CHECK(editorBody.find("createEditorAndMakeActive") != std::string::npos);
+    CHECK(editorBody.find("lifeLock_") != std::string::npos);
+    const auto lockAt = editorBody.find("lifeLock_");
+    const auto createAt = editorBody.find("createEditorAndMakeActive");
+    CHECK(lockAt != std::string::npos && createAt != std::string::npos && lockAt < createAt);
     CHECK(busSource.find("backgroundQueue_") != std::string::npos);
     CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes:") == std::string::npos);

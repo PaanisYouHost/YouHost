@@ -218,7 +218,9 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     const ChosenLayout preferred = layoutForChannel(choice.openedStereo ? ChosenLayout::stereo : ChosenLayout::mono,
                                                     unlinkedMono,
                                                     true);
-    mainLayoutAttemptOrder(preferred == ChosenLayout::mono, wantIn, wantOut);
+    const bool monoFirst = preferred == ChosenLayout::mono
+                           && ! sidechainKeepsStereoMain(choice.hasExtraBuses, choice.openedStereo);
+    mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
     ExtraBusMode modes[5] {};
     const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
 
@@ -1057,7 +1059,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             const int outputsN = live.outputChannels;
             const int totalIn = std::max(inputs, live.totalInputs);
             const int totalOut = std::max(outputsN, live.totalOutputs);
-            const int width = std::max(totalIn, totalOut);
+            // The buffer covers the main bus and the sidechain. A host-channel
+            // buffer (1 or 2) is too small once an extra bus is enabled.
+            const int width = pluginProcessWidth(totalIn, totalOut);
             const bool extraBuses = totalIn > inputs || totalOut > outputsN;
             if (instance == nullptr || ! live.prepared || width < 1 || width > LiveGraph::kScratchCap)
                 continue;
@@ -1112,7 +1116,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 // Extra outputs are ignored, so a sidechain cannot reach the mix.
                 auto runExtra = [&](float* left, float* partner)
                 {
-                    const int fed = outputsN >= 2 ? inputs : 1;
+                    const int fed = std::min(std::max(inputs, 1), width);
                     // A mono channel through a stereo main bus (sidechain kept
                     // on) feeds both sides the same signal, then folds.
                     const float* rightFeed = partner != nullptr ? partner : (inputs >= 2 ? left : nullptr);
@@ -1895,8 +1899,11 @@ void PluginRack::finishLoad(int channel,
 
     if (notify)
         notifyDirty();
+    // The editor opens on a later message-loop turn. Doing it inside this
+    // delivery callback deadlocks: the plugin waits on the message lock, and
+    // this callback still owns that lock. No lock is held across the open.
     if (openIt)
-        openEditor(channel, slot);
+        scheduleDeferredEditor(channel, slot);
     if (channelWork_[static_cast<std::size_t>(channel)].ticket == ticket)
         finishChannelWork(channel, ticket);
 }
@@ -2221,6 +2228,26 @@ bool PluginRack::isEditorOpen(int channel, int slot) const
     if (! validSlot(channel, slot))
         return false;
     return editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] != nullptr;
+}
+
+void PluginRack::scheduleDeferredEditor(int channel, int slot)
+{
+    if (! validSlot(channel, slot) || quitting_)
+        return;
+    auto alive = alive_;
+    juce::MessageManager::callAsync([this, alive, channel, slot]
+    {
+        if (! alive->load(std::memory_order_acquire) || quitting_)
+            return;
+        const bool loaderRunning = backgroundInstantiate_ != nullptr
+                                   && backgroundInstantiate_->isThreadRunning();
+        if (backgroundBusy_ || ! backgroundQueue_.empty() || loaderRunning)
+        {
+            scheduleDeferredEditor(channel, slot);
+            return;
+        }
+        openEditor(channel, slot);
+    });
 }
 
 void PluginRack::openEditor(int channel, int slot)

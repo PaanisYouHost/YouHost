@@ -104,6 +104,27 @@ inline int copyExtraBusAttemptOrder(bool hasExtraBuses, ExtraBusMode* dest, int 
     return count;
 }
 
+// A sidechain plugin that opened with a stereo main bus stays stereo, even on
+// a mono channel. Those plugins report 2/2 only. A 1/1 main bus can pass
+// setBusesLayout and then crash inside process. The mono channel folds the
+// stereo output.
+inline bool sidechainKeepsStereoMain(bool hasExtraBuses, bool openedStereo) noexcept
+{
+    return hasExtraBuses && openedStereo;
+}
+
+// processBlock sees every enabled bus in one buffer. The width is the larger
+// of the input and output totals. Zero means the layout cannot be processed.
+inline int pluginProcessWidth(int totalIn, int totalOut) noexcept
+{
+    if (totalIn < 1 || totalOut < 1)
+        return 0;
+    const int width = std::max(totalIn, totalOut);
+    if (width > kPluginChannelCap)
+        return 0;
+    return width;
+}
+
 // Unlinked mono prefers 1/1, then the stereo layout the plugin may have
 // opened with. A linked pair prefers 2/2 and does not start by rewriting
 // the Audio Unit down to mono.

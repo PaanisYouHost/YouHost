@@ -237,6 +237,7 @@ private:
     void completeRestoreStep(std::uint64_t generation);
     void finishRestore();
     void noteSlot(int channel);
+    void scheduleDeferredEditor(int channel, int slot);
     void pumpBackgroundQueue();
     void launchBackgroundLoad();
     void deliverOffThreadInstance();
