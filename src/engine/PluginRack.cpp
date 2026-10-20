@@ -306,56 +306,37 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     return choice;
 }
 
-juce::String dbText(float db)
+// VST3 setupProcessing, setActive, and setState are illegal off the message
+// thread. JUCE asserts that and takes the message lock inside them. Running
+// them on the loader leaves the processor activated on the wrong thread:
+// every later process() then misses its realtime path (VST3 DSP far above
+// the same plugin's Audio Unit) or corrupts memory (newer FabFilter builds
+// die a few seconds after load). callSync runs the function on the message
+// thread and returns here. It does not render the plugin.
+bool runOnMessageThread(const std::function<void()>& fn)
 {
-    return juce::String(db, 1);
+    if (! fn)
+        return false;
+    auto* messages = juce::MessageManager::getInstanceWithoutCreating();
+    if (messages == nullptr || messages->isThisTheMessageThread())
+    {
+        fn();
+        return true;
+    }
+    return messages->callSync(fn);
 }
 
-bool logHostedPlugin(AppSettings* settings,
-                     juce::AudioPluginInstance& instance,
+void logHostedPlugin(AppSettings* settings,
                      const juce::PluginDescription& description,
                      const BusChoice& buses,
                      StereoFold fold,
                      double rate,
-                     int block)
+                     int block,
+                     int latencySamples)
 {
     if (settings == nullptr || block <= 0)
-        return true;
+        return;
 
-    juce::MemoryBlock saved;
-    instance.getStateInformation(saved);
-
-    const int mainIn = std::max(buses.inputChannels, 1);
-    const int mainOut = std::max(buses.outputChannels, 1);
-    const int totalIn = std::max(buses.totalInputs, mainIn);
-    const int totalOut = std::max(buses.totalOutputs, mainOut);
-    const bool extraBuses = totalIn > buses.inputChannels
-                            || totalOut > buses.outputChannels
-                            || std::max(totalIn, totalOut) > 2;
-    // Full width, including the sidechain. A 2-channel buffer makes JUCE's
-    // AU and VST3 wrappers index the sidechain off the end of the pointer list.
-    const auto levels = measurePluginProbe(mainIn, mainOut, totalIn, totalOut, block, rate,
-                                            [&](float* const* channels, int width, int samples)
-                                            {
-                                                if (channels == nullptr || width < 1 || samples < 1)
-                                                    return;
-                                                juce::MidiBuffer midi;
-                                                juce::AudioBuffer<float> view(channels, width, samples);
-                                                instance.processBlock(view, midi);
-                                            });
-    const float lowDb = levels.lowDb;
-    const float highDb = levels.highDb;
-    const float leftDb = levels.leftDb;
-    const float rightDb = levels.rightDb;
-    const float sumDb = levels.sumDb;
-    const bool silent = probeLevelsAreSilent(levels);
-
-    instance.reset();
-    if (saved.getSize() > 0)
-        instance.setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
-    instance.reset();
-
-    const auto inDb = amplitudeDb(0.25f * 0.25f * 0.5f);
     juce::String line;
     line << "plugin " << description.name
          << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
@@ -370,22 +351,9 @@ bool logHostedPlugin(AppSettings* settings,
          << " fold " << stereoFoldToken(fold)
          << " rate " << juce::String(rate, 0)
          << " block " << block
-         << " latency " << instance.getLatencySamples()
-         << " probe in " << dbText(inDb)
-         << " dB low " << dbText(lowDb)
-         << " dB high " << dbText(highDb)
-         << " dB L " << dbText(leftDb)
-         << " dB R " << dbText(rightDb)
-         << " dB sum " << dbText(sumDb) << " dB";
+         << " latency " << latencySamples
+         << " audio-thread process, channels " << buses.totalInputs << "/" << buses.totalOutputs;
     appendHostLog(*settings, line);
-    if (extraBuses && silent)
-    {
-        appendHostLog(*settings,
-                      "plugin " + description.name
-                          + " probe silent, not activated. The sidechain layout produced no audio.");
-        return false;
-    }
-    return true;
 }
 
 } // namespace
@@ -677,41 +645,43 @@ public:
         juce::String error;
         owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
 
-        // syncBusLayouts and prepareToPlay stay on this thread. On the message
-        // thread they hold the message lock, and Eiosis stalls there. No lock
-        // is held across the plugin calls. The message thread only publishes
-        // the instance after this returns.
+        // VST3 setupProcessing is on the message thread. The loader waits.
+        // The audio callback is the first render, with the same channel count
+        // and block size. No lock is held across the plugin calls. The message
+        // thread publishes the instance only after this returns.
         PluginRack::OffThreadBuses setup;
         if (instance != nullptr)
         {
             const int left = owner_.jobChannel_ & ~1;
             const bool unlinkedMono = ! owner_.stereoLink(left);
-            const auto buses = configureBuses(*instance, unlinkedMono);
-            setup.ready = true;
-            setup.ok = buses.ok;
-            setup.inputChannels = buses.inputChannels;
-            setup.outputChannels = buses.outputChannels;
-            setup.totalInputs = buses.totalInputs;
-            setup.totalOutputs = buses.totalOutputs;
-            setup.openInputs = buses.openInputs;
-            setup.openOutputs = buses.openOutputs;
-            setup.supportMono = buses.supportMono;
-            setup.supportSide = buses.supportSide;
-            setup.supportStereo = buses.supportStereo;
-            setup.openedStereo = buses.openedStereo;
-            setup.hasExtraBuses = buses.hasExtraBuses;
-            setup.attempts = buses.attempts;
-            if (buses.ok)
+            auto* plugin = instance.get();
+            BusChoice measured;
+            const bool preparedOnMessage = runOnMessageThread([&, plugin, unlinkedMono, &measured, &setup]
             {
+                const auto buses = configureBuses(*plugin, unlinkedMono);
+                measured = buses;
+                setup.ready = true;
+                setup.ok = buses.ok;
+                setup.inputChannels = buses.inputChannels;
+                setup.outputChannels = buses.outputChannels;
+                setup.totalInputs = buses.totalInputs;
+                setup.totalOutputs = buses.totalOutputs;
+                setup.openInputs = buses.openInputs;
+                setup.openOutputs = buses.openOutputs;
+                setup.supportMono = buses.supportMono;
+                setup.supportSide = buses.supportSide;
+                setup.supportStereo = buses.supportStereo;
+                setup.openedStereo = buses.openedStereo;
+                setup.hasExtraBuses = buses.hasExtraBuses;
+                setup.attempts = buses.attempts;
+                if (! buses.ok)
+                    return;
                 if (owner_.jobState_.getSize() > 0)
-                    instance->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
-                // State can change the buses after the plan was recorded. The
-                // probe and the live graph both have to use this layout.
-                auto measured = buses;
-                const int liveIn = instance->getTotalNumInputChannels();
-                const int liveOut = instance->getTotalNumOutputChannels();
-                const int mainIn = instance->getMainBusNumInputChannels();
-                const int mainOut = instance->getMainBusNumOutputChannels();
+                    plugin->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
+                const int liveIn = plugin->getTotalNumInputChannels();
+                const int liveOut = plugin->getTotalNumOutputChannels();
+                const int mainIn = plugin->getMainBusNumInputChannels();
+                const int mainOut = plugin->getMainBusNumOutputChannels();
                 if (liveIn > 0)
                     measured.totalInputs = liveIn;
                 if (liveOut > 0)
@@ -734,32 +704,25 @@ public:
                                           + " layout " + juce::String(measured.totalInputs) + "/"
                                           + juce::String(measured.totalOutputs)
                                           + " is wider than the process buffer, not activated");
+                    return;
                 }
-                else
-                {
-                    instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
-                    instance->reset();
-                    const bool audible = logHostedPlugin(owner_.settings_, *instance, owner_.jobDescription_, measured,
-                                                        stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_);
-                    const int afterIn = instance->getTotalNumInputChannels();
-                    const int afterOut = instance->getTotalNumOutputChannels();
-                    if (afterIn > 0 && afterOut > 0
-                        && (afterIn != measured.totalInputs || afterOut != measured.totalOutputs))
-                    {
-                        measured.totalInputs = afterIn;
-                        measured.totalOutputs = afterOut;
-                        setup.totalInputs = afterIn;
-                        setup.totalOutputs = afterOut;
-                        instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
-                        instance->reset();
-                    }
-                    setup.latencySamples = instance->getLatencySamples();
-                    if (! audible)
-                    {
-                        setup.ok = false;
-                        setup.silent = true;
-                    }
-                }
+                plugin->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                setup.latencySamples = plugin->getLatencySamples();
+            });
+            if (! preparedOnMessage)
+            {
+                setup.ready = true;
+                setup.ok = false;
+                if (owner_.settings_ != nullptr)
+                    appendHostLog(*owner_.settings_,
+                                  "plugin " + owner_.jobDescription_.name
+                                      + " prepare did not run on the message thread, not activated");
+            }
+            else if (setup.ok)
+            {
+                logHostedPlugin(owner_.settings_, owner_.jobDescription_, measured,
+                                stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_,
+                                setup.latencySamples);
             }
         }
 
@@ -1513,14 +1476,17 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
                     hosted.push_back(slot.plugin);
     }
 
-    for (auto& plugin : hosted)
+    runOnMessageThread([&hosted, rate, block]
     {
-        if (plugin != nullptr && plugin->instance != nullptr)
+        for (auto& plugin : hosted)
         {
-            plugin->instance->prepareToPlay(rate, block);
-            plugin->instance->reset();
+            if (plugin != nullptr && plugin->instance != nullptr)
+            {
+                plugin->instance->prepareToPlay(rate, block);
+                plugin->instance->reset();
+            }
         }
-    }
+    });
 
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1800,11 +1766,10 @@ void PluginRack::finishLoad(int channel,
     juce::String problem = error;
     const int left = channel & ~1;
     const bool unlinkedMono = ! stereoLink(left);
-    // Bus setup already ran on the loader. Doing it here would stall this thread.
+    // Bus setup and prepare already finished on the message thread. Doing them
+    // again here would run setActive while this thread is also drawing.
     if (instance != nullptr && ! buses.ready)
-        problem = "The plugin setup did not run off the message thread. See youhost.log.";
-    if (instance != nullptr && buses.silent)
-        problem = kPluginSilentProbeMessage;
+        problem = "The plugin setup did not finish. See youhost.log.";
     juce::String attemptText;
     for (int index = 0; index < buses.attempts.size(); ++index)
     {
@@ -2274,21 +2239,19 @@ void PluginRack::openEditor(int channel, int slot)
     }
 
     PhaseScope phase(kPhaseEditor);
-    if (plugin->gate == nullptr || ! pauseGate(*plugin->gate))
-    {
-        tracePlugin(channel, slot, "active", plugin->description.name, pluginIdentifier(plugin->description));
+    if (! plugin->prepared)
         return;
-    }
 
     // The audio thread does not wait on the message thread. createView can
-    // block this thread for seconds. The plugin stays paused, so the audio
-    // callback never enters it and recording keeps the raw input.
+    // block this thread for seconds. The plugin stays in the audio callback
+    // the whole time: AirEQ, Slate, Eiosis, and Dyna-mite wait inside
+    // createView until the processor has rendered, and pausing it here leaves
+    // that wait stuck. Recording stays the raw input, before plugins.
     const auto editorBegan = steadyNs();
     auto* editor = plugin->instance->createEditorAndMakeActive();
     const auto editorMs = (steadyNs() - editorBegan) / 1000000ULL;
     if (editorMs >= 2000ULL && settings_ != nullptr)
         appendHostLog(*settings_, "editor slow " + juce::String(static_cast<int>(editorMs)) + " ms, audio kept running");
-    resumeGate(*plugin->gate);
     if (editor == nullptr)
         editor = new juce::GenericAudioProcessorEditor(*plugin->instance);
 
@@ -2882,7 +2845,19 @@ void PluginRack::releaseForQuit()
     restorePosted_ = false;
     if (backgroundInstantiate_ != nullptr)
     {
-        if (backgroundInstantiate_->stopThread(8000))
+        // The loader may be inside callSync. This thread has to keep
+        // dispatching or that wait never finishes.
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        {
+            if (messages->isThisTheMessageThread())
+            {
+                const auto start = juce::Time::getMillisecondCounter();
+                while (backgroundInstantiate_->isThreadRunning()
+                       && juce::Time::getMillisecondCounter() - start < 8000)
+                    messages->runDispatchLoopUntil(20);
+            }
+        }
+        if (backgroundInstantiate_->stopThread(500))
         {
             backgroundInstantiate_.reset();
             std::lock_guard<std::mutex> lock(offThreadMutex_);

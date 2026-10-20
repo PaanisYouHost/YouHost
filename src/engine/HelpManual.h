@@ -15,10 +15,11 @@ Two basic rules
 
 What's new
 ----------
-- 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence. If that probe is silent, the plugin stays off instead of being activated. A plugin editor can take a long time to open without stopping audio or recording.
+- 1.0.5: VST3 plugins are prepared on the message thread and processed only on the audio thread, the same way as an Audio Unit. A plugin that reports silence during load stays loaded. Opening an editor does not pause the plugin, so audio and recording keep going.
+- 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence.
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
 - A sidechain plugin keeps the stereo bus it opened with. Its editor opens after the load has finished.
-- Bus setup and prepare stay off the message thread, so a slow plugin does not freeze the app.
+- The plugin is activated on the message thread. Only the audio thread runs it. A slow editor does not pause that audio.
 
 1. Quick start – first recording in 5 steps
 -------------------------------------------

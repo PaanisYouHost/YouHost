@@ -5100,11 +5100,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.4"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.5"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.4"
+             && std::string(youhost::versionNumber()) == "1.0.5"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.4") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.5") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5113,8 +5113,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.4") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.4-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.5") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.5-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -5818,6 +5818,19 @@ void testBeta090()
         CHECK(youhost::probeLevelsAreSilent(silent));
         CHECK(std::string(youhost::kPluginSilentProbeMessage).find("silence") != std::string::npos);
         CHECK(std::string(youhost::kPluginSilentProbeMessage).find("Could not load the plugin.") == std::string::npos);
+        CHECK(! youhost::kRefuseSilentProbe);
+        youhost::LookaheadDelay shortProbe;
+        shortProbe.delay = 3000;
+        const auto tooShort = youhost::measurePluginProbe(1, 1, 1, 1, 64, 48000.0, shortProbe, 0);
+        CHECK(tooShort.ran);
+        CHECK(youhost::probeLevelsAreSilent(tooShort));
+        youhost::LookaheadDelay covered;
+        covered.delay = 3000;
+        const auto afterLatency = youhost::measurePluginProbe(1, 1, 1, 1, 64, 48000.0, covered, covered.delay);
+        CHECK(afterLatency.ran);
+        CHECK(! youhost::probeLevelsAreSilent(afterLatency));
+        CHECK(afterLatency.lowDb > -40.0f);
+        std::cout << "lookahead probe 3000 samples low " << afterLatency.lowDb << " dB\n";
     }
     const auto busSource = readWorkspaceFile("src/engine/PluginRack.cpp");
     CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
@@ -5828,11 +5841,13 @@ void testBeta090()
     CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
     CHECK(busSource.find("sidechainKeepsStereoMain") != std::string::npos);
     CHECK(busSource.find("pluginProcessWidth") != std::string::npos);
-    CHECK(busSource.find("measurePluginProbe") != std::string::npos);
-    CHECK(busSource.find("probe silent, not activated") != std::string::npos);
+    CHECK(busSource.find("measurePluginProbe") == std::string::npos);
+    CHECK(busSource.find("probe silent, not activated") == std::string::npos);
+    CHECK(busSource.find("callSync") != std::string::npos);
     CHECK(busSource.find("skippedDb") == std::string::npos);
     CHECK(busSource.find("pluginCallbackSamples") != std::string::npos);
-    CHECK(busSource.find("kPluginSilentProbeMessage") != std::string::npos);
+    CHECK(busSource.find("kPluginSilentProbeMessage") == std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginBuses.h").find("kPluginSilentProbeMessage") != std::string::npos);
     const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
     CHECK(processBody.find("MessageManager") == std::string::npos);
     CHECK(processBody.find("pauseGate") == std::string::npos);
@@ -5847,6 +5862,7 @@ void testBeta090()
     CHECK(finishLoad.find("prepareToPlay") == std::string::npos);
     CHECK(finishLoad.find("configureBuses") == std::string::npos);
     CHECK(finishLoad.find("setBusesLayout") == std::string::npos);
+    CHECK(finishLoad.find("kPluginSilentProbeMessage") == std::string::npos);
     const auto loaderAt = busSource.find("createInstanceBlocking");
     const auto deliverAt = busSource.find("deliverOffThreadInstance", loaderAt);
     CHECK(loaderAt != std::string::npos && deliverAt != std::string::npos && loaderAt < deliverAt);
@@ -5854,13 +5870,17 @@ void testBeta090()
     CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
     CHECK(loaderRun.find("configureBuses") != std::string::npos);
     CHECK(loaderRun.find("lifeLock_") == std::string::npos);
-    CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") != std::string::npos);
+    CHECK(loaderRun.find("runOnMessageThread") != std::string::npos);
+    CHECK(loaderRun.find("VST3 setupProcessing is on the message thread") != std::string::npos);
+    CHECK(loaderRun.find("processBlock") == std::string::npos);
+    CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") == std::string::npos);
     const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
     CHECK(deferredEditor.find("callAsync") != std::string::npos);
     CHECK(deferredEditor.find("backgroundBusy_") != std::string::npos);
     CHECK(deferredEditor.find("lifeLock_") == std::string::npos);
     const auto editorBody = sliceBetween(busSource, "void PluginRack::openEditor", "void PluginRack::setGlobalKeyListener");
     CHECK(editorBody.find("createEditorAndMakeActive") != std::string::npos);
+    CHECK(editorBody.find("pauseGate") == std::string::npos);
     CHECK(editorBody.find("lifeLock_") != std::string::npos);
     const auto lockAt = editorBody.find("lifeLock_");
     const auto createAt = editorBody.find("createEditorAndMakeActive");

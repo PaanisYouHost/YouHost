@@ -334,8 +334,8 @@ private:
     std::mutex offThreadMutex_;
     std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
     juce::String offThreadError_;
-    // Bus setup and prepareToPlay run on the loader thread. The message
-    // thread only reads this after that work has finished.
+    // The loader asks the message thread to run bus setup and prepareToPlay,
+    // then reads this. The audio thread is the first processBlock.
     struct OffThreadBuses
     {
         bool ready = false;
