@@ -421,6 +421,7 @@ private:
     bool quitting_ = false;
     struct MessageThreadJob;
     std::shared_ptr<MessageThreadJob> messageJob_;
+    static void completeMessageJob(const std::shared_ptr<MessageThreadJob>& job);
     bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
     std::vector<std::pair<int, int>> blockedSlots_;

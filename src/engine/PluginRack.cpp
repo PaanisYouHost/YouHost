@@ -346,7 +346,7 @@ struct PluginRack::MessageThreadJob
     std::atomic<bool> done { false };
 };
 
-void completeMessageJob(const std::shared_ptr<PluginRack::MessageThreadJob>& job)
+void PluginRack::completeMessageJob(const std::shared_ptr<MessageThreadJob>& job)
 {
     if (job == nullptr)
         return;
@@ -385,7 +385,7 @@ bool PluginRack::runOnMessageThread(const std::function<void()>& fn)
     }
     const bool posted = juce::MessageManager::callAsync([job]
     {
-        completeMessageJob(job);
+        PluginRack::completeMessageJob(job);
     });
     if (! posted)
     {
