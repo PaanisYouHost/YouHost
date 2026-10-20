@@ -306,15 +306,36 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     return choice;
 }
 
-// VST3 setupProcessing, setActive, and setState are illegal off the message
-// thread. JUCE asserts that and takes the message lock inside them. Running
-// them on the loader leaves the processor activated on the wrong thread:
-// every later process() then misses its realtime path (VST3 DSP far above
-// the same plugin's Audio Unit) or corrupts memory (newer FabFilter builds
-// die a few seconds after load). callSync runs the function on the message
-// thread and returns here. It does not render the plugin.
-bool runOnMessageThread(const std::function<void()>& fn)
+struct PluginRack::MessageThreadJob
 {
+    std::mutex mutex;
+    std::function<void()> fn;
+    std::atomic<bool> started { false };
+    std::atomic<bool> done { false };
+};
+
+void completeMessageJob(const std::shared_ptr<PluginRack::MessageThreadJob>& job)
+{
+    if (job == nullptr)
+        return;
+    if (job->started.exchange(true, std::memory_order_acq_rel))
+        return;
+    std::function<void()> fn;
+    {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        fn = std::move(job->fn);
+    }
+    if (fn)
+        fn();
+    job->done.store(true, std::memory_order_release);
+}
+
+bool PluginRack::runOnMessageThread(const std::function<void()>& fn)
+{
+    // VST3 setupProcessing, setActive, and setState are illegal off the message
+    // thread. callAsync runs this on the message thread and the loader waits.
+    // It does not render the plugin. Quit runs the same job inline, because
+    // modal loops are disabled and cannot pump the queue.
     if (! fn)
         return false;
     auto* messages = juce::MessageManager::getInstanceWithoutCreating();
@@ -323,7 +344,32 @@ bool runOnMessageThread(const std::function<void()>& fn)
         fn();
         return true;
     }
-    return messages->callSync(fn);
+
+    auto job = std::make_shared<MessageThreadJob>();
+    job->fn = fn;
+    {
+        std::lock_guard<std::mutex> lock(offThreadMutex_);
+        messageJob_ = job;
+    }
+    const bool posted = juce::MessageManager::callAsync([job]
+    {
+        completeMessageJob(job);
+    });
+    if (! posted)
+    {
+        std::lock_guard<std::mutex> lock(offThreadMutex_);
+        if (messageJob_ == job)
+            messageJob_.reset();
+        return false;
+    }
+    while (! job->done.load(std::memory_order_acquire))
+        juce::Thread::sleep(2);
+    {
+        std::lock_guard<std::mutex> lock(offThreadMutex_);
+        if (messageJob_ == job)
+            messageJob_.reset();
+    }
+    return true;
 }
 
 void logHostedPlugin(AppSettings* settings,
@@ -656,7 +702,7 @@ public:
             const bool unlinkedMono = ! owner_.stereoLink(left);
             auto* plugin = instance.get();
             BusChoice measured;
-            const bool preparedOnMessage = runOnMessageThread([&, plugin, unlinkedMono, &measured, &setup]
+            const bool preparedOnMessage = owner_.runOnMessageThread([&, plugin, unlinkedMono]
             {
                 const auto buses = configureBuses(*plugin, unlinkedMono);
                 measured = buses;
@@ -2845,19 +2891,24 @@ void PluginRack::releaseForQuit()
     restorePosted_ = false;
     if (backgroundInstantiate_ != nullptr)
     {
-        // The loader may be inside callSync. This thread has to keep
-        // dispatching or that wait never finishes.
-        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        // The loader may be blocked in callAsync, waiting for this thread.
+        // Run that job here, then the loader can exit. Modal loops are off,
+        // so the message queue is not pumped from this wait.
+        const auto start = juce::Time::getMillisecondCounter();
+        while (backgroundInstantiate_->isThreadRunning()
+               && juce::Time::getMillisecondCounter() - start < 8000)
         {
-            if (messages->isThisTheMessageThread())
+            std::shared_ptr<MessageThreadJob> job;
             {
-                const auto start = juce::Time::getMillisecondCounter();
-                while (backgroundInstantiate_->isThreadRunning()
-                       && juce::Time::getMillisecondCounter() - start < 8000)
-                    messages->runDispatchLoopUntil(20);
+                std::lock_guard<std::mutex> lock(offThreadMutex_);
+                job = messageJob_;
             }
+            completeMessageJob(job);
+            if (! backgroundInstantiate_->isThreadRunning())
+                break;
+            juce::Thread::sleep(2);
         }
-        if (backgroundInstantiate_->stopThread(500))
+        if (backgroundInstantiate_->stopThread(200))
         {
             backgroundInstantiate_.reset();
             std::lock_guard<std::mutex> lock(offThreadMutex_);

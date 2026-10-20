@@ -419,6 +419,9 @@ private:
     bool gravesPosted_ = false;
     bool condemnPosted_ = false;
     bool quitting_ = false;
+    struct MessageThreadJob;
+    std::shared_ptr<MessageThreadJob> messageJob_;
+    bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
     std::vector<std::pair<int, int>> blockedSlots_;
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;

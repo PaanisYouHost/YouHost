@@ -5843,7 +5843,7 @@ void testBeta090()
     CHECK(busSource.find("pluginProcessWidth") != std::string::npos);
     CHECK(busSource.find("measurePluginProbe") == std::string::npos);
     CHECK(busSource.find("probe silent, not activated") == std::string::npos);
-    CHECK(busSource.find("callSync") != std::string::npos);
+    CHECK(busSource.find("callAsync runs this on the message thread") != std::string::npos);
     CHECK(busSource.find("skippedDb") == std::string::npos);
     CHECK(busSource.find("pluginCallbackSamples") != std::string::npos);
     CHECK(busSource.find("kPluginSilentProbeMessage") == std::string::npos);
