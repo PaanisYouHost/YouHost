@@ -334,8 +334,8 @@ private:
     std::mutex offThreadMutex_;
     std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
     juce::String offThreadError_;
-    // Bus setup and prepareToPlay run on the loader thread. The message
-    // thread only reads this after that work has finished.
+    // The loader asks the message thread to run bus setup and prepareToPlay,
+    // then reads this. The audio thread is the first processBlock.
     struct OffThreadBuses
     {
         bool ready = false;
@@ -419,6 +419,10 @@ private:
     bool gravesPosted_ = false;
     bool condemnPosted_ = false;
     bool quitting_ = false;
+    struct MessageThreadJob;
+    std::shared_ptr<MessageThreadJob> messageJob_;
+    static void completeMessageJob(const std::shared_ptr<MessageThreadJob>& job);
+    bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
     std::vector<std::pair<int, int>> blockedSlots_;
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;

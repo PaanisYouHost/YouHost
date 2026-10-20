@@ -230,6 +230,22 @@ inline bool trailingOutputMissing(const ChannelMaskView& view) noexcept
     return view.solidPrefix && view.reported == view.active + 1 && view.active > 0;
 }
 
+// How many samples a probe has to render before a delayed output can be heard.
+// `latencySamples` is the plugin's reported delay. The length is capped so a
+// huge latency cannot turn plugin load into a long offline render.
+inline int probeRenderSamples(int block, int latencySamples) noexcept
+{
+    if (block <= 0)
+        return 0;
+    const int tone = std::min(block * 4, 2048);
+    int need = tone;
+    if (latencySamples > 0)
+        need = std::max(tone, latencySamples + block);
+    need = std::min(need, 16384);
+    const int padded = ((need + block - 1) / block) * block;
+    return std::min(padded, 16384);
+}
+
 // One processBlock length. A callback that fits in the prepared maximum is
 // one call, even when it is shorter than that maximum. A longer callback is
 // cut into prepared-sized pieces. It is never one block bigger than the
@@ -244,6 +260,12 @@ inline int pluginCallbackSamples(int numSamples, int preparedBlock) noexcept
 
 // Output at or below this is silence. The probe tone is about -15 dB.
 inline constexpr float kProbeSilenceDb = -90.0f;
+
+// A silent reading is not proof the plugin is broken. One short render is
+// silence for a lookahead limiter, and a gate is silence until it opens.
+// Refusing on that reading turns off working plugins. The audio thread is
+// the first real process, on the same layout and block the plugin was prepared for.
+inline constexpr bool kRefuseSilentProbe = false;
 
 struct PluginProbeLevels
 {
@@ -274,7 +296,8 @@ inline PluginProbeLevels measurePluginProbe(int mainIn,
                                            int totalOut,
                                            int block,
                                            double rate,
-                                           Process&& process)
+                                           Process&& process,
+                                           int latencySamples = 0)
 {
     PluginProbeLevels levels;
     if (mainIn < 1 || mainOut < 1 || totalIn < 1 || totalOut < 1 || block <= 0 || rate <= 0.0)
@@ -284,9 +307,10 @@ inline PluginProbeLevels measurePluginProbe(int mainIn,
     if (width > kCap)
         return levels;
 
-    constexpr int kToneCap = 2048;
-    const int tone = std::min(block * 4, kToneCap);
-    const int padded = ((tone + block - 1) / block) * block;
+    const int padded = probeRenderSamples(block, latencySamples);
+    const int tone = latencySamples > 0 ? std::min(block, std::max(padded - latencySamples, 0))
+                                        : std::min(padded, std::min(block * 4, 2048));
+    const int measureAt = latencySamples > 0 ? std::min(latencySamples, std::max(padded - std::max(tone, 1), 0)) : 0;
     std::vector<float> storage(static_cast<std::size_t>(width) * static_cast<std::size_t>(padded), 0.0f);
     float* base[kCap] {};
     for (int channel = 0; channel < width; ++channel)
@@ -315,9 +339,9 @@ inline PluginProbeLevels measurePluginProbe(int mainIn,
 
     auto levelOf = [&](int channel)
     {
-        if (channel < 0 || channel >= width || base[channel] == nullptr)
+        if (channel < 0 || channel >= width || base[channel] == nullptr || tone <= 0)
             return -120.0f;
-        return amplitudeDb(meanSquare(base[channel], tone));
+        return amplitudeDb(meanSquare(base[channel] + measureAt, tone));
     };
 
     std::vector<float> mono(static_cast<std::size_t>(padded), 0.0f);
@@ -337,12 +361,14 @@ inline PluginProbeLevels measurePluginProbe(int mainIn,
     runBlocks(mono.data(), true);
     levels.leftDb = levelOf(0);
     levels.rightDb = mainOut > 1 && width > 1 ? levelOf(1) : levels.leftDb;
-    if (mainOut > 1 && width > 1)
+    if (mainOut > 1 && width > 1 && tone > 0)
     {
+        const float* left = base[0] + measureAt;
+        const float* right = base[1] + measureAt;
         double sum = 0.0;
         for (int index = 0; index < tone; ++index)
         {
-            const float mixed = (base[0][index] + base[1][index]) * 0.5f;
+            const float mixed = (left[index] + right[index]) * 0.5f;
             sum += static_cast<double>(mixed) * static_cast<double>(mixed);
         }
         levels.sumDb = amplitudeDb(static_cast<float>(sum / static_cast<double>(std::max(tone, 1))));
@@ -410,6 +436,26 @@ struct SidechainPassthrough
                     return;
                 }
             }
+        }
+    }
+};
+
+// Delays the first channel by `delay` samples. A probe that stops before that
+// delay hears silence even though the plugin is a straight copy.
+struct LookaheadDelay
+{
+    int delay = 3000;
+    mutable std::vector<float> history;
+
+    void operator()(float* const* channels, int numChannels, int numSamples) const
+    {
+        if (channels == nullptr || numChannels < 1 || channels[0] == nullptr || numSamples <= 0)
+            return;
+        for (int index = 0; index < numSamples; ++index)
+        {
+            history.push_back(channels[0][index]);
+            const int at = static_cast<int>(history.size()) - 1 - delay;
+            channels[0][index] = at >= 0 ? history[static_cast<std::size_t>(at)] : 0.0f;
         }
     }
 };

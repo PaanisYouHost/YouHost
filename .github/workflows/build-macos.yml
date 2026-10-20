@@ -206,15 +206,17 @@ jobs:
           body: |
             2026-10-20
 
-            YouHost 1.0.4 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.5 is a prerelease for testing. It is not the Latest release.
 
-            - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence. If the probe is still silent, the plugin is not activated. youhost.log says why.
-            - A plugin is processed once per device callback when that callback fits the prepared block. A shorter callback is not held until a larger block, so one light plugin does not spend a long process inside a short buffer.
-            - Opening a plugin editor can block the window for a while. Audio and recording keep running. The audio thread does not wait on that window.
+            - VST3 prepare (setupProcessing and setActive) runs on the message thread. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule.
+            - A load-time silence reading no longer turns a plugin off. Lookahead plugins and gates are silent until they have had enough audio, and that reading was rejecting working plugins.
+            - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence.
+            - A plugin is processed once per device callback when that callback fits the prepared block. A shorter callback is not held until a larger block.
+            - Opening a plugin editor can block the window for a while. The plugin keeps processing, so editors that wait for audio can open. Audio and recording keep running. The audio thread does not wait on that window.
             - After a crash, the next launch names the last plugin that was active or loading and offers Open session without this plugin. That plugin is left out. Its slot stays in the session file. Recording is not stopped.
             - Sidechain plugins, including FabFilter Pro-C and Pro-Q, keep the stereo main bus they opened with, including on a mono channel. The sidechain stays on and is fed silence. Audio keeps running.
             - A plugin editor opens only after that plugin's load has finished, so opening the editor cannot freeze the app.
-            - Bus setup and prepare run on the plugin loader, off the message thread, so a slow plugin cannot freeze the app.
+            - Bus setup and prepare run on the message thread. The loader waits for that, then returns. The audio thread does not run those calls.
             - A slow plugin load still stays off the audio thread.
             - Help is in English, in a window you can scroll. The ? tooltip is one short line.
             - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
