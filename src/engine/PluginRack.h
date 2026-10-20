@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace youhost
@@ -156,6 +157,7 @@ public:
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
+    void setBlockedSlots(const std::vector<std::pair<int, int>>& slots);
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
@@ -256,6 +258,7 @@ private:
     void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
+    bool isSlotBlocked(int channel, int slot) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {});
     bool validSlot(int channel, int slot) const noexcept;
 
@@ -394,6 +397,7 @@ private:
     bool condemnPosted_ = false;
     bool quitting_ = false;
     juce::StringArray blocked_;
+    std::vector<std::pair<int, int>> blockedSlots_;
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 

@@ -208,6 +208,7 @@ jobs:
 
             YouHost 1.0.3 is a prerelease for testing. It is not the Latest release.
 
+            - After a crash, the next launch names the last plugin that was active or loading and offers Open session without this plugin. That plugin is left out. Its slot stays in the session file. Recording is not stopped.
             - Sidechain plugins, including FabFilter Pro-C and Pro-Q, keep the stereo main bus they opened with, including on a mono channel. The sidechain stays on and is fed silence. Audio keeps running.
             - A plugin editor opens only after that plugin's load has finished, so opening the editor cannot freeze the app.
             - A slow plugin load still stays off the audio thread.

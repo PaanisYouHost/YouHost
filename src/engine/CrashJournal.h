@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -120,15 +121,17 @@ inline CrashJournal readCrashJournal(std::string_view text)
     return journal;
 }
 
+// The most recently touched slot is last. "Last active" and "last loaded"
+// are the marks at the end of the journal, not the first one that loaded.
 inline void upsertCrashMark(CrashJournal& journal, CrashMark mark)
 {
     journal.clean = false;
-    for (auto& existing : journal.marks)
+    for (std::size_t index = 0; index < journal.marks.size(); ++index)
     {
-        if (existing.channel == mark.channel && existing.slot == mark.slot)
+        if (journal.marks[index].channel == mark.channel && journal.marks[index].slot == mark.slot)
         {
-            existing = std::move(mark);
-            return;
+            journal.marks.erase(journal.marks.begin() + static_cast<std::ptrdiff_t>(index));
+            break;
         }
     }
     journal.marks.push_back(std::move(mark));
@@ -142,6 +145,73 @@ inline void eraseCrashMark(CrashJournal& journal, int channel, int slot)
         if (mark.channel != channel || mark.slot != slot)
             kept.push_back(std::move(mark));
     journal.marks.swap(kept);
+}
+
+// Exact button on the unclean-start dialog. No trailing period.
+inline constexpr const char* kOpenSessionWithoutPlugin = "Open session without this plugin";
+
+// The last plugin that reached "active", and the last one still "loading".
+// Other loaded plugins stay. If neither phase is present, the last mark is used.
+inline std::vector<CrashMark> crashPluginsToSkip(const CrashJournal& journal)
+{
+    const CrashMark* lastActive = nullptr;
+    const CrashMark* lastLoading = nullptr;
+    for (const auto& mark : journal.marks)
+    {
+        if (mark.phase == "active")
+            lastActive = &mark;
+        else if (mark.phase == "loading" || mark.phase == "load")
+            lastLoading = &mark;
+    }
+
+    std::vector<const CrashMark*> chosen;
+    const auto consider = [&](const CrashMark* mark)
+    {
+        if (mark == nullptr)
+            return;
+        for (const auto* existing : chosen)
+            if (existing->channel == mark->channel && existing->slot == mark->slot)
+                return;
+        chosen.push_back(mark);
+    };
+
+    if (lastLoading != nullptr && (lastActive == nullptr || lastLoading > lastActive))
+    {
+        consider(lastLoading);
+        consider(lastActive);
+    }
+    else
+    {
+        consider(lastActive);
+        consider(lastLoading);
+    }
+
+    if (chosen.empty() && ! journal.marks.empty())
+        consider(&journal.marks.back());
+
+    std::vector<CrashMark> out;
+    out.reserve(chosen.size());
+    for (const auto* mark : chosen)
+        out.push_back(*mark);
+    return out;
+}
+
+inline std::string crashDialogMessage(const CrashJournal& journal)
+{
+    const auto skip = crashPluginsToSkip(journal);
+    std::string text;
+    if (skip.empty())
+        text += "A plugin may have crashed YouHost.\n";
+    for (const auto& mark : skip)
+    {
+        text += mark.name.empty() ? "A plugin" : mark.name;
+        text += " may have crashed YouHost.\n";
+    }
+    text += "\n";
+    text += kOpenSessionWithoutPlugin;
+    text += " leaves that plugin out of this launch and keeps its slot in the session file.\n";
+    text += "Load them anyway if you still want to try it. Recording is not stopped.\n";
+    return text;
 }
 
 } // namespace youhost

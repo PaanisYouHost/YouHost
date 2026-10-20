@@ -1,4 +1,5 @@
 #include "YouHostApplication.h"
+#include "engine/CrashJournal.h"
 #include "engine/VersionLabel.h"
 #include "engine/PluginCatalogue.h"
 #include "ui/MainComponent.h"
@@ -108,7 +109,7 @@ void YouHostApplication::openWindow()
             juce::AlertWindow::WarningIcon,
             "A plugin may have crashed YouHost",
             engine_->uncleanPluginMessage(),
-            "Leave them off",
+            kOpenSessionWithoutPlugin,
             "Load them anyway",
             nullptr,
             juce::ModalCallbackFunction::create([this](int result)

@@ -1676,6 +1676,99 @@ void testCrashJournal()
     const auto dirty = youhost::readCrashJournal("mark\tactive\t1\t0\tName\tid\n");
     CHECK(! dirty.clean);
     CHECK(dirty.marks.size() == 1);
+
+    youhost::CrashJournal session;
+    youhost::CrashMark eq;
+    eq.phase = "active";
+    eq.channel = 0;
+    eq.slot = 0;
+    eq.name = "Pro-Q 4";
+    eq.identifier = "au.proq";
+    youhost::upsertCrashMark(session, eq);
+    youhost::CrashMark slate;
+    slate.phase = "active";
+    slate.channel = 4;
+    slate.slot = 0;
+    slate.name = "Slate Bus Clipper";
+    slate.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(session, slate);
+    youhost::upsertCrashMark(session, eq);
+    CHECK(session.marks.back().name == "Pro-Q 4");
+    youhost::CrashMark loading;
+    loading.phase = "loading";
+    loading.channel = 4;
+    loading.slot = 1;
+    loading.name = "Slate Bus Clipper";
+    loading.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(session, loading);
+    const auto skip = youhost::crashPluginsToSkip(session);
+    CHECK(skip.size() == 2);
+    CHECK(skip[0].name == "Slate Bus Clipper");
+    CHECK(skip[0].phase == "loading");
+    CHECK(skip[0].channel == 4);
+    CHECK(skip[0].slot == 1);
+    CHECK(skip[1].name == "Pro-Q 4");
+    CHECK(skip[1].phase == "active");
+
+    youhost::CrashJournal idle;
+    youhost::CrashMark only;
+    only.phase = "active";
+    only.channel = 1;
+    only.slot = 0;
+    only.name = "Slate Bus Clipper";
+    only.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(idle, only);
+    const auto idleSkip = youhost::crashPluginsToSkip(idle);
+    CHECK(idleSkip.size() == 1);
+    CHECK(idleSkip[0].name == "Slate Bus Clipper");
+    CHECK(std::string(youhost::kOpenSessionWithoutPlugin) == "Open session without this plugin");
+    const auto message = youhost::crashDialogMessage(idle);
+    CHECK(message.find("Slate Bus Clipper") != std::string::npos);
+    CHECK(message.find(youhost::kOpenSessionWithoutPlugin) != std::string::npos);
+    CHECK(message.find("Recording is not stopped.") != std::string::npos);
+
+    youhost::SessionDocumentModel kept;
+    kept.version = youhost::kSessionFormatVersion;
+    youhost::SessionChannelRecord channel;
+    channel.index = 1;
+    youhost::SessionSlotRecord slot;
+    slot.index = 0;
+    slot.occupied = true;
+    slot.bypassed = true;
+    slot.pluginName = "Slate Bus Clipper";
+    slot.state = "slate-state";
+    channel.slots.push_back(slot);
+    kept.channels.push_back(channel);
+    const auto node = youhost::writeSessionModel(kept);
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(node, round, false));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].slots.size() == 1);
+    CHECK(round.channels[0].slots[0].occupied);
+    CHECK(round.channels[0].slots[0].bypassed);
+    CHECK(round.channels[0].slots[0].pluginName == "Slate Bus Clipper");
+    CHECK(round.channels[0].slots[0].state == "slate-state");
+
+    const auto help = youhost::shortcutHelpText();
+    CHECK(help.find("What's new") != std::string::npos);
+    CHECK(help.find("Open session without this plugin") != std::string::npos);
+    CHECK(help.find("Recording is not stopped.") != std::string::npos);
+    const auto app = readWorkspaceFile("src/YouHostApplication.cpp");
+    CHECK(app.find("kOpenSessionWithoutPlugin") != std::string::npos);
+    CHECK(app.find("Leave them off") == std::string::npos);
+    const auto engine = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto choiceAt = engine.find("void AudioEngine::acceptCrashChoice");
+    const auto quitAt = engine.find("void AudioEngine::prepareForQuit");
+    CHECK(choiceAt != std::string::npos && quitAt != std::string::npos && choiceAt < quitAt);
+    const auto choice = engine.substr(choiceAt, quitAt - choiceAt);
+    CHECK(choice.find("crashPluginsToSkip") != std::string::npos);
+    CHECK(choice.find("recorder_->stop") == std::string::npos);
+    CHECK(choice.find("pressTransport") == std::string::npos);
+    CHECK(choice.find("prepareForQuit") == std::string::npos);
+    const auto rack = readWorkspaceFile("src/engine/PluginRack.cpp");
+    CHECK(rack.find("parkedSlot") != std::string::npos);
+    CHECK(rack.find("keeps the plugin") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos);
 }
 
 void testDeviceWatch()
@@ -5022,6 +5115,7 @@ void testReleaseChecklist()
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-20") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
