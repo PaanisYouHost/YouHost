@@ -306,6 +306,38 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     return choice;
 }
 
+void logHostedPlugin(AppSettings* settings,
+                     const juce::PluginDescription& description,
+                     const BusChoice& buses,
+                     StereoFold fold,
+                     double rate,
+                     int block,
+                     int latencySamples)
+{
+    if (settings == nullptr || block <= 0)
+        return;
+
+    juce::String line;
+    line << "plugin " << description.name
+         << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
+         << " opened " << buses.openInputs << "/" << buses.openOutputs
+         << " supports 1/1=" << (buses.supportMono ? "yes" : "no")
+         << " 1/2=" << (buses.supportSide ? "yes" : "no")
+         << " 2/2=" << (buses.supportStereo ? "yes" : "no")
+         << " chose " << chosenLayoutName(buses.chosen)
+         << " extra=" << extraBusModeName(buses.usedExtra)
+         << " main " << buses.inputChannels << "/" << buses.outputChannels
+         << " total " << buses.totalInputs << "/" << buses.totalOutputs
+         << " fold " << stereoFoldToken(fold)
+         << " rate " << juce::String(rate, 0)
+         << " block " << block
+         << " latency " << latencySamples
+         << " audio-thread process, channels " << buses.totalInputs << "/" << buses.totalOutputs;
+    appendHostLog(*settings, line);
+}
+
+} // namespace
+
 struct PluginRack::MessageThreadJob
 {
     std::mutex mutex;
@@ -371,38 +403,6 @@ bool PluginRack::runOnMessageThread(const std::function<void()>& fn)
     }
     return true;
 }
-
-void logHostedPlugin(AppSettings* settings,
-                     const juce::PluginDescription& description,
-                     const BusChoice& buses,
-                     StereoFold fold,
-                     double rate,
-                     int block,
-                     int latencySamples)
-{
-    if (settings == nullptr || block <= 0)
-        return;
-
-    juce::String line;
-    line << "plugin " << description.name
-         << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
-         << " opened " << buses.openInputs << "/" << buses.openOutputs
-         << " supports 1/1=" << (buses.supportMono ? "yes" : "no")
-         << " 1/2=" << (buses.supportSide ? "yes" : "no")
-         << " 2/2=" << (buses.supportStereo ? "yes" : "no")
-         << " chose " << chosenLayoutName(buses.chosen)
-         << " extra=" << extraBusModeName(buses.usedExtra)
-         << " main " << buses.inputChannels << "/" << buses.outputChannels
-         << " total " << buses.totalInputs << "/" << buses.totalOutputs
-         << " fold " << stereoFoldToken(fold)
-         << " rate " << juce::String(rate, 0)
-         << " block " << block
-         << " latency " << latencySamples
-         << " audio-thread process, channels " << buses.totalInputs << "/" << buses.totalOutputs;
-    appendHostLog(*settings, line);
-}
-
-} // namespace
 
 struct PluginRack::LiveGraph
 {
