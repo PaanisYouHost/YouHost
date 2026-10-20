@@ -13,6 +13,12 @@ Two basic rules
 - HOST never affects the recording. Recording is always the raw input, before the plugins.
 - Nothing you do on HOST (plugins, bypass, gain, groups, names, colours) stops recording.
 
+What's new
+----------
+- 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
+- A sidechain plugin keeps the stereo bus it opened with. Its editor opens after the load has finished.
+- Bus setup and prepare stay off the message thread, so a slow plugin does not freeze the app.
+
 1. Quick start – first recording in 5 steps
 -------------------------------------------
 1. In the startup window, choose your audio card (YouHost always starts in Offline).
@@ -142,7 +148,7 @@ Shortcuts do nothing while a text field has focus.
 - Sample rate mismatch: a red line names both rates, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
 - Dropouts: open DROPOUTS (3). Raise the buffer to 64; see section 2.
 - CPU: open CPU (4). DSP 100% = the buffer is full and the next callback drops out. You can see each plugin's share.
-- Plugin won't load: scan it again (S > Rescan selected). After a crash, the next launch names the plugin that was loading.
+- Plugin won't load: scan it again (S > Rescan selected). After a crash, the next launch offers Open session without this plugin. The slot stays in the session file.
 - "Damaged" / macOS blocks the app: right-click YouHost.app > Open, or System Settings > Privacy & Security > Open Anyway, or in Terminal:
   xattr -dr com.apple.quarantine /Applications/YouHost.app
 - Logs: Application Support > Ambient Audio > YouHost (youhost.log, crash-journal.txt).

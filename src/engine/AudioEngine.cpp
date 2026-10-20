@@ -1881,22 +1881,22 @@ bool AudioEngine::takeUncleanShutdown()
 
 juce::String AudioEngine::uncleanPluginMessage() const
 {
-    juce::String text;
-    for (const auto& mark : journal_.marks)
-    {
-        const auto name = mark.name.empty() ? std::string("A plugin") : mark.name;
-        text << juce::String::fromUTF8(name.c_str()) << " may have crashed YouHost.\n";
-    }
-    text << "\nLeave them off, or load them anyway. Suspicious plugins are listed in the scanner.\n";
+    auto text = juce::String::fromUTF8(crashDialogMessage(journal_).c_str());
     text << "Crash notes are in youhost.log and crash-journal.txt in the YouHost support folder.";
     return text;
 }
 
 void AudioEngine::acceptCrashChoice(bool leaveOff)
 {
+    // Recording is not touched. This runs before the session window, and it
+    // must not stop a take if it is ever reached while audio is up.
+    const auto skip = crashPluginsToSkip(journal_);
     juce::StringArray blocked;
-    for (const auto& mark : journal_.marks)
+    std::vector<std::pair<int, int>> slots;
+    slots.reserve(skip.size());
+    for (const auto& mark : skip)
     {
+        slots.emplace_back(mark.channel, mark.slot);
         if (mark.identifier.empty())
             continue;
         const auto identifier = juce::String::fromUTF8(mark.identifier.c_str());
@@ -1905,7 +1905,10 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
     }
 
     if (leaveOff && rack_ != nullptr)
+    {
         rack_->setBlockedIdentifiers(blocked);
+        rack_->setBlockedSlots(slots);
+    }
 
     journal_.marks.clear();
     journal_.clean = false;

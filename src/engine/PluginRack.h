@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace youhost
@@ -156,6 +157,7 @@ public:
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
+    void setBlockedSlots(const std::vector<std::pair<int, int>>& slots);
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
@@ -237,6 +239,7 @@ private:
     void completeRestoreStep(std::uint64_t generation);
     void finishRestore();
     void noteSlot(int channel);
+    void scheduleDeferredEditor(int channel, int slot);
     void pumpBackgroundQueue();
     void launchBackgroundLoad();
     void deliverOffThreadInstance();
@@ -255,6 +258,7 @@ private:
     void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
+    bool isSlotBlocked(int channel, int slot) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {});
     bool validSlot(int channel, int slot) const noexcept;
 
@@ -330,6 +334,27 @@ private:
     std::mutex offThreadMutex_;
     std::unique_ptr<juce::AudioPluginInstance> offThreadInstance_;
     juce::String offThreadError_;
+    // Bus setup and prepareToPlay run on the loader thread. The message
+    // thread only reads this after that work has finished.
+    struct OffThreadBuses
+    {
+        bool ready = false;
+        bool ok = false;
+        int inputChannels = 0;
+        int outputChannels = 0;
+        int totalInputs = 0;
+        int totalOutputs = 0;
+        int openInputs = 0;
+        int openOutputs = 0;
+        bool supportMono = false;
+        bool supportSide = false;
+        bool supportStereo = false;
+        bool openedStereo = false;
+        bool hasExtraBuses = false;
+        int latencySamples = 0;
+        juce::StringArray attempts;
+    };
+    OffThreadBuses offThreadBuses_;
     int jobChannel_ = 0;
     int jobSlot_ = 0;
     std::uint64_t jobTicket_ = 0;
@@ -393,6 +418,7 @@ private:
     bool condemnPosted_ = false;
     bool quitting_ = false;
     juce::StringArray blocked_;
+    std::vector<std::pair<int, int>> blockedSlots_;
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 

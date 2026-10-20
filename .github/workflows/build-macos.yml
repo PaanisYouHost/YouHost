@@ -201,16 +201,21 @@ jobs:
         with:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: ${{ env.YOUHOST_ZIP }}
-          prerelease: false
-          make_latest: true
+          prerelease: true
+          make_latest: false
           body: |
-            2026-10-19
+            2026-10-20
 
+            YouHost 1.0.3 is a prerelease for testing. It is not the Latest release.
+
+            - After a crash, the next launch names the last plugin that was active or loading and offers Open session without this plugin. That plugin is left out. Its slot stays in the session file. Recording is not stopped.
+            - Sidechain plugins, including FabFilter Pro-C and Pro-Q, keep the stereo main bus they opened with, including on a mono channel. The sidechain stays on and is fed silence. Audio keeps running.
+            - A plugin editor opens only after that plugin's load has finished, so opening the editor cannot freeze the app.
+            - Bus setup and prepare run on the plugin loader, off the message thread, so a slow plugin cannot freeze the app.
+            - A slow plugin load still stays off the audio thread.
             - Help is in English, in a window you can scroll. The ? tooltip is one short line.
             - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
-            - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. The sidechain stays on and is fed silence. If a plugin still will not open, youhost.log says why.
-            - A slow plugin load no longer stalls audio.
-            - Opening several plugins at once no longer freezes the app.
+            - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. If a plugin still will not open, youhost.log says why.
             - The device list at startup no longer opens every audio card just to count its channels.
             - Sitting idle is no longer written to youhost.log as a stall.
             - A sample-rate mismatch shows a red line, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.

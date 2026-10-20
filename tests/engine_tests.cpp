@@ -1676,6 +1676,99 @@ void testCrashJournal()
     const auto dirty = youhost::readCrashJournal("mark\tactive\t1\t0\tName\tid\n");
     CHECK(! dirty.clean);
     CHECK(dirty.marks.size() == 1);
+
+    youhost::CrashJournal session;
+    youhost::CrashMark eq;
+    eq.phase = "active";
+    eq.channel = 0;
+    eq.slot = 0;
+    eq.name = "Pro-Q 4";
+    eq.identifier = "au.proq";
+    youhost::upsertCrashMark(session, eq);
+    youhost::CrashMark slate;
+    slate.phase = "active";
+    slate.channel = 4;
+    slate.slot = 0;
+    slate.name = "Slate Bus Clipper";
+    slate.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(session, slate);
+    youhost::upsertCrashMark(session, eq);
+    CHECK(session.marks.back().name == "Pro-Q 4");
+    youhost::CrashMark loading;
+    loading.phase = "loading";
+    loading.channel = 4;
+    loading.slot = 1;
+    loading.name = "Slate Bus Clipper";
+    loading.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(session, loading);
+    const auto skip = youhost::crashPluginsToSkip(session);
+    CHECK(skip.size() == 2);
+    CHECK(skip[0].name == "Slate Bus Clipper");
+    CHECK(skip[0].phase == "loading");
+    CHECK(skip[0].channel == 4);
+    CHECK(skip[0].slot == 1);
+    CHECK(skip[1].name == "Pro-Q 4");
+    CHECK(skip[1].phase == "active");
+
+    youhost::CrashJournal idle;
+    youhost::CrashMark only;
+    only.phase = "active";
+    only.channel = 1;
+    only.slot = 0;
+    only.name = "Slate Bus Clipper";
+    only.identifier = "au.slate.bus";
+    youhost::upsertCrashMark(idle, only);
+    const auto idleSkip = youhost::crashPluginsToSkip(idle);
+    CHECK(idleSkip.size() == 1);
+    CHECK(idleSkip[0].name == "Slate Bus Clipper");
+    CHECK(std::string(youhost::kOpenSessionWithoutPlugin) == "Open session without this plugin");
+    const auto message = youhost::crashDialogMessage(idle);
+    CHECK(message.find("Slate Bus Clipper") != std::string::npos);
+    CHECK(message.find(youhost::kOpenSessionWithoutPlugin) != std::string::npos);
+    CHECK(message.find("Recording is not stopped.") != std::string::npos);
+
+    youhost::SessionDocumentModel kept;
+    kept.version = youhost::kSessionFormatVersion;
+    youhost::SessionChannelRecord channel;
+    channel.index = 1;
+    youhost::SessionSlotRecord slot;
+    slot.index = 0;
+    slot.occupied = true;
+    slot.bypassed = true;
+    slot.pluginName = "Slate Bus Clipper";
+    slot.state = "slate-state";
+    channel.slots.push_back(slot);
+    kept.channels.push_back(channel);
+    const auto node = youhost::writeSessionModel(kept);
+    youhost::SessionDocumentModel round;
+    CHECK(youhost::readSessionModel(node, round, false));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].slots.size() == 1);
+    CHECK(round.channels[0].slots[0].occupied);
+    CHECK(round.channels[0].slots[0].bypassed);
+    CHECK(round.channels[0].slots[0].pluginName == "Slate Bus Clipper");
+    CHECK(round.channels[0].slots[0].state == "slate-state");
+
+    const auto help = youhost::shortcutHelpText();
+    CHECK(help.find("What's new") != std::string::npos);
+    CHECK(help.find("Open session without this plugin") != std::string::npos);
+    CHECK(help.find("Recording is not stopped.") != std::string::npos);
+    const auto app = readWorkspaceFile("src/YouHostApplication.cpp");
+    CHECK(app.find("kOpenSessionWithoutPlugin") != std::string::npos);
+    CHECK(app.find("Leave them off") == std::string::npos);
+    const auto engine = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto choiceAt = engine.find("void AudioEngine::acceptCrashChoice");
+    const auto quitAt = engine.find("void AudioEngine::prepareForQuit");
+    CHECK(choiceAt != std::string::npos && quitAt != std::string::npos && choiceAt < quitAt);
+    const auto choice = engine.substr(choiceAt, quitAt - choiceAt);
+    CHECK(choice.find("crashPluginsToSkip") != std::string::npos);
+    CHECK(choice.find("recorder_->stop") == std::string::npos);
+    CHECK(choice.find("pressTransport") == std::string::npos);
+    CHECK(choice.find("prepareForQuit") == std::string::npos);
+    const auto rack = readWorkspaceFile("src/engine/PluginRack.cpp");
+    CHECK(rack.find("parkedSlot") != std::string::npos);
+    CHECK(rack.find("keeps the plugin") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos);
 }
 
 void testDeviceWatch()
@@ -5003,11 +5096,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.2"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.3"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.2"
+             && std::string(youhost::versionNumber()) == "1.0.3"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.2") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.3") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5016,13 +5109,13 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.2") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.2-macOS.zip") != std::string::npos
-             && checklistDoc.find("marked Latest") != std::string::npos
-             && checklistDoc.find("prerelease") == std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: true") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-19") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.3") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.3-macOS.zip") != std::string::npos
+             && checklistDoc.find("prerelease, not Latest") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-20") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
@@ -5632,6 +5725,58 @@ void testBeta090()
     youhost::mainLayoutAttemptOrder(true, wantIn, wantOut);
     CHECK(wantIn[0] == 1 && wantOut[0] == 1);
     CHECK(wantIn[1] == 2 && wantOut[1] == 2);
+    CHECK(youhost::sidechainKeepsStereoMain(true, true));
+    CHECK(! youhost::sidechainKeepsStereoMain(true, false));
+    CHECK(! youhost::sidechainKeepsStereoMain(false, true));
+    youhost::mainLayoutAttemptOrder(! youhost::sidechainKeepsStereoMain(true, true), wantIn, wantOut);
+    CHECK(wantIn[0] == 2 && wantOut[0] == 2);
+    CHECK(youhost::pluginProcessWidth(3, 2) == 3);
+    CHECK(youhost::pluginProcessWidth(4, 2) == 4);
+    CHECK(youhost::pluginProcessWidth(2, 1) == 2);
+    CHECK(youhost::pluginProcessWidth(0, 2) == 0);
+    // Stereo main plus a mono sidechain, one minute of 32-sample blocks.
+    // A short buffer (the host channel alone) is a failed block.
+    {
+        constexpr int kBlock = 32;
+        constexpr int kBlocks = 48000 * 60 / kBlock;
+        constexpr int kTotalIn = 3;
+        constexpr int kTotalOut = 2;
+        constexpr int kMainIn = 2;
+        const int width = youhost::pluginProcessWidth(kTotalIn, kTotalOut);
+        float storage[8][kBlock];
+        float* channels[8];
+        for (int index = 0; index < 8; ++index)
+            channels[index] = storage[index];
+        float left[kBlock];
+        float right[kBlock];
+        int faults = 0;
+        for (int block = 0; block < kBlocks; ++block)
+        {
+            for (int sample = 0; sample < kBlock; ++sample)
+            {
+                left[sample] = 0.1f;
+                right[sample] = -0.05f;
+                for (int channel = 0; channel < width; ++channel)
+                    storage[channel][sample] = 99.0f;
+            }
+            youhost::feedPluginChannels(channels, width, kMainIn, kBlock, left, right);
+            if (width < kTotalIn || width < kTotalOut)
+                ++faults;
+            for (int sample = 0; sample < kBlock; ++sample)
+            {
+                if (storage[0][sample] != 0.1f || storage[1][sample] != -0.05f)
+                    ++faults;
+                if (storage[2][sample] != 0.0f)
+                    ++faults;
+                storage[0][sample] *= 0.5f;
+                storage[1][sample] *= 0.5f;
+            }
+            if (storage[2][0] != 0.0f)
+                ++faults;
+        }
+        CHECK(faults == 0);
+        std::cout << "sidechain process 60 s, width " << width << ", faults " << faults << "\n";
+    }
     const auto busSource = readWorkspaceFile("src/engine/PluginRack.cpp");
     CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
     CHECK(busSource.find("isThisTheMessageThread") != std::string::npos);
@@ -5639,6 +5784,34 @@ void testBeta090()
     CHECK(busSource.find("kept opened layout") != std::string::npos);
     CHECK(busSource.find("restoreGeneration != 0 && catalogue_.prefersBackgroundInstance") == std::string::npos);
     CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
+    CHECK(busSource.find("sidechainKeepsStereoMain") != std::string::npos);
+    CHECK(busSource.find("pluginProcessWidth") != std::string::npos);
+    CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
+    const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
+    CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
+    CHECK(finishLoad.find("openEditor(") == std::string::npos);
+    CHECK(finishLoad.find("createEditor") == std::string::npos);
+    CHECK(finishLoad.find("prepareToPlay") == std::string::npos);
+    CHECK(finishLoad.find("configureBuses") == std::string::npos);
+    CHECK(finishLoad.find("setBusesLayout") == std::string::npos);
+    const auto loaderAt = busSource.find("createInstanceBlocking");
+    const auto deliverAt = busSource.find("deliverOffThreadInstance", loaderAt);
+    CHECK(loaderAt != std::string::npos && deliverAt != std::string::npos && loaderAt < deliverAt);
+    const auto loaderRun = busSource.substr(loaderAt, deliverAt - loaderAt);
+    CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    CHECK(loaderRun.find("configureBuses") != std::string::npos);
+    CHECK(loaderRun.find("lifeLock_") == std::string::npos);
+    CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") != std::string::npos);
+    const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
+    CHECK(deferredEditor.find("callAsync") != std::string::npos);
+    CHECK(deferredEditor.find("backgroundBusy_") != std::string::npos);
+    CHECK(deferredEditor.find("lifeLock_") == std::string::npos);
+    const auto editorBody = sliceBetween(busSource, "void PluginRack::openEditor", "void PluginRack::setGlobalKeyListener");
+    CHECK(editorBody.find("createEditorAndMakeActive") != std::string::npos);
+    CHECK(editorBody.find("lifeLock_") != std::string::npos);
+    const auto lockAt = editorBody.find("lifeLock_");
+    const auto createAt = editorBody.find("createEditorAndMakeActive");
+    CHECK(lockAt != std::string::npos && createAt != std::string::npos && lockAt < createAt);
     CHECK(busSource.find("backgroundQueue_") != std::string::npos);
     CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes:") == std::string::npos);
