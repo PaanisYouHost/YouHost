@@ -322,6 +322,7 @@ inline const char* kPluginMonoChannelMessage = "This plugin can't be used on a m
 inline const char* kPluginStereoChannelMessage = "A mono plugin can't be used on a stereo channel";
 inline const char* kPluginLayoutMessage = "This plugin needs a sidechain/layout YouHost can't host";
 inline const char* kPluginDidNotOpenMessage = "The plugin did not open. See youhost.log.";
+inline const char* kPluginSilentProbeMessage = "This plugin produced silence. It is turned off. See youhost.log.";
 
 // `hostError` is the text the AU or VST3 wrapper returned. It wins when the
 // instance never existed. A layout miss uses one of the three specific lines.

@@ -1983,6 +1983,10 @@ void testDryPathIsBitIdentical()
     CHECK(youhost::pluginBlockFeedsDirect(128, 128));
     CHECK(youhost::pluginBlockFeedsDirect(256, 128));
     CHECK(! youhost::pluginBlockFeedsDirect(64, 128));
+    CHECK(youhost::pluginCallbackSamples(64, 64) == 64);
+    CHECK(youhost::pluginCallbackSamples(32, 64) == 32);
+    CHECK(youhost::pluginCallbackSamples(96, 64) == 64);
+    CHECK(youhost::pluginCallbackSamples(0, 64) == 0);
     CHECK(youhost::fedSamplesAfter(128, 64, 1) == 0);
     CHECK(youhost::fedSamplesAfter(128, 64, 2) == 64);
     CHECK(youhost::fedSamplesAfter(128, 64, 4) == 192);
@@ -5096,11 +5100,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.3"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.4"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.3"
+             && std::string(youhost::versionNumber()) == "1.0.4"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.3") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.4") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5109,8 +5113,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.3") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.3-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.4") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.4-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -5777,6 +5781,44 @@ void testBeta090()
         CHECK(faults == 0);
         std::cout << "sidechain process 60 s, width " << width << ", faults " << faults << "\n";
     }
+    // Real 4/2 layout: stereo main plus a stereo sidechain. The probe must
+    // process that width and come back with audio, not the old hardcoded -120.
+    {
+        youhost::SidechainPassthrough plugin;
+        const auto levels = youhost::measurePluginProbe(2, 2, plugin.totalIn, plugin.totalOut, 32, 48000.0, plugin);
+        CHECK(levels.ran);
+        CHECK(! youhost::probeLevelsAreSilent(levels));
+        CHECK(levels.lowDb > -40.0f);
+        CHECK(levels.highDb > -40.0f);
+        CHECK(levels.leftDb > -40.0f);
+        CHECK(levels.rightDb > -40.0f);
+        std::cout << "sidechain probe 4/2 low " << levels.lowDb << " dB\n";
+        float storage[4][32];
+        for (int channel = 0; channel < 4; ++channel)
+            for (int sample = 0; sample < 32; ++sample)
+                storage[channel][sample] = 0.25f;
+        float* shortView[2] = { storage[0], storage[1] };
+        plugin(shortView, 2, 32);
+        CHECK(storage[0][0] == 0.0f);
+        float* aliased[4] = { storage[0], storage[1], storage[0], storage[1] };
+        for (int sample = 0; sample < 32; ++sample)
+        {
+            storage[0][sample] = 0.25f;
+            storage[1][sample] = 0.25f;
+        }
+        plugin(aliased, 4, 32);
+        CHECK(storage[0][0] == 0.0f);
+        const auto silent = youhost::measurePluginProbe(2, 2, 4, 2, 32, 48000.0,
+                                                         [](float* const* channels, int numChannels, int numSamples)
+                                                         {
+                                                             for (int channel = 0; channel < numChannels; ++channel)
+                                                                 if (channels[channel] != nullptr)
+                                                                     std::memset(channels[channel], 0, sizeof(float) * static_cast<std::size_t>(numSamples));
+                                                         });
+        CHECK(youhost::probeLevelsAreSilent(silent));
+        CHECK(std::string(youhost::kPluginSilentProbeMessage).find("silence") != std::string::npos);
+        CHECK(std::string(youhost::kPluginSilentProbeMessage).find("Could not load the plugin.") == std::string::npos);
+    }
     const auto busSource = readWorkspaceFile("src/engine/PluginRack.cpp");
     CHECK(busSource.find("checkBusesLayoutSupported refused; setBusesLayout accepted") != std::string::npos);
     CHECK(busSource.find("isThisTheMessageThread") != std::string::npos);
@@ -5786,6 +5828,17 @@ void testBeta090()
     CHECK(busSource.find("The loader thread creates the instance") != std::string::npos);
     CHECK(busSource.find("sidechainKeepsStereoMain") != std::string::npos);
     CHECK(busSource.find("pluginProcessWidth") != std::string::npos);
+    CHECK(busSource.find("measurePluginProbe") != std::string::npos);
+    CHECK(busSource.find("probe silent, not activated") != std::string::npos);
+    CHECK(busSource.find("skippedDb") == std::string::npos);
+    CHECK(busSource.find("pluginCallbackSamples") != std::string::npos);
+    CHECK(busSource.find("kPluginSilentProbeMessage") != std::string::npos);
+    const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
+    CHECK(processBody.find("MessageManager") == std::string::npos);
+    CHECK(processBody.find("pauseGate") == std::string::npos);
+    CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
+    CHECK(processBody.find("numSamples > blockSize_") != std::string::npos);
+    CHECK(processBody.find("lifeLock_") == std::string::npos);
     CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
     const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
     CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
@@ -5824,6 +5877,9 @@ void testBeta090()
     CHECK(audioCallback.find("refreshSampleRateWarning") == std::string::npos);
     CHECK(audioCallback.find("rateWarning_") == std::string::npos);
     CHECK(audioCallback.find("kAudioDevicePropertyNominalSampleRate") == std::string::npos);
+    CHECK(audioCallback.find("MessageManager") == std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("An editor stall does not signal the audio thread") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("The audio thread does not wait on the message thread") != std::string::npos);
     const auto rateRefresh = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                           "void AudioEngine::refreshSampleRateWarning",
                                           "void AudioEngine::watchClockSync");
@@ -5838,9 +5894,6 @@ void testBeta090()
                                          "void AudioEngine::changeListenerCallback");
     CHECK(clockWatch.find("refreshSampleRateWarning") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Sample rate mismatch: session 48 kHz, audio device 44.1 kHz") != std::string::npos);
-    const auto processBody = sliceBetween(busSource, "void PluginRack::process(", "void PluginRack::processJob");
-    CHECK(processBody.find("lifeLock_") == std::string::npos);
-    CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
     const auto deviceList = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                          "std::vector<ListedDevice> AudioEngine::connectedDevices()",
                                          "void AudioEngine::sampleLiveCpu");

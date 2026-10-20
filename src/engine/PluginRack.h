@@ -351,6 +351,7 @@ private:
         bool supportStereo = false;
         bool openedStereo = false;
         bool hasExtraBuses = false;
+        bool silent = false;
         int latencySamples = 0;
         juce::StringArray attempts;
     };
@@ -383,6 +384,7 @@ private:
     int triggerLoggedNotes_ = 0;
     std::atomic<bool> capturing_ { false };
     std::atomic<std::uint64_t> lastCallbackNs_ { 0 };
+    std::atomic<int> lastCallbackSamples_ { 0 };
     std::atomic<std::uint64_t> graphPublishSerial_ { 0 };
 
     std::unique_ptr<RealtimePool> pool_;
