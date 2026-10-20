@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace youhost
 {
@@ -227,5 +229,189 @@ inline bool trailingOutputMissing(const ChannelMaskView& view) noexcept
 {
     return view.solidPrefix && view.reported == view.active + 1 && view.active > 0;
 }
+
+// One processBlock length. A callback that fits in the prepared maximum is
+// one call, even when it is shorter than that maximum. A longer callback is
+// cut into prepared-sized pieces. It is never one block bigger than the
+// plugin was prepared for, and a short callback does not wait and then run
+// the full prepared block inside a single device period.
+inline int pluginCallbackSamples(int numSamples, int preparedBlock) noexcept
+{
+    if (numSamples <= 0 || preparedBlock <= 0)
+        return 0;
+    return numSamples <= preparedBlock ? numSamples : preparedBlock;
+}
+
+// Output at or below this is silence. The probe tone is about -15 dB.
+inline constexpr float kProbeSilenceDb = -90.0f;
+
+struct PluginProbeLevels
+{
+    float lowDb = -120.0f;
+    float highDb = -120.0f;
+    float leftDb = -120.0f;
+    float rightDb = -120.0f;
+    float sumDb = -120.0f;
+    bool ran = false;
+};
+
+inline bool probeLevelsAreSilent(const PluginProbeLevels& levels) noexcept
+{
+    if (! levels.ran)
+        return true;
+    const float best = std::max(std::max(levels.lowDb, levels.highDb),
+                                std::max(std::max(levels.leftDb, levels.rightDb), levels.sumDb));
+    return ! (best > kProbeSilenceDb);
+}
+
+// Separate channel storage, main copied into 0..mainIn-1, every other channel
+// zero. `process` sees width = max(totalIn, totalOut). A 4/2 sidechain plugin
+// therefore gets four distinct pointers, not the stereo host buffer.
+template <typename Process>
+inline PluginProbeLevels measurePluginProbe(int mainIn,
+                                           int mainOut,
+                                           int totalIn,
+                                           int totalOut,
+                                           int block,
+                                           double rate,
+                                           Process&& process)
+{
+    PluginProbeLevels levels;
+    if (mainIn < 1 || mainOut < 1 || totalIn < 1 || totalOut < 1 || block <= 0 || rate <= 0.0)
+        return levels;
+    const int width = std::max(totalIn, totalOut);
+    constexpr int kCap = 8;
+    if (width > kCap)
+        return levels;
+
+    constexpr int kToneCap = 2048;
+    const int tone = std::min(block * 4, kToneCap);
+    const int padded = ((tone + block - 1) / block) * block;
+    std::vector<float> storage(static_cast<std::size_t>(width) * static_cast<std::size_t>(padded), 0.0f);
+    float* base[kCap] {};
+    for (int channel = 0; channel < width; ++channel)
+        base[channel] = storage.data() + static_cast<std::size_t>(channel) * static_cast<std::size_t>(padded);
+
+    auto runBlocks = [&](const float* mono, bool copyRight)
+    {
+        const auto bytes = sizeof(float) * static_cast<std::size_t>(block);
+        const int fed = std::min(mainIn, width);
+        for (int offset = 0; offset < padded; offset += block)
+        {
+            float* view[kCap] {};
+            for (int channel = 0; channel < width; ++channel)
+            {
+                view[channel] = base[channel] + offset;
+                if (channel == 0 && fed >= 1)
+                    std::memcpy(view[channel], mono + offset, bytes);
+                else if (channel == 1 && fed >= 2 && copyRight)
+                    std::memcpy(view[channel], mono + offset, bytes);
+                else
+                    std::memset(view[channel], 0, bytes);
+            }
+            process(view, width, block);
+        }
+    };
+
+    auto levelOf = [&](int channel)
+    {
+        if (channel < 0 || channel >= width || base[channel] == nullptr)
+            return -120.0f;
+        return amplitudeDb(meanSquare(base[channel], tone));
+    };
+
+    std::vector<float> mono(static_cast<std::size_t>(padded), 0.0f);
+    fillProbeTone(mono.data(), tone, rate, 80.0f, 0.25f);
+    runBlocks(mono.data(), mainIn >= 2);
+    levels.lowDb = levelOf(0);
+
+    std::fill(storage.begin(), storage.end(), 0.0f);
+    std::fill(mono.begin(), mono.end(), 0.0f);
+    fillProbeTone(mono.data(), tone, rate, 6000.0f, 0.25f);
+    runBlocks(mono.data(), mainIn >= 2);
+    levels.highDb = levelOf(0);
+
+    std::fill(storage.begin(), storage.end(), 0.0f);
+    std::fill(mono.begin(), mono.end(), 0.0f);
+    fillProbeTone(mono.data(), tone, rate, 1000.0f, 0.25f);
+    runBlocks(mono.data(), true);
+    levels.leftDb = levelOf(0);
+    levels.rightDb = mainOut > 1 && width > 1 ? levelOf(1) : levels.leftDb;
+    if (mainOut > 1 && width > 1)
+    {
+        double sum = 0.0;
+        for (int index = 0; index < tone; ++index)
+        {
+            const float mixed = (base[0][index] + base[1][index]) * 0.5f;
+            sum += static_cast<double>(mixed) * static_cast<double>(mixed);
+        }
+        levels.sumDb = amplitudeDb(static_cast<float>(sum / static_cast<double>(std::max(tone, 1))));
+    }
+    else
+    {
+        levels.sumDb = levels.leftDb;
+    }
+    levels.ran = true;
+    return levels;
+}
+
+// 4 inputs (stereo main + stereo sidechain) and 2 outputs. Echoes the main
+// pair. A short buffer, a null sidechain pointer, an aliased sidechain, or a
+// sidechain that was not zeroed produces silence instead of reading off the
+// end of the buffer. That is the crash the live path has to avoid.
+struct SidechainPassthrough
+{
+    int totalIn = 4;
+    int totalOut = 2;
+
+    void operator()(float* const* channels, int numChannels, int numSamples) const noexcept
+    {
+        const int need = std::max(totalIn, totalOut);
+        auto silenceOut = [&]()
+        {
+            if (channels == nullptr || numSamples <= 0)
+                return;
+            const int outs = std::min(totalOut, numChannels);
+            for (int channel = 0; channel < outs; ++channel)
+                if (channels[channel] != nullptr)
+                    std::memset(channels[channel], 0, sizeof(float) * static_cast<std::size_t>(numSamples));
+        };
+        if (channels == nullptr || numChannels < need || numSamples <= 0)
+        {
+            silenceOut();
+            return;
+        }
+        for (int channel = 0; channel < need; ++channel)
+        {
+            if (channels[channel] == nullptr)
+            {
+                silenceOut();
+                return;
+            }
+        }
+        for (int channel = totalOut; channel < totalIn; ++channel)
+        {
+            for (int main = 0; main < totalOut; ++main)
+            {
+                if (channels[channel] == channels[main])
+                {
+                    silenceOut();
+                    return;
+                }
+            }
+        }
+        for (int channel = 2; channel < totalIn; ++channel)
+        {
+            for (int index = 0; index < numSamples; ++index)
+            {
+                if (channels[channel][index] != 0.0f)
+                {
+                    silenceOut();
+                    return;
+                }
+            }
+        }
+    }
+};
 
 } // namespace youhost

@@ -15,6 +15,7 @@ Two basic rules
 
 What's new
 ----------
+- 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence. If that probe is silent, the plugin stays off instead of being activated. A plugin editor can take a long time to open without stopping audio or recording.
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
 - A sidechain plugin keeps the stereo bus it opened with. Its editor opens after the load has finished.
 - Bus setup and prepare stay off the message thread, so a slow plugin does not freeze the app.

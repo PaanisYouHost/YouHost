@@ -163,7 +163,12 @@ private:
         };
         if (message)
             dump(clock.messageThread.load(std::memory_order_acquire), "\nmessage stack\n");
-        if (audio)
+        // An editor stall does not signal the audio thread. createView can
+        // block the message thread inside the plugin GUI. Signalling audio
+        // there can stall the callback. The audio thread does not wait on
+        // the message thread, and recording keeps running.
+        const bool editorStall = message && messagePhase == kPhaseEditor;
+        if (audio && ! editorStall)
             dump(clock.audioThread.load(std::memory_order_acquire), "\naudio stack\n");
         stallDumpFd.store(-1, std::memory_order_relaxed);
         ::close(fd);

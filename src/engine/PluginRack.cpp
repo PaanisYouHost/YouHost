@@ -311,7 +311,7 @@ juce::String dbText(float db)
     return juce::String(db, 1);
 }
 
-void logHostedPlugin(AppSettings* settings,
+bool logHostedPlugin(AppSettings* settings,
                      juce::AudioPluginInstance& instance,
                      const juce::PluginDescription& description,
                      const BusChoice& buses,
@@ -320,84 +320,35 @@ void logHostedPlugin(AppSettings* settings,
                      int block)
 {
     if (settings == nullptr || block <= 0)
-        return;
+        return true;
 
     juce::MemoryBlock saved;
     instance.getStateInformation(saved);
 
-    constexpr int cap = 8192;
-    const int latency = instance.getLatencySamples();
-    const int skip = probeSkipSamples(latency, cap);
-    const int tone = std::min(block * 4, std::max(64, cap - skip));
-    const int total = skip + tone;
-    const int padded = ((total + block - 1) / block) * block;
-    std::vector<float> mono(static_cast<std::size_t>(padded), 0.0f);
-    std::vector<float> left(mono.size(), 0.0f);
-    std::vector<float> right(mono.size(), 0.0f);
-    float* pointers[2] = { left.data(), right.data() };
-    juce::MidiBuffer midi;
-    const int width = std::max(buses.inputChannels, buses.outputChannels);
-    const bool extraBuses = buses.totalInputs > buses.inputChannels
-                            || buses.totalOutputs > buses.outputChannels
-                            || std::max(buses.totalInputs, buses.totalOutputs) > 2;
-
-    auto render = [&](float frequency)
-    {
-        std::fill(mono.begin(), mono.end(), 0.0f);
-        fillProbeTone(mono.data(), total, rate, frequency, 0.25f);
-        for (int offset = 0; offset < padded; offset += block)
-        {
-            if (width <= 1)
-            {
-                std::memcpy(left.data(), mono.data() + offset, sizeof(float) * static_cast<std::size_t>(block));
-                juce::AudioBuffer<float> view(pointers, 1, block);
-                midi.clear();
-                instance.processBlock(view, midi);
-                std::memcpy(mono.data() + offset, left.data(), sizeof(float) * static_cast<std::size_t>(block));
-            }
-            else
-            {
-                preparePluginBlock(pointers, buses.inputChannels, buses.outputChannels, mono.data() + offset, block);
-                juce::AudioBuffer<float> view(pointers, width, block);
-                midi.clear();
-                instance.processBlock(view, midi);
-                takeFoldedChannel(mono.data() + offset, pointers, buses.outputChannels, block, fold);
-            }
-        }
-        const float* tail = mono.data() + skip;
-        return amplitudeDb(meanSquare(tail, tone));
-    };
-
-    const float skippedDb = -120.0f;
-    const float lowDb = extraBuses ? skippedDb : render(80.0f);
-    const float highDb = extraBuses ? skippedDb : render(6000.0f);
-    float leftDb = lowDb;
-    float rightDb = lowDb;
-    float sumDb = lowDb;
-    if (! extraBuses && width > 1)
-    {
-        std::fill(mono.begin(), mono.end(), 0.0f);
-        std::fill(left.begin(), left.end(), 0.0f);
-        std::fill(right.begin(), right.end(), 0.0f);
-        fillProbeTone(mono.data(), total, rate, 1000.0f, 0.25f);
-        std::memcpy(left.data(), mono.data(), sizeof(float) * static_cast<std::size_t>(total));
-        std::memcpy(right.data(), mono.data(), sizeof(float) * static_cast<std::size_t>(total));
-        for (int offset = 0; offset < padded; offset += block)
-        {
-            float* pair[2] = { left.data() + offset, right.data() + offset };
-            juce::AudioBuffer<float> view(pair, width, block);
-            midi.clear();
-            instance.processBlock(view, midi);
-        }
-        const float* leftTail = left.data() + skip;
-        const float* rightTail = right.data() + skip;
-        leftDb = amplitudeDb(meanSquare(leftTail, tone));
-        rightDb = amplitudeDb(meanSquare(rightTail, tone));
-        std::vector<float> summed(static_cast<std::size_t>(tone), 0.0f);
-        for (int index = 0; index < tone; ++index)
-            summed[static_cast<std::size_t>(index)] = (leftTail[index] + rightTail[index]) * 0.5f;
-        sumDb = amplitudeDb(meanSquare(summed.data(), tone));
-    }
+    const int mainIn = std::max(buses.inputChannels, 1);
+    const int mainOut = std::max(buses.outputChannels, 1);
+    const int totalIn = std::max(buses.totalInputs, mainIn);
+    const int totalOut = std::max(buses.totalOutputs, mainOut);
+    const bool extraBuses = totalIn > buses.inputChannels
+                            || totalOut > buses.outputChannels
+                            || std::max(totalIn, totalOut) > 2;
+    // Full width, including the sidechain. A 2-channel buffer makes JUCE's
+    // AU and VST3 wrappers index the sidechain off the end of the pointer list.
+    const auto levels = measurePluginProbe(mainIn, mainOut, totalIn, totalOut, block, rate,
+                                            [&](float* const* channels, int width, int samples)
+                                            {
+                                                if (channels == nullptr || width < 1 || samples < 1)
+                                                    return;
+                                                juce::MidiBuffer midi;
+                                                juce::AudioBuffer<float> view(channels, width, samples);
+                                                instance.processBlock(view, midi);
+                                            });
+    const float lowDb = levels.lowDb;
+    const float highDb = levels.highDb;
+    const float leftDb = levels.leftDb;
+    const float rightDb = levels.rightDb;
+    const float sumDb = levels.sumDb;
+    const bool silent = probeLevelsAreSilent(levels);
 
     instance.reset();
     if (saved.getSize() > 0)
@@ -427,6 +378,14 @@ void logHostedPlugin(AppSettings* settings,
          << " dB R " << dbText(rightDb)
          << " dB sum " << dbText(sumDb) << " dB";
     appendHostLog(*settings, line);
+    if (extraBuses && silent)
+    {
+        appendHostLog(*settings,
+                      "plugin " + description.name
+                          + " probe silent, not activated. The sidechain layout produced no audio.");
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -746,11 +705,61 @@ public:
             {
                 if (owner_.jobState_.getSize() > 0)
                     instance->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
-                instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
-                instance->reset();
-                logHostedPlugin(owner_.settings_, *instance, owner_.jobDescription_, buses,
-                                stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_);
-                setup.latencySamples = instance->getLatencySamples();
+                // State can change the buses after the plan was recorded. The
+                // probe and the live graph both have to use this layout.
+                auto measured = buses;
+                const int liveIn = instance->getTotalNumInputChannels();
+                const int liveOut = instance->getTotalNumOutputChannels();
+                const int mainIn = instance->getMainBusNumInputChannels();
+                const int mainOut = instance->getMainBusNumOutputChannels();
+                if (liveIn > 0)
+                    measured.totalInputs = liveIn;
+                if (liveOut > 0)
+                    measured.totalOutputs = liveOut;
+                if (mainIn > 0)
+                    measured.inputChannels = mainIn;
+                if (mainOut > 0)
+                    measured.outputChannels = mainOut;
+                setup.inputChannels = measured.inputChannels;
+                setup.outputChannels = measured.outputChannels;
+                setup.totalInputs = measured.totalInputs;
+                setup.totalOutputs = measured.totalOutputs;
+                const int width = pluginProcessWidth(measured.totalInputs, measured.totalOutputs);
+                if (width < 1)
+                {
+                    setup.ok = false;
+                    if (owner_.settings_ != nullptr)
+                        appendHostLog(*owner_.settings_,
+                                      "plugin " + owner_.jobDescription_.name
+                                          + " layout " + juce::String(measured.totalInputs) + "/"
+                                          + juce::String(measured.totalOutputs)
+                                          + " is wider than the process buffer, not activated");
+                }
+                else
+                {
+                    instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                    instance->reset();
+                    const bool audible = logHostedPlugin(owner_.settings_, *instance, owner_.jobDescription_, measured,
+                                                        stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_);
+                    const int afterIn = instance->getTotalNumInputChannels();
+                    const int afterOut = instance->getTotalNumOutputChannels();
+                    if (afterIn > 0 && afterOut > 0
+                        && (afterIn != measured.totalInputs || afterOut != measured.totalOutputs))
+                    {
+                        measured.totalInputs = afterIn;
+                        measured.totalOutputs = afterOut;
+                        setup.totalInputs = afterIn;
+                        setup.totalOutputs = afterOut;
+                        instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                        instance->reset();
+                    }
+                    setup.latencySamples = instance->getLatencySamples();
+                    if (! audible)
+                    {
+                        setup.ok = false;
+                        setup.silent = true;
+                    }
+                }
             }
         }
 
@@ -890,7 +899,11 @@ void PluginRack::process(float* const* outputs,
                          std::uint64_t enabledHigh,
                          int activeChannels)
 {
-    if (numSamples > 0 && blockSize_ > 0 && numSamples != blockSize_)
+    // A shorter callback is legal: the plugin was prepared for the maximum.
+    // Re-preparing every time the device jitters (64, then 32, then 64)
+    // restarts the plugin and is the dropout burst. Only a callback larger
+    // than the prepared maximum needs a new prepare.
+    if (numSamples > blockSize_ && blockSize_ > 0)
     {
         const int previous = seenCallback_.load(std::memory_order_relaxed);
         if (previous == numSamples)
@@ -903,7 +916,7 @@ void PluginRack::process(float* const* outputs,
         if (seenStreak_.load(std::memory_order_relaxed) >= 6)
             reprepareBlock_.store(numSamples, std::memory_order_relaxed);
     }
-    else if (numSamples == blockSize_)
+    else if (numSamples > 0 && numSamples <= blockSize_)
     {
         seenStreak_.store(0, std::memory_order_relaxed);
     }
@@ -982,6 +995,8 @@ void PluginRack::process(float* const* outputs,
 
     inUse_.store(nullptr, std::memory_order_release);
     callbackEpoch_.fetch_add(1, std::memory_order_release);
+    if (numSamples > 0)
+        lastCallbackSamples_.store(numSamples, std::memory_order_relaxed);
     lastCallbackNs_.store(steadyNs() - started, std::memory_order_relaxed);
     livePluginPercent_.store(clampCpuPercent(pluginPercentScratch_.exchange(0, std::memory_order_relaxed)),
                              std::memory_order_relaxed);
@@ -1088,7 +1103,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
 
     const int prepared = graph.maxBlock;
     const int partnerChannel = partner != nullptr ? channel + 1 : -1;
-    auto runPlugins = [&graph, channel, this](float* buffer, float* right, int count)
+    const int meterSamples = numSamples;
+    auto runPlugins = [&graph, channel, meterSamples, this](float* buffer, float* right, int count)
     {
         if (buffer == nullptr || count <= 0)
             return;
@@ -1105,6 +1121,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             const int width = pluginProcessWidth(totalIn, totalOut);
             const bool extraBuses = totalIn > inputs || totalOut > outputsN;
             if (instance == nullptr || ! live.prepared || width < 1 || width > LiveGraph::kScratchCap)
+                continue;
+            if (count > graph.maxBlock)
                 continue;
 
             auto* gate = live.gate;
@@ -1141,13 +1159,23 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             const auto fold = stereoFoldFromInt(live.stereoFold);
             auto runOne = [&](float* mono)
             {
-                renderFoldedMono(mono, count, inputs, outputsN, fold, scratch[0], scratch[1],
-                                 [&](float** channels, int viewWidth, int)
-                                 {
-                                     midi.clear();
-                                     juce::AudioBuffer<float> view(channels, viewWidth, count);
-                                     instance->processBlock(view, midi);
-                                 });
+                if (mono == nullptr || scratch[0] == nullptr)
+                    return;
+                const int viewWidth = std::max(1, std::min(std::max(inputs, outputsN), 2));
+                if (viewWidth > 1 && scratch[1] == nullptr)
+                    return;
+                float* plugin[2] = { scratch[0], scratch[1] };
+                preparePluginBlock(plugin, inputs, outputsN, mono, count);
+                midi.clear();
+                juce::AudioBuffer<float> view(plugin, viewWidth, count);
+                instance->processBlock(view, midi);
+                if (viewWidth <= 1)
+                {
+                    if (scratch[0] != mono)
+                        std::memcpy(mono, scratch[0], sizeof(float) * static_cast<std::size_t>(count));
+                    return;
+                }
+                takeFoldedChannel(mono, plugin, outputsN, count, fold);
             };
             SanitizeReport leftReport;
             SanitizeReport rightReport;
@@ -1216,7 +1244,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 const auto elapsed = steadyNs() - began;
                 gate->cpuNs.fetch_add(elapsed, std::memory_order_relaxed);
                 gate->blocks.fetch_add(1, std::memory_order_relaxed);
-                const int instant = blockCpuPercent(elapsed, count, sampleRate_);
+                const int instant = blockCpuPercent(elapsed, meterSamples > 0 ? meterSamples : count, sampleRate_);
                 const int previous = gate->shownPercent.load(std::memory_order_relaxed);
                 const int shown = smoothCpuPercent(previous, instant);
                 gate->shownPercent.store(shown, std::memory_order_relaxed);
@@ -1234,89 +1262,24 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             noteNaN(channel, -1);
     };
 
-    if (prepared > 0 && pluginBlockFeedsDirect(numSamples, prepared))
+    // One processBlock of the callback when it fits. Holding samples until a
+    // full prepared block, then running that block inside one short callback,
+    // spends the whole plugin cost against a smaller device period. That is
+    // the buffer-64 dropout with a plugin prepared for a larger block.
+    const int chunk = pluginCallbackSamples(numSamples, prepared);
+    if (chunk > 0 && numSamples <= prepared)
     {
-        const int chunks = numSamples / prepared;
-        for (int chunk = 0; chunk < chunks; ++chunk)
-        {
-            const auto offset = static_cast<std::ptrdiff_t>(chunk * prepared);
-            runPlugins(output + offset, partner != nullptr ? partner + offset : nullptr, prepared);
-        }
+        runPlugins(output, partner, numSamples);
     }
-    else if (prepared > 0 && numSamples > 0 && numSamples < prepared && graph.feedCapacity >= prepared)
+    else if (chunk > 0 && numSamples > prepared)
     {
-        const int channelIndex = channel;
-        float* inRing = graph.feedIn.data() + static_cast<std::size_t>(channelIndex * graph.feedCapacity);
-        float* outRing = graph.feedOut.data() + static_cast<std::size_t>(channelIndex * graph.feedCapacity);
-        float* work = graph.blockWork.data() + static_cast<std::size_t>(channelIndex * prepared);
-        auto& inCount = graph.inCount[static_cast<std::size_t>(channelIndex)];
-        auto& inRead = graph.inRead[static_cast<std::size_t>(channelIndex)];
-        auto& inWrite = graph.inWrite[static_cast<std::size_t>(channelIndex)];
-        auto& outCount = graph.outCount[static_cast<std::size_t>(channelIndex)];
-        auto& outRead = graph.outRead[static_cast<std::size_t>(channelIndex)];
-        auto& outWrite = graph.outWrite[static_cast<std::size_t>(channelIndex)];
-        float* rightIn = nullptr;
-        float* rightOut = nullptr;
-        float* rightWork = nullptr;
-        if (partner != nullptr && partnerChannel >= 0 && partnerChannel < kMaxChannels)
+        int done = 0;
+        while (done < numSamples)
         {
-            rightIn = graph.feedIn.data() + static_cast<std::size_t>(partnerChannel * graph.feedCapacity);
-            rightOut = graph.feedOut.data() + static_cast<std::size_t>(partnerChannel * graph.feedCapacity);
-            rightWork = graph.blockWork.data() + static_cast<std::size_t>(partnerChannel * prepared);
-        }
-        if (rightIn != nullptr)
-        {
-            int savedWrite = inWrite;
-            int savedCount = inCount;
-            ringPush(inRing, graph.feedCapacity, inWrite, inCount, output, numSamples);
-            ringPush(rightIn, graph.feedCapacity, savedWrite, savedCount, partner, numSamples);
-        }
-        else
-        {
-            ringPush(inRing, graph.feedCapacity, inWrite, inCount, output, numSamples);
-        }
-        while (inCount >= prepared)
-        {
-            if (ringRead(inRing, graph.feedCapacity, inRead, inCount, work, prepared) != prepared)
-                break;
-            if (rightIn != nullptr && rightWork != nullptr
-                && ringRead(rightIn, graph.feedCapacity, inRead, inCount, rightWork, prepared) != prepared)
-                break;
-            ringDrop(graph.feedCapacity, inRead, inCount, prepared);
-            runPlugins(work, rightWork, prepared);
-            ringPush(outRing, graph.feedCapacity, outWrite, outCount, work, prepared);
-            if (rightOut != nullptr && rightWork != nullptr)
-            {
-                int savedOutWrite = outWrite;
-                int savedOutCount = outCount;
-                // The push above already advanced the shared counters. Rewind them for the twin ring.
-                savedOutWrite = (savedOutWrite - prepared + graph.feedCapacity) % graph.feedCapacity;
-                savedOutCount -= prepared;
-                ringPush(rightOut, graph.feedCapacity, savedOutWrite, savedOutCount, rightWork, prepared);
-            }
-        }
-        const int got = ringPop(outRing, graph.feedCapacity, outRead, outCount, output, numSamples);
-        if (got < numSamples)
-            std::memset(output + got, 0, sizeof(float) * static_cast<std::size_t>(numSamples - got));
-        if (rightOut != nullptr)
-        {
-            int savedRead = outRead;
-            int savedOut = outCount;
-            // outRead/outCount already consumed `got` samples. Pop the twin from the pre-pop position.
-            savedRead = (outRead - got + graph.feedCapacity) % graph.feedCapacity;
-            savedOut = outCount + got;
-            const int gotRight = ringPop(rightOut, graph.feedCapacity, savedRead, savedOut, partner, numSamples);
-            if (gotRight < numSamples)
-                std::memset(partner + gotRight, 0, sizeof(float) * static_cast<std::size_t>(numSamples - gotRight));
-        }
-    }
-    else if (prepared > 0 && numSamples > prepared)
-    {
-        const int chunks = numSamples / prepared;
-        for (int chunk = 0; chunk < chunks; ++chunk)
-        {
-            const auto offset = static_cast<std::ptrdiff_t>(chunk * prepared);
-            runPlugins(output + offset, partner != nullptr ? partner + offset : nullptr, prepared);
+            const int count = std::min(prepared, numSamples - done);
+            const auto offset = static_cast<std::ptrdiff_t>(done);
+            runPlugins(output + offset, partner != nullptr ? partner + offset : nullptr, count);
+            done += count;
         }
     }
 
@@ -1393,7 +1356,8 @@ DspLoad PluginRack::dspLoad() const
 {
     DspLoad load;
     const double rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
-    const int block = blockSize_ > 0 ? blockSize_ : 512;
+    const int callbackSamples = lastCallbackSamples_.load(std::memory_order_relaxed);
+    const int block = callbackSamples > 0 ? callbackSamples : (blockSize_ > 0 ? blockSize_ : 512);
     const double period = static_cast<double>(block) / rate;
     if (period <= 0.0)
         return load;
@@ -1466,7 +1430,8 @@ CpuMeters PluginRack::cpuMeters() const
 {
     CpuMeters meters;
     const double rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
-    const int block = blockSize_ > 0 ? blockSize_ : 512;
+    const int callbackSamples = lastCallbackSamples_.load(std::memory_order_relaxed);
+    const int block = callbackSamples > 0 ? callbackSamples : (blockSize_ > 0 ? blockSize_ : 512);
     const double period = static_cast<double>(block) / rate;
     const auto callbackNs = lastCallbackNs_.load(std::memory_order_relaxed);
     if (period > 0.0)
@@ -1838,6 +1803,8 @@ void PluginRack::finishLoad(int channel,
     // Bus setup already ran on the loader. Doing it here would stall this thread.
     if (instance != nullptr && ! buses.ready)
         problem = "The plugin setup did not run off the message thread. See youhost.log.";
+    if (instance != nullptr && buses.silent)
+        problem = kPluginSilentProbeMessage;
     juce::String attemptText;
     for (int index = 0; index < buses.attempts.size(); ++index)
     {
@@ -2313,7 +2280,14 @@ void PluginRack::openEditor(int channel, int slot)
         return;
     }
 
+    // The audio thread does not wait on the message thread. createView can
+    // block this thread for seconds. The plugin stays paused, so the audio
+    // callback never enters it and recording keeps the raw input.
+    const auto editorBegan = steadyNs();
     auto* editor = plugin->instance->createEditorAndMakeActive();
+    const auto editorMs = (steadyNs() - editorBegan) / 1000000ULL;
+    if (editorMs >= 2000ULL && settings_ != nullptr)
+        appendHostLog(*settings_, "editor slow " + juce::String(static_cast<int>(editorMs)) + " ms, audio kept running");
     resumeGate(*plugin->gate);
     if (editor == nullptr)
         editor = new juce::GenericAudioProcessorEditor(*plugin->instance);
