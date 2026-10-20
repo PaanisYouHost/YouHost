@@ -17,6 +17,7 @@ What's new
 ----------
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
 - A sidechain plugin keeps the stereo bus it opened with. Its editor opens after the load has finished.
+- Bus setup and prepare stay off the message thread, so a slow plugin does not freeze the app.
 
 1. Quick start – first recording in 5 steps
 -------------------------------------------

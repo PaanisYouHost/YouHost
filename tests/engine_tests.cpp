@@ -5791,6 +5791,17 @@ void testBeta090()
     CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
     CHECK(finishLoad.find("openEditor(") == std::string::npos);
     CHECK(finishLoad.find("createEditor") == std::string::npos);
+    CHECK(finishLoad.find("prepareToPlay") == std::string::npos);
+    CHECK(finishLoad.find("configureBuses") == std::string::npos);
+    CHECK(finishLoad.find("setBusesLayout") == std::string::npos);
+    const auto loaderAt = busSource.find("createInstanceBlocking");
+    const auto deliverAt = busSource.find("deliverOffThreadInstance", loaderAt);
+    CHECK(loaderAt != std::string::npos && deliverAt != std::string::npos && loaderAt < deliverAt);
+    const auto loaderRun = busSource.substr(loaderAt, deliverAt - loaderAt);
+    CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    CHECK(loaderRun.find("configureBuses") != std::string::npos);
+    CHECK(loaderRun.find("lifeLock_") == std::string::npos);
+    CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") != std::string::npos);
     const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
     CHECK(deferredEditor.find("callAsync") != std::string::npos);
     CHECK(deferredEditor.find("backgroundBusy_") != std::string::npos);

@@ -136,7 +136,10 @@ bool offerLayout(juce::AudioPluginInstance& instance,
         return false;
     }
     // One slow AudioUnitInitialize must not be added to the previous one.
-    touchMessageBeat();
+    // The loader thread also calls this. Only the message thread owns the beat.
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        if (messages->isThisTheMessageThread())
+            touchMessageBeat();
     juce::AudioProcessor::BusesLayout layout;
     layout.inputBuses.resize(plan.inputBusCount);
     layout.outputBuses.resize(plan.outputBusCount);
@@ -714,10 +717,48 @@ public:
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::String error;
         owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+
+        // syncBusLayouts and prepareToPlay stay on this thread. On the message
+        // thread they hold the message lock, and Eiosis stalls there. No lock
+        // is held across the plugin calls. The message thread only publishes
+        // the instance after this returns.
+        PluginRack::OffThreadBuses setup;
+        if (instance != nullptr)
+        {
+            const int left = owner_.jobChannel_ & ~1;
+            const bool unlinkedMono = ! owner_.stereoLink(left);
+            const auto buses = configureBuses(*instance, unlinkedMono);
+            setup.ready = true;
+            setup.ok = buses.ok;
+            setup.inputChannels = buses.inputChannels;
+            setup.outputChannels = buses.outputChannels;
+            setup.totalInputs = buses.totalInputs;
+            setup.totalOutputs = buses.totalOutputs;
+            setup.openInputs = buses.openInputs;
+            setup.openOutputs = buses.openOutputs;
+            setup.supportMono = buses.supportMono;
+            setup.supportSide = buses.supportSide;
+            setup.supportStereo = buses.supportStereo;
+            setup.openedStereo = buses.openedStereo;
+            setup.hasExtraBuses = buses.hasExtraBuses;
+            setup.attempts = buses.attempts;
+            if (buses.ok)
+            {
+                if (owner_.jobState_.getSize() > 0)
+                    instance->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
+                instance->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                instance->reset();
+                logHostedPlugin(owner_.settings_, *instance, owner_.jobDescription_, buses,
+                                stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_);
+                setup.latencySamples = instance->getLatencySamples();
+            }
+        }
+
         {
             std::lock_guard<std::mutex> lock(owner_.offThreadMutex_);
             owner_.offThreadInstance_ = std::move(instance);
             owner_.offThreadError_ = error;
+            owner_.offThreadBuses_ = std::move(setup);
         }
         auto alive = owner_.alive_;
         auto* rack = &owner_;
@@ -1698,7 +1739,8 @@ void PluginRack::beginLoad(int channel,
 
             // AUv2 finishes inside this call, on the message thread. AUv3's
             // AudioComponentInstantiate completion can arrive on another
-            // thread. Bus layout and the editor have to run on the message thread.
+            // thread. Move that callback onto the message thread. Bus setup
+            // and prepare stay on the loader thread.
             if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
             {
                 if (! messages->isThisTheMessageThread())
@@ -1784,15 +1826,18 @@ void PluginRack::finishLoad(int channel,
         return;
     }
 
-    BusChoice buses;
+    OffThreadBuses buses;
+    {
+        std::lock_guard<std::mutex> lock(offThreadMutex_);
+        buses = std::move(offThreadBuses_);
+        offThreadBuses_ = {};
+    }
     juce::String problem = error;
     const int left = channel & ~1;
     const bool unlinkedMono = ! stereoLink(left);
-    if (instance != nullptr)
-    {
-        PhaseScope negotiating(kPhaseLoad);
-        buses = configureBuses(*instance, unlinkedMono);
-    }
+    // Bus setup already ran on the loader. Doing it here would stall this thread.
+    if (instance != nullptr && ! buses.ready)
+        problem = "The plugin setup did not run off the message thread. See youhost.log.";
     juce::String attemptText;
     for (int index = 0; index < buses.attempts.size(); ++index)
     {
@@ -1811,7 +1856,7 @@ void PluginRack::finishLoad(int channel,
         for (const auto& attempt : buses.attempts)
             appendHostLog(*settings_, prefix + attempt);
     }
-    if (instance != nullptr && ! buses.ok)
+    if (instance != nullptr && (! buses.ready || ! buses.ok))
     {
         if (problem.isEmpty())
             problem = pluginLoadMessage(true, unlinkedMono, buses.supportMono, buses.supportStereo, buses.supportSide,
@@ -1828,21 +1873,6 @@ void PluginRack::finishLoad(int channel,
     if (instance != nullptr)
     {
         instance->addListener(this);
-        if (state.getSize() > 0)
-            instance->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
-
-        double rate = 48000.0;
-        int block = 512;
-        {
-            std::lock_guard<std::mutex> lock(lifeLock_);
-            rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
-            block = blockSize_ > 0 ? blockSize_ : 512;
-        }
-        {
-            PhaseScope preparing(kPhasePrepare);
-            instance->prepareToPlay(rate, block);
-            instance->reset();
-        }
 
         hosted = std::make_shared<HostedPlugin>();
         hosted->instance.reset(instance.release(), InstanceDeleter { this });
@@ -1856,8 +1886,7 @@ void PluginRack::finishLoad(int channel,
         hosted->processChannels = std::max(hosted->totalInputs, hosted->totalOutputs);
         hosted->prepared = true;
         hosted->stereoFold = static_cast<int>(stereoFoldFromInt(stereoFold));
-        hosted->latencySamples = clampLatencySamples(hosted->instance->getLatencySamples());
-        logHostedPlugin(settings_, *hosted->instance, hosted->description, buses, stereoFoldFromInt(hosted->stereoFold), rate, block);
+        hosted->latencySamples = clampLatencySamples(buses.latencySamples);
     }
     else if (problem.isEmpty())
     {
