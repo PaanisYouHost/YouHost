@@ -753,7 +753,8 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
     {
         // VST3 and Audio Unit views on the Mac are both in points. The window
         // follows that view. It does not lock a later size that JUCE produced
-        // by dividing the VST3 view by the Retina backing scale.
+        // by dividing the VST3 view by the Retina backing scale. The hosted
+        // NSView stays 1:1 with this window.
         if (! wasResized || fitting_ || &component != getContentComponent())
             return;
         const int contentW = component.getWidth();
@@ -2728,8 +2729,10 @@ void PluginRack::openEditor(int channel, int slot)
         key);
     window->place(channel, slot);
     // VST3 and Audio Unit views on the Mac are both sized in points.
-    // setContentScaleFactor is not how the Audio Unit is fitted, and passing
-    // the Retina backing scale through it makes Vastaus redraw at the wrong size.
+    // The hosted NSView is added at 1:1. No AffineTransform scales it.
+    // The window is sized to the plugin view. setContentScaleFactor is not
+    // how the Audio Unit is fitted, and passing the Retina backing scale
+    // through it makes Vastaus redraw at the wrong size.
     window->setContentOwned(editor, true);
     window->watchContent();
     const int borderW = std::max(0, window->getWidth() - editor->getWidth());

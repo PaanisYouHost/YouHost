@@ -208,6 +208,34 @@ inline float vst3ContentScale(float backingScale, bool macOS) noexcept
     return backingScale;
 }
 
+// The hosted Audio Unit or VST3 NSView is added at 1:1 in points. The Retina
+// backing scale does not change its frame. A frame that is a different size
+// from the view's bounds scales the drawing and leaves clicks in the other space.
+struct HostedViewFrame
+{
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+inline HostedViewFrame hostedViewFrame(int x, int y, int width, int height, float desktopScale) noexcept
+{
+    (void) desktopScale;
+    HostedViewFrame frame;
+    frame.x = x;
+    frame.y = y;
+    frame.width = width;
+    frame.height = height;
+    return frame;
+}
+
+inline bool hostedViewClicksMatch(int frameWidth, int frameHeight, int boundsWidth, int boundsHeight) noexcept
+{
+    return frameWidth > 0 && frameHeight > 0
+        && frameWidth == boundsWidth && frameHeight == boundsHeight;
+}
+
 struct EditorOpenPlan
 {
     int width = 0;

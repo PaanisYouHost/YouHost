@@ -6601,6 +6601,21 @@ void testStability106()
     CHECK(youhost::vst3ContentScale(2.0f, false) == 2.0f);
     CHECK(youhost::vst3ContentScale(0.0f, false) == 1.0f);
     CHECK(youhost::vst3ViewPoints(0, 2.0f, true) == 0);
+    // Vastaus AU draws at the right point size and the clicks miss those
+    // controls when the hosted NSView is scaled. The frame stays the view's
+    // point size at a Retina scale of 2, and bounds must equal that frame.
+    const auto hitFrame = youhost::hostedViewFrame(4, 8, 800, 500, 2.0f);
+    CHECK(hitFrame.x == 4);
+    CHECK(hitFrame.y == 8);
+    CHECK(hitFrame.width == 800);
+    CHECK(hitFrame.height == 500);
+    CHECK(hitFrame.width != 1600);
+    CHECK(hitFrame.height != 1000);
+    CHECK(youhost::hostedViewFrame(0, 0, 800, 500, 1.0f).width == 800);
+    CHECK(youhost::hostedViewClicksMatch(800, 500, 800, 500));
+    CHECK(! youhost::hostedViewClicksMatch(800, 500, 1600, 1000));
+    CHECK(! youhost::hostedViewClicksMatch(800, 500, 400, 250));
+    CHECK(! youhost::hostedViewClicksMatch(0, 500, 0, 500));
     CHECK(croppedEditor.width >= 800);
     CHECK(croppedEditor.height >= 600);
     CHECK(! croppedEditor.restoreSaved);
@@ -6672,6 +6687,10 @@ void testStability106()
     CHECK(openNow.find("settleAfterPeerScale") == std::string::npos);
     CHECK(openNow.find("editorWaitsForPeerScale") == std::string::npos);
     CHECK(openNow.find("setResizeLimits") != std::string::npos);
+    CHECK(openNow.find("1:1") != std::string::npos);
+    CHECK(openNow.find("AffineTransform") != std::string::npos);
+    CHECK(openNow.find("->setScaleFactor") == std::string::npos);
+    CHECK(openNow.find("setTransform") == std::string::npos);
     const auto listenerNow = sliceBetween(rackNow, "void componentMovedOrResized", "std::function<void(int, int)> onClose_");
     CHECK(listenerNow.find("Retina backing scale") != std::string::npos);
     CHECK(listenerNow.find("waitsForPeerScale_") == std::string::npos);
@@ -6682,6 +6701,16 @@ void testStability106()
     CHECK(scalePatch.find("JUCE_MAC") != std::string::npos);
     CHECK(scalePatch.find("setContentScaleFactor") != std::string::npos);
     CHECK(scalePatch.find("logical points") != std::string::npos);
+    const auto viewPatch = readWorkspaceFile("cmake/patch_juce_editor_view.py");
+    CHECK(viewPatch.find("JuceHostedViewOneToOne_") != std::string::npos);
+    CHECK(viewPatch.find("isFlipped") != std::string::npos);
+    CHECK(viewPatch.find("setBounds:") != std::string::npos);
+    CHECK(viewPatch.find("CGAffineTransformIdentity") != std::string::npos);
+    CHECK(viewPatch.find("NSMakeSize (0.f, 0.f)") != std::string::npos);
+    CHECK(viewPatch.find("Added at 1:1") != std::string::npos);
+    CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_editor_view.py") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Clicks land on the control that is drawn.") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Clicks land on the control that is drawn.") != std::string::npos);
     const auto beginNow = sliceBetween(rackNow, "void PluginRack::beginLoad", "void PluginRack::finishLoad");
     const auto loadingAt = beginNow.find("\"loading\"");
     const auto admitAt = beginNow.find("admitPluginIntoSlot");
