@@ -1837,6 +1837,28 @@ void testDeviceOpensAllChannels()
     for (bool& bit : full)
         bit = true;
     CHECK(youhost::deviceMaskIsComplete(full, 8));
+
+    // MacBook speakers after a 48-channel card: one reported input, two outputs.
+    // Bits left over from the wide mask are not channels.
+    CHECK(youhost::channelCapForDevice(false, 1, 48) == 1);
+    CHECK(youhost::channelCapForDevice(false, 2, 48) == 2);
+    CHECK(youhost::channelCapForDevice(true, 39, 48) == 48);
+    CHECK(youhost::channelCapForDevice(true, 0, 48) == 48);
+    CHECK(youhost::channelCapForDevice(false, 0, 48) == 0);
+    CHECK(youhost::channelCapForDevice(true, 64, 48) == 64);
+    CHECK(youhost::channelCapForDevice(false, 200, 0) == 128);
+    std::array<bool, youhost::kMaxChannels> wideMask {};
+    wideMask.fill(true);
+    youhost::applyChannelCap(wideMask.data(), youhost::channelCapForDevice(false, 1, 48));
+    CHECK(wideMask[0]);
+    for (int channel = 1; channel < 12; ++channel)
+        CHECK(! wideMask[static_cast<std::size_t>(channel)]);
+    std::array<bool, youhost::kMaxChannels> speakerOut {};
+    speakerOut.fill(true);
+    youhost::applyChannelCap(speakerOut.data(), youhost::channelCapForDevice(false, 2, 48));
+    CHECK(speakerOut[0]);
+    CHECK(speakerOut[1]);
+    CHECK(! speakerOut[2]);
 }
 
 void testMergePeaks()
@@ -6125,6 +6147,35 @@ void testStability106()
     CHECK(! youhost::channelProcessesPlugins(0, 1, -1));
     CHECK(! youhost::channelProcessesPlugins(0, 0, 0));
     CHECK(youhost::channelProcessesPlugins(0, 1, 0));
+    // MacBook Pro speakers: UI channel 1 is the mic. UI channel 2 is the right
+    // speaker, an output with no input. UI channels 2-12 must not run plugins
+    // even when the loop limit is the whole rack and reveal shows every channel.
+    std::array<bool, youhost::kMaxChannels> speakerInputs {};
+    std::array<bool, youhost::kMaxChannels> speakerOutputs {};
+    speakerInputs.fill(true);
+    speakerOutputs.fill(true);
+    youhost::applyChannelCap(speakerInputs.data(), youhost::channelCapForDevice(false, 1, 12));
+    youhost::applyChannelCap(speakerOutputs.data(), youhost::channelCapForDevice(false, 2, 12));
+    const auto speakers = youhost::makeRouting(speakerInputs, speakerOutputs);
+    CHECK(speakers.inputCount == 1);
+    CHECK(speakers.outputCount == 2);
+    CHECK(speakers.visibleChannels == 2);
+    CHECK(speakers.inputPacked[0] == 0);
+    CHECK(speakers.inputPacked[1] == -1);
+    CHECK(speakers.outputPacked[0] == 0);
+    CHECK(speakers.outputPacked[1] == 1);
+    CHECK(youhost::channelProcessesPlugins(0, speakers.inputCount, speakers.inputPacked[0]));
+    for (int channel = 1; channel < 12; ++channel)
+    {
+        CHECK(! youhost::channelProcessesPlugins(channel, speakers.inputCount, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+        CHECK(! youhost::channelProcessesPlugins(channel, speakers.visibleChannels, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+        CHECK(! youhost::channelProcessesPlugins(channel, youhost::kMaxChannels, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+    }
+    const auto speakerView = youhost::sessionChannelView(speakers.inputCount, true, false, true);
+    CHECK(speakerView.cardInputs == 1);
+    CHECK(speakerView.visible == youhost::kMaxChannels);
+    CHECK(! youhost::channelProcessesPlugins(1, speakerView.cardInputs, speakers.inputPacked[1]));
+    CHECK(! youhost::keepPluginsOnShrink(false, 12, 12, 1, 2));
     CHECK(! youhost::blockAsksReprepare(32, 512));
     CHECK(! youhost::blockAsksReprepare(32, 32));
     CHECK(youhost::blockAsksReprepare(96, 32));
@@ -6416,6 +6467,25 @@ void testStability106()
     const auto processBody = sliceBetween(rackNow, "void PluginRack::process(", "void PluginRack::processJob");
     CHECK(processBody.find("setBusesLayout") == std::string::npos);
     CHECK(processBody.find("configureBuses") == std::string::npos);
+    const auto runsAt = processBody.find("channelProcessesPlugins");
+    const auto outputAt = processBody.find("outputPacked");
+    CHECK(runsAt != std::string::npos && outputAt != std::string::npos && runsAt < outputAt);
+    const auto audioNow = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto callbackNow = sliceBetween(audioNow,
+                                          "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                          "void AudioEngine::audioDeviceAboutToStart");
+    const auto rackCall = callbackNow.find("rack_->process(");
+    CHECK(rackCall != std::string::npos);
+    const auto rackArgs = callbackNow.substr(rackCall, 180);
+    CHECK(rackArgs.find("config.routing") != std::string::npos);
+    CHECK(rackArgs.find("playConfig") == std::string::npos);
+    CHECK(callbackNow.find("playConfig.routing.inputPacked") != std::string::npos);
+    CHECK(audioNow.find("channelCapForDevice") != std::string::npos);
+    CHECK(audioNow.find("applyChannelCap") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("one-input, two-output") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("weak baseline") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Plugins on a hidden channel, or a channel with no input, do not run.") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("weak baseline") != std::string::npos);
     const auto oneChannel = sliceBetween(rackNow, "void PluginRack::processOneChannel", "bool PluginRack::pauseGate");
     CHECK(oneChannel.find("setBusesLayout") == std::string::npos);
     CHECK(oneChannel.find("configureBuses") == std::string::npos);
@@ -6504,7 +6574,7 @@ void testStability106()
 
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
-              << "%, any plugin loads in any slot, ch 1 slot 1 stays open, vst3 mono width 1\n";
+              << "%, any plugin loads in any slot, ch 1 slot 1 stays open, vst3 mono width 1, speaker ch 2-12 idle\n";
 }
 
 } // namespace

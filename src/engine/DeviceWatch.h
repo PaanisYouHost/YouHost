@@ -135,4 +135,36 @@ inline void openAllReportedChannels(bool* open, int reported) noexcept
         open[index] = true;
 }
 
+// How many mask bits count on this open. A different card follows the names
+// it reports. MacBook speakers are 1 input and 2 outputs, and bits left over
+// from a wider card are not inputs. The same card keeps the larger of the
+// reported names and the set already running, so a brief dip does not drop
+// plugins. A new card that reports no names has no channels.
+inline int channelCapForDevice(bool sameOpenCard, int reportedNames, int runningCount) noexcept
+{
+    if (runningCount < 0)
+        runningCount = 0;
+    if (runningCount > 128)
+        runningCount = 128;
+    if (reportedNames <= 0)
+        return sameOpenCard ? runningCount : 0;
+    int cap = channelsToOpen(reportedNames);
+    if (sameOpenCard && runningCount > cap)
+        cap = runningCount;
+    return cap;
+}
+
+// Clears bits at and above cap. The array is the 128-channel rack mask.
+inline void applyChannelCap(bool* open, int cap) noexcept
+{
+    if (open == nullptr)
+        return;
+    if (cap < 0)
+        cap = 0;
+    if (cap > 128)
+        cap = 128;
+    for (int index = cap; index < 128; ++index)
+        open[index] = false;
+}
+
 } // namespace youhost

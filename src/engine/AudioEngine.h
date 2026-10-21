@@ -304,7 +304,7 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void applyPreferredTiming();
 
-    void publishConfig(juce::AudioIODevice& device);
+    void publishConfig(juce::AudioIODevice& device, int inputCap, int outputCap);
     void publishSessionChannelLimit();
     void reconcileStartupDevice();
     void pollStartupDeviceList();

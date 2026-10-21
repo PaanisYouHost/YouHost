@@ -973,6 +973,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     const auto passNs = steadyNowNs();
     // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
+    // Playback remaps playConfig only. The rack keeps config.routing, so a channel
+    // with no device input does not run, including one that has an output.
     if (rack_ != nullptr)
         rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels);
     const auto pluginNs = steadyNowNs();
@@ -1105,7 +1107,7 @@ void AudioEngine::audioDeviceError(const juce::String& errorMessage)
     deviceError_.store(true, std::memory_order_relaxed);
 }
 
-void AudioEngine::publishConfig(juce::AudioIODevice& device)
+void AudioEngine::publishConfig(juce::AudioIODevice& device, int inputCap, int outputCap)
 {
     std::array<bool, kMaxChannels> inputs {};
     std::array<bool, kMaxChannels> outputs {};
@@ -1119,6 +1121,10 @@ void AudioEngine::publishConfig(juce::AudioIODevice& device)
         strips_[static_cast<std::size_t>(channel)].inputIndex = channel;
         strips_[static_cast<std::size_t>(channel)].outputIndex = channel;
     }
+    // The menu can say 1 in / 2 out while the mask still has bits from the
+    // previous card. Those bits are not inputs, so their plugins do not run.
+    applyChannelCap(inputs.data(), inputCap);
+    applyChannelCap(outputs.data(), outputCap);
 
     AudioThreadConfig next;
     next.routing = makeRouting(inputs, outputs);
@@ -1576,6 +1582,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const int runningOutputs = currentConfig().routing.outputCount;
     const int nextInputs = inputMask.countNumberOfSetBits();
     const int nextOutputs = outputMask.countNumberOfSetBits();
+    const int inputCap = channelCapForDevice(sameOpenCard, live->getInputChannelNames().size(), runningInputs);
+    const int outputCap = channelCapForDevice(sameOpenCard, live->getOutputChannelNames().size(), runningOutputs);
     // "active 48" then "active 39" is this mask. Keep the plugins on the
     // channels that were already open. A different card still follows its count.
     const bool keep = keepPluginsOnShrink(sameOpenCard, runningInputs, runningOutputs, nextInputs, nextOutputs);
@@ -1589,7 +1597,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     if (! keep && (needPrepare || masksChanged))
     {
-        publishConfig(*live);
+        publishConfig(*live, inputCap, outputCap);
     }
     else
     {

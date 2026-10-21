@@ -1283,6 +1283,8 @@ void PluginRack::process(float* const* outputs,
                 clearChannelMemory(*graph, channel);
 
             // No input, hidden, or past the card: the plugin stays loaded and does not run.
+            // An output on its own is not an input. The right side of a one-input,
+            // two-output device stays in this skip.
             if (! channelProcessesPlugins(channel, limit, routing.inputPacked[static_cast<std::size_t>(channel)]))
                 continue;
 
