@@ -23,14 +23,19 @@ inline CrashJournal loadCrashJournal(AppSettings& settings)
     const auto file = crashJournalFile(settings);
     if (! file.existsAsFile())
         return {};
-    return readCrashJournal(file.loadFileAsString().toRawUTF8());
+    const auto text = file.loadFileAsString();
+    return readLatestCrashJournal(text.toRawUTF8());
 }
 
+// Appends one generation and drops the oldest when the file is past 256 KB.
+// A clean start does not replace the file, so earlier crashes stay readable.
 inline void storeCrashJournal(AppSettings& settings, const CrashJournal& journal)
 {
     auto file = crashJournalFile(settings);
     file.getParentDirectory().createDirectory();
-    file.replaceWithText(juce::String::fromUTF8(writeCrashJournal(journal).c_str()));
+    const auto existing = file.existsAsFile() ? file.loadFileAsString() : juce::String();
+    const auto next = rotateCrashHistory(appendCrashGeneration(existing.toRawUTF8(), journal), 262144);
+    file.replaceWithText(juce::String::fromUTF8(next.c_str()));
 }
 
 inline void appendHostLog(AppSettings& settings, const juce::String& line)

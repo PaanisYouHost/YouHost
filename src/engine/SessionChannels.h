@@ -92,6 +92,18 @@ inline AudioCardKind audioCardKind(std::string_view name) noexcept
         if (containsFolded(name, pattern))
             return AudioCardKind::real;
 
+    // An aggregate stays virtual even when its name also says MacBook.
+    // "koontilaite" is the other Finnish spelling of the aggregate device.
+    const char* aggregate[] = {
+        "koostelaite",
+        "koontilaite",
+        "aggregate",
+        "loopback",
+    };
+    for (const char* pattern : aggregate)
+        if (containsFolded(name, pattern))
+            return AudioCardKind::virtualDevice;
+
     const char* builtin[] = {
         "built-in",
         "builtin",
@@ -111,9 +123,6 @@ inline AudioCardKind audioCardKind(std::string_view name) noexcept
         "microsoft teams",
         "teams audio",
         "mjaudiorecorder",
-        "koostelaite",
-        "aggregate",
-        "loopback",
     };
     for (const char* pattern : virtualDevice)
         if (containsFolded(name, pattern))
@@ -242,6 +251,15 @@ inline bool channelUsesCpu(int channel, const SessionChannelView& view) noexcept
     return channel >= 0 && channel < view.cardInputs;
 }
 
+// A plugin runs only on a channel the open device is feeding.
+// Hidden channels, channels past the card, and channels with no input do not.
+inline bool channelProcessesPlugins(int channel, int activeChannels, int inputPacked) noexcept
+{
+    if (channel < 0 || activeChannels < 1 || channel >= activeChannels)
+        return false;
+    return inputPacked >= 0;
+}
+
 inline bool timelineShowsChannel(int channel, int visible) noexcept
 {
     return channel >= 0 && channel < visible;
@@ -321,24 +339,109 @@ inline bool isBuiltinSpeaker(std::string_view name) noexcept
            || containsFolded(name, "kaiutin") || containsFolded(name, "output");
 }
 
+inline std::string trimDeviceText(std::string text)
+{
+    while (! text.empty() && (text.back() == ' ' || text.back() == '\t'))
+        text.pop_back();
+    std::size_t begin = 0;
+    while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t'))
+        ++begin;
+    if (begin > 0)
+        text.erase(0, begin);
+    return text;
+}
+
+// Spaces are ignored and case is folded, so "MacBook Pro -mikrofoni" and
+// "MacBook Pro-mikrofoni" are the same HAL name.
+inline std::string deviceIdentityKey(std::string_view name)
+{
+    std::string key;
+    key.reserve(name.size());
+    for (const char character : name)
+    {
+        if (character == ' ' || character == '\t')
+            continue;
+        if (character >= 'A' && character <= 'Z')
+            key.push_back(static_cast<char>(character - 'A' + 'a'));
+        else
+            key.push_back(character);
+    }
+    return key;
+}
+
+inline bool deviceNamesMatch(std::string_view left, std::string_view right)
+{
+    if (left.empty() || right.empty())
+        return false;
+    return deviceIdentityKey(left) == deviceIdentityKey(right);
+}
+
+// The menu name and either built-in half are the same card.
+inline bool listedDeviceCovers(const ListedDevice& device, std::string_view name)
+{
+    return deviceNamesMatch(device.name, name)
+           || deviceNamesMatch(device.inputName, name)
+           || deviceNamesMatch(device.outputName, name);
+}
+
+inline bool endsWithFolded(std::string_view text, std::string_view suffix) noexcept
+{
+    if (suffix.empty() || text.size() < suffix.size())
+        return false;
+    const auto fold = [](char character) noexcept
+    {
+        if (character >= 'A' && character <= 'Z')
+            return static_cast<char>(character - 'A' + 'a');
+        return character;
+    };
+    const auto start = text.size() - suffix.size();
+    for (std::size_t index = 0; index < suffix.size(); ++index)
+        if (fold(text[start + index]) != fold(suffix[index]))
+            return false;
+    return true;
+}
+
+// "MacBook Pro -mikrofoni" and "MacBook Pro-kaiuttimet" share "MacBook Pro".
+// The separator may be a space, a hyphen, or both.
 inline std::string builtinFamilyKey(std::string_view name)
 {
-    std::string text(name);
-    const char* cuts[] = {
-        " Microphone", " microphone", "-mikrofoni", "-Mikrofoni",
-        " Speakers", " speakers", "-kaiuttimet", "-Kaiuttimet",
-        " Output", " output",
+    std::string text = trimDeviceText(std::string(name));
+    const char* roles[] = {
+        "microphone",
+        "mikrofoni",
+        "speakers",
+        "kaiuttimet",
+        "speaker",
+        "kaiutin",
+        "output",
     };
-    for (const char* cut : cuts)
+    for (const char* role : roles)
     {
-        const std::string suffix(cut);
-        if (text.size() >= suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0)
-        {
-            text.resize(text.size() - suffix.size());
-            break;
-        }
+        const std::string_view word(role);
+        if (text.size() <= word.size() || ! endsWithFolded(text, word))
+            continue;
+        std::size_t end = text.size() - word.size();
+        const std::size_t cut = end;
+        while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '-'))
+            --end;
+        if (end == cut || end == 0)
+            continue;
+        text.resize(end);
+        return trimDeviceText(text);
     }
     return text;
+}
+
+// The menu name for one physical Mac: "MacBook Pro (mic + speakers)".
+inline constexpr const char* kCombinedMicSpeakers = " (mic + speakers)";
+
+inline std::string combinedBuiltinName(std::string_view family)
+{
+    auto name = trimDeviceText(std::string(family));
+    if (name.empty())
+        return {};
+    name += kCombinedMicSpeakers;
+    return name;
 }
 
 // MacBook mic + speakers become one card. Headphones stay on their own row.
@@ -367,7 +470,7 @@ inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice
         {
             if (speakerUsed[index])
                 continue;
-            if (builtinFamilyKey(speakers[index].name) == family)
+            if (deviceNamesMatch(builtinFamilyKey(speakers[index].name), family))
             {
                 match = static_cast<int>(index);
                 break;
@@ -381,7 +484,8 @@ inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice
         speakerUsed[static_cast<std::size_t>(match)] = true;
         const auto& speaker = speakers[static_cast<std::size_t>(match)];
         ListedDevice paired;
-        paired.name = family.empty() ? mic.name : family;
+        const auto shown = combinedBuiltinName(family);
+        paired.name = shown.empty() ? mic.name : shown;
         paired.inputName = mic.name;
         paired.outputName = speaker.name;
         paired.inputs = mic.inputs > 0 ? mic.inputs : speaker.inputs;
@@ -391,7 +495,81 @@ inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice
     for (std::size_t index = 0; index < speakers.size(); ++index)
         if (! speakerUsed[index])
             rest.push_back(speakers[index]);
-    return rest;
+
+    // A cached pair and the same card built from the raw names must stay one row.
+    std::vector<ListedDevice> unique;
+    unique.reserve(rest.size());
+    for (auto& device : rest)
+    {
+        bool merged = false;
+        for (auto& kept : unique)
+        {
+            if (! deviceNamesMatch(kept.name, device.name))
+                continue;
+            if (kept.inputName.empty() && ! device.inputName.empty())
+                kept.inputName = std::move(device.inputName);
+            if (kept.outputName.empty() && ! device.outputName.empty())
+                kept.outputName = std::move(device.outputName);
+            if (device.inputs > kept.inputs)
+                kept.inputs = device.inputs;
+            if (device.outputs > kept.outputs)
+                kept.outputs = device.outputs;
+            merged = true;
+            break;
+        }
+        if (! merged)
+            unique.push_back(std::move(device));
+    }
+    return unique;
+}
+
+// The menu, a session file, and reopening that same card are the only changes.
+// A card the system opened is not one of them.
+inline bool deviceChangeCauseAllowed(std::string_view cause) noexcept
+{
+    return cause == "user chose the card"
+           || cause == "session open"
+           || cause == "reopening the chosen card";
+}
+
+// youhost.log line. from is empty when the previous card is the same one.
+inline std::string deviceChangeLogLine(std::string_view from, std::string_view to, std::string_view cause)
+{
+    std::string line = "device change";
+    if (! from.empty())
+    {
+        line += " from ";
+        line.append(from.begin(), from.end());
+    }
+    line += " to ";
+    line.append(to.begin(), to.end());
+    line += " cause=";
+    line.append(cause.begin(), cause.end());
+    return line;
+}
+
+// The open HAL device is still the card the user chose when its name is the
+// menu name or either half of a built-in pair. JUCE can report an aggregate
+// name while the setup still points at those two halves: that is the same card.
+// A setup that names the aggregate is a different card.
+inline bool openDeviceIsChosen(std::string_view openName,
+                              std::string_view chosenName,
+                              std::string_view inputName,
+                              std::string_view outputName,
+                              std::string_view setupInput,
+                              std::string_view setupOutput)
+{
+    if (! chosenName.empty() && deviceNamesMatch(openName, chosenName))
+        return true;
+    if (! inputName.empty() && deviceNamesMatch(openName, inputName))
+        return true;
+    if (! outputName.empty() && deviceNamesMatch(openName, outputName))
+        return true;
+    if (! inputName.empty() && ! outputName.empty()
+        && deviceNamesMatch(setupInput, inputName)
+        && deviceNamesMatch(setupOutput, outputName))
+        return true;
+    return false;
 }
 
 enum class DeviceRowKind
@@ -408,8 +586,23 @@ struct DeviceRow
     DeviceRowKind kind = DeviceRowKind::hardware;
     std::string name;
     std::string label;
+    std::string inputName;
+    std::string outputName;
     bool selectable = true;
 };
+
+inline bool deviceRowMatches(const DeviceRow& row, std::string_view selected)
+{
+    if (selected.empty())
+        return false;
+    if (deviceNamesMatch(row.name, selected))
+        return true;
+    if (! row.inputName.empty() && deviceNamesMatch(row.inputName, selected))
+        return true;
+    if (! row.outputName.empty() && deviceNamesMatch(row.outputName, selected))
+        return true;
+    return false;
+}
 
 // A device change does not rewrite channel names, plugins, or groups.
 struct KeptSessionChannel
@@ -440,11 +633,6 @@ inline std::string deviceEntryLabel(std::string_view name, int inputs, int outpu
     if (inputs < 0 || outputs < 0)
         return std::string(name);
     std::string label(name);
-    if (audioCardKind(name) == AudioCardKind::builtin && inputs > 0 && outputs > 0
-        && ! containsFolded(name, "built-in") && ! containsFolded(name, "microphone")
-        && ! containsFolded(name, "speaker") && ! containsFolded(name, "mikrofoni")
-        && ! containsFolded(name, "kaiutin"))
-        label += " (built-in)";
     label += " - ";
     label += std::to_string(inputs);
     label += " in / ";
@@ -534,6 +722,8 @@ inline std::vector<DeviceRow> buildDeviceList(const std::vector<ListedDevice>& d
         row.kind = kind;
         row.name = device.name;
         row.label = deviceEntryLabel(device.name, device.inputs, device.outputs);
+        row.inputName = device.inputName;
+        row.outputName = device.outputName;
         row.selectable = true;
         rows.push_back(std::move(row));
     };

@@ -15,6 +15,7 @@ Two basic rules
 
 What's new
 ----------
+- 1.0.6: a channel with no input, and any channel past the card, does not run its plugins. The DSP meter follows the audio callback, and a dropout line names the slowest plugin. Choosing any plugin loads it in any slot. If that plugin crashed last time, the slot shows a small note: this plugin crashed last time. The crash journal keeps older crashes. A stall on the message thread does not bypass the plugins, and a card that briefly reports fewer channels keeps the plugins on the channels that were open. A plugin window opens at the plugin's own size and scale. A VST3 window on the Mac uses the same point size as its Audio Unit. The Retina backing scale is not applied a second time. Clicks land on the control that is drawn. A mono VST3 settles its buses once at load. The audio block does not renegotiate them. Every load, including an Audio Unit that does not open, is written to the log with its format and slot. A one-input, two-output device runs plugins only on the channel that has the input. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. That reading is a weak baseline for plugin speed. 1.0.7: the device callback does not hold its lock while a plugin runs, a mono plugin is processed in place, and Core Audio gives the callback the whole buffer period.
 - 1.0.5: VST3 plugins are prepared on the message thread and processed only on the audio thread, the same way as an Audio Unit. A plugin that reports silence during load stays loaded. Opening an editor does not pause the plugin, so audio and recording keep going.
 - 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence.
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
@@ -45,9 +46,9 @@ What's new
 --------------------------
 - The device menu is in the startup window and in Audio setup (next to sample rate and buffer).
 - Real hardware is listed first (USB, Thunderbolt, AVB, Dante, SoundGrid), then Virtual / aggregate devices, then the MacBook built-in, and Offline last.
-- YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline.
+- YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline. A later switch happens only when you pick a card, or when a session file names one. YouHost does not move to another card on its own. The MacBook microphone and speakers stay one entry, MacBook Pro (mic + speakers).
 - Switching cards keeps channel names, plugins and groups.
-- A session always has 128 channels. Channels beyond the card's count are hidden.
+- A session always has 128 channels. Channels beyond the card's count are hidden. Plugins on a hidden channel, or a channel with no input, do not run. A one-input, two-output device runs plugins only on the channel that has the input.
 - The channel mode button cycles: REC (plugins + recording) → INPUT (plugins, not recorded) → OFF (channel fully off).
 - ALL REC / ALL INPUT / ALL OFF set every visible channel.
 
@@ -68,6 +69,7 @@ What's new
 - Waves shells and instruments are off by default ("Scan Waves shells" and "Show instruments in inserts" in the scanner). "Rescan selected" scans the selected plugins again.
 - The plugin list marks each plugin M, ST or M/ST.
 - Right-click a plugin slot: Open, Bypass, Remove, and for a stereo plugin on a mono channel: Use L / Use R / Sum (L+R)/2.
+- If a plugin crashed last time, its slot shows a small note: this plugin crashed last time. Choosing it still loads it. Open session without this plugin leaves it out of this launch only. The slot stays empty, and any plugin can be loaded there. A click on that empty slot opens the plugin list, including channel 1 slot 1. The session file keeps that plugin until you save a change.
 - If a stereo plugin won't open on a mono channel (some stereo-only AU plugins), use the VST3 or mono version.
 - Stereo link: right-click > Stereo link with ch N+1, or click LINK on the odd channel (1–2, 3–4…). Recording stays one mono WAV per channel.
 - Drag = move a plugin. Option+drag = copy it with its settings.
@@ -148,7 +150,7 @@ Shortcuts do nothing while a text field has focus.
 -------------------
 - SYNC LOST: the card in use disappeared. A large window stays until the card returns; then it shrinks to a blinking box in the bottom-left corner. Click it to see when sync was lost and for how long. It does not stop audio or recording.
 - Sample rate mismatch: a red line names both rates, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
-- Dropouts: open DROPOUTS (3). Raise the buffer to 64; see section 2.
+- Dropouts: open DROPOUTS (3). Raise the buffer to 64; see section 2. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. That reading is a weak baseline for plugin speed.
 - CPU: open CPU (4). DSP 100% = the buffer is full and the next callback drops out. You can see each plugin's share.
 - Plugin won't load: scan it again (S > Rescan selected). After a crash, the next launch offers Open session without this plugin. The slot stays in the session file.
 - "Damaged" / macOS blocks the app: right-click YouHost.app > Open, or System Settings > Privacy & Security > Open Anyway, or in Terminal:

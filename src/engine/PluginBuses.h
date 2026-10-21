@@ -113,6 +113,25 @@ inline bool sidechainKeepsStereoMain(bool hasExtraBuses, bool openedStereo) noex
     return hasExtraBuses && openedStereo;
 }
 
+// A plan that never reached setBusesLayout did not change the plugin.
+// "opened main bus does not match" is that case. Calling setBusesLayout to
+// put the old layout back would run VST3 setupProcessing again while other
+// VST3s are in processBlock. The audio block does not renegotiate buses.
+inline bool failedLayoutNeedsRestore(bool planReachedPlugin) noexcept
+{
+    return planReachedPlugin;
+}
+
+// setStateInformation can put the buses back to the width the plugin opened
+// with. That wider width would be processed on every block. It is fixed once
+// at load, before prepareToPlay. A zero count is "not reported".
+inline bool stateRestoredDifferentBuses(int chosenIn, int chosenOut, int liveIn, int liveOut) noexcept
+{
+    if (chosenIn <= 0 || chosenOut <= 0 || liveIn <= 0 || liveOut <= 0)
+        return false;
+    return liveIn != chosenIn || liveOut != chosenOut;
+}
+
 // processBlock sees every enabled bus in one buffer. The width is the larger
 // of the input and output totals. Zero means the layout cannot be processed.
 inline int pluginProcessWidth(int totalIn, int totalOut) noexcept

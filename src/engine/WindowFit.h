@@ -170,6 +170,150 @@ inline WindowFit windowOpenSize(int fitWidth,
     return clampWindowToScreen(width, height, screenWidth, screenHeight, 48);
 }
 
+// The plugin applies the display scale itself (VST3 content scale, Audio Unit
+// backing scale). Returning that scale from the host window as well scales
+// the view a second time, so the editor is cropped or stretched.
+inline float editorHostScale(float displayScale) noexcept
+{
+    (void) displayScale;
+    return 1.0f;
+}
+
+// IPlugView::getSize on macOS is logical points, the same unit as the Audio
+// Unit NSView. Vastaus reports that point size. JUCE was dividing it by the
+// Retina backing scale, so the VST3 window became half the Audio Unit window.
+// Windows and Linux report physical pixels, and the backing scale converts them.
+inline int vst3ViewPoints(int reportedSize, float backingScale, bool macOS) noexcept
+{
+    if (reportedSize < 1)
+        return 0;
+    if (macOS || !(backingScale > 1.0f))
+        return reportedSize;
+    const auto points = static_cast<float>(reportedSize) / backingScale;
+    const auto rounded = points >= 0.0f ? points + 0.5f : points - 0.5f;
+    return static_cast<int>(rounded);
+}
+
+// IPlugViewContentScaleSupport is for systems that cannot see the scale,
+// which on this host means Windows. macOS AppKit already applies the backing
+// scale to the view. Passing that scale, or passing 1 on a Retina display,
+// is what makes Vastaus redraw at the wrong size. The Audio Unit never
+// receives this call.
+inline float vst3ContentScale(float backingScale, bool macOS) noexcept
+{
+    if (macOS)
+        return 1.0f;
+    if (!(backingScale > 0.0f))
+        return 1.0f;
+    return backingScale;
+}
+
+// The hosted Audio Unit or VST3 NSView is added at 1:1 in points. The Retina
+// backing scale does not change its frame. A frame that is a different size
+// from the view's bounds scales the drawing and leaves clicks in the other space.
+struct HostedViewFrame
+{
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+inline HostedViewFrame hostedViewFrame(int x, int y, int width, int height, float desktopScale) noexcept
+{
+    (void) desktopScale;
+    HostedViewFrame frame;
+    frame.x = x;
+    frame.y = y;
+    frame.width = width;
+    frame.height = height;
+    return frame;
+}
+
+inline bool hostedViewClicksMatch(int frameWidth, int frameHeight, int boundsWidth, int boundsHeight) noexcept
+{
+    return frameWidth > 0 && frameHeight > 0
+        && frameWidth == boundsWidth && frameHeight == boundsHeight;
+}
+
+struct EditorOpenPlan
+{
+    int width = 0;
+    int height = 0;
+    int minWidth = 0;
+    int maxWidth = 0;
+    int minHeight = 0;
+    int maxHeight = 0;
+    bool resizable = false;
+    bool restoreSaved = false;
+    float hostScale = 1.0f;
+};
+
+// Opens at the plugin's size. A remembered frame smaller than that is not
+// restored. Limits come from the plugin, not from a host minimum.
+inline EditorOpenPlan planEditorWindow(int pluginWidth,
+                                       int pluginHeight,
+                                       bool pluginResizable,
+                                       int minWidth,
+                                       int minHeight,
+                                       int maxWidth,
+                                       int maxHeight,
+                                       float displayScale,
+                                       int screenWidth,
+                                       int screenHeight,
+                                       const SavedWindowSize& saved) noexcept
+{
+    EditorOpenPlan plan;
+    plan.hostScale = editorHostScale(displayScale);
+    plan.resizable = pluginResizable;
+
+    int fitWidth = pluginWidth > 0 ? pluginWidth : 0;
+    int fitHeight = pluginHeight > 0 ? pluginHeight : 0;
+    if (fitWidth < 1 && minWidth > 0)
+        fitWidth = minWidth;
+    if (fitHeight < 1 && minHeight > 0)
+        fitHeight = minHeight;
+
+    int lowWidth = minWidth > 0 ? minWidth : (fitWidth > 0 ? fitWidth : 1);
+    int lowHeight = minHeight > 0 ? minHeight : (fitHeight > 0 ? fitHeight : 1);
+    int highWidth = maxWidth > lowWidth ? maxWidth : std::max(lowWidth, fitWidth > 0 ? fitWidth : lowWidth);
+    int highHeight = maxHeight > lowHeight ? maxHeight : std::max(lowHeight, fitHeight > 0 ? fitHeight : lowHeight);
+    if (! pluginResizable)
+    {
+        if (fitWidth > 0)
+            lowWidth = highWidth = fitWidth;
+        if (fitHeight > 0)
+            lowHeight = highHeight = fitHeight;
+    }
+    if (highWidth < lowWidth)
+        highWidth = lowWidth;
+    if (highHeight < lowHeight)
+        highHeight = lowHeight;
+    if (fitWidth < lowWidth)
+        fitWidth = lowWidth;
+    if (fitHeight < lowHeight)
+        fitHeight = lowHeight;
+    if (fitWidth > highWidth)
+        fitWidth = highWidth;
+    if (fitHeight > highHeight)
+        fitHeight = highHeight;
+
+    plan.minWidth = lowWidth;
+    plan.minHeight = lowHeight;
+    plan.maxWidth = highWidth;
+    plan.maxHeight = highHeight;
+    // A fixed plugin opens at its own size. A larger remembered frame would
+    // stretch it. A resizable plugin may open larger, never smaller.
+    plan.restoreSaved = pluginResizable && fitWidth > 0 && fitHeight > 0 && keepRememberedWindow(saved, fitWidth, fitHeight);
+    if (fitWidth > 0 && fitHeight > 0)
+    {
+        const auto opened = windowOpenSize(fitWidth, fitHeight, screenWidth, screenHeight, plan.restoreSaved ? saved : SavedWindowSize {});
+        plan.width = opened.width;
+        plan.height = opened.height;
+    }
+    return plan;
+}
+
 // Every pixel of a block can be brought into a viewport of the given height.
 inline bool blockReachable(int blockTop, int blockHeight, int contentHeight, int viewportHeight) noexcept
 {

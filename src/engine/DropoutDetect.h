@@ -30,6 +30,8 @@ inline int64_t dropoutGapToleranceNs(int64_t periodNs)
 
 // 1 when this callback started late enough to count as a dropout.
 // The first callback, and the first one after a device restart, pass skipGap.
+// Built-in audio at 32 samples has a short period. A late wakeup counts here
+// while the work inside the callback still fits the buffer.
 inline int dropoutGapCount(int64_t previousCallbackNs, int64_t nowNs, int64_t periodNs, bool skipGap)
 {
     if (skipGap || previousCallbackNs <= 0 || periodNs <= 0 || nowNs <= previousCallbackNs)

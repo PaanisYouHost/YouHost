@@ -10,6 +10,10 @@
 #include "PluginMoves.h"
 #include "SignalPath.h"
 #include "StallWatch.h"
+#include "SessionChannels.h"
+#include "Vst3Path.h"
+#include "CrashJournal.h"
+#include "WindowFit.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -36,6 +40,20 @@ struct InstanceDeleter
         PluginRack::destroyInstance(rack, instance);
     }
 };
+
+// Slate's destructor dispatch_syncs the message thread from inside
+// AudioComponentInstanceDispose. Doing that release here never returns.
+// The instance is deleted on another thread. This thread does not wait.
+void releaseInstanceOffMessageThread(juce::AudioPluginInstance* instance)
+{
+    if (instance == nullptr)
+        return;
+    const bool started = juce::Thread::launch([instance]
+    {
+        delete instance;
+    });
+    juce::ignoreUnused(started);
+}
 
 juce::String pluginIdentifier(const juce::PluginDescription& description)
 {
@@ -226,6 +244,10 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
     ExtraBusMode modes[5] {};
     const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
+    // True while the plugin still has the layout it opened with. A planner
+    // rejection leaves it there. setBusesLayout(remember) is only needed after
+    // a real offer changed it.
+    bool pluginLeftOpened = true;
 
     for (int layout = 0; layout < 3; ++layout)
     {
@@ -234,6 +256,8 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
             const auto mode = modes[modeIndex];
             const auto plan = planPluginLayout(inputDefaults, inputBusCount, outputDefaults, outputBusCount,
                                                wantIn[layout], wantOut[layout], mode);
+            if (plan.ok)
+                pluginLeftOpened = false;
             juce::String why;
             const bool ok = offerLayout(instance, plan, remember, why);
             juce::String line;
@@ -246,7 +270,13 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
             choice.attempts.add(line);
             if (! ok)
             {
-                instance.setBusesLayout(remember);
+                // The planner can reject "opened" before the plugin is touched.
+                // Restoring that layout would be a second setBusesLayout.
+                if (failedLayoutNeedsRestore(plan.ok))
+                {
+                    instance.setBusesLayout(remember);
+                    pluginLeftOpened = true;
+                }
                 continue;
             }
 
@@ -271,7 +301,8 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         }
     }
 
-    instance.setBusesLayout(remember);
+    if (! pluginLeftOpened)
+        instance.setBusesLayout(remember);
     int liveIn[kPluginBusCap] {};
     int liveOut[kPluginBusCap] {};
     const int liveInputBuses = std::min(instance.getBusCount(true), kPluginBusCap);
@@ -417,6 +448,8 @@ struct PluginRack::LiveGraph
         int processChannels = 1;
         int stereoFold = 0;
         bool prepared = false;
+        bool vst3 = false;
+        char name[40] {};
     };
 
     // Two channels for a normal insert. Eight leaves room for a sidechain
@@ -454,6 +487,24 @@ std::uint64_t steadyNs() noexcept
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+void copyPluginName(char* dest, int cap, const char* source) noexcept
+{
+    if (dest == nullptr || cap < 2)
+        return;
+    dest[0] = '\0';
+    if (source == nullptr)
+        return;
+    int index = 0;
+    for (; index < cap - 1 && source[index] != '\0'; ++index)
+        dest[index] = source[index];
+    dest[index] = '\0';
+}
+
+void copyPluginName(char* dest, int cap, const juce::String& name) noexcept
+{
+    copyPluginName(dest, cap, name.toRawUTF8());
 }
 
 int dspWorkerCount()
@@ -546,6 +597,7 @@ struct PluginRack::RealtimePool
             return;
         if (count == 1 || threads_.empty() || stop_.load(std::memory_order_acquire))
         {
+            lastWaitNs_ = 0;
             for (int index = 0; index < count; ++index)
                 rack->processJob(index);
             return;
@@ -570,8 +622,15 @@ struct PluginRack::RealtimePool
         }
         rack->addCoreNs(0, steadyNs() - began);
 
+        const auto waitBegan = steadyNs();
         if (left_.fetch_sub(1, std::memory_order_acq_rel) != 1)
             done_.wait();
+        lastWaitNs_ = static_cast<int>(steadyNs() - waitBegan);
+    }
+
+    int lastWaitNs() const noexcept
+    {
+        return lastWaitNs_;
     }
 
     void runWorker(int index)
@@ -612,21 +671,48 @@ struct PluginRack::RealtimePool
     std::atomic<int> left_ { 0 };
     std::atomic<bool> stop_ { false };
     int count_ = 0;
+    int lastWaitNs_ = 0;
     PluginRack* rack_ = nullptr;
     bool stopped_ = false;
 };
 
 static juce::String editorWindowKey(const juce::PluginDescription& description)
 {
-    auto name = description.name.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+    auto keep = [](juce::String text)
+    {
+        text = text.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+        if (text.length() > 24)
+            text = text.substring(0, 24);
+        return text;
+    };
+    auto format = keep(description.pluginFormatName);
+    if (format.isEmpty())
+        format = "Plugin";
+    auto name = keep(description.name);
     if (name.isEmpty())
         name = "Plugin";
-    if (name.length() > 48)
-        name = name.substring(0, 48);
-    return "windowEditor" + name;
+    return "windowEditor" + format + name;
 }
 
-struct PluginRack::EditorWindow : public juce::DocumentWindow
+juce::String pluginLogLine(const char* phase,
+                           int channel,
+                           int slot,
+                           const juce::String& format,
+                           const juce::String& name,
+                           const juce::String& identifier,
+                           const juce::String& reason)
+{
+    const auto line = formatPluginAttemptLine(phase,
+                                              channel,
+                                              slot,
+                                              format.toRawUTF8(),
+                                              name.toRawUTF8(),
+                                              identifier.toRawUTF8(),
+                                              reason.isNotEmpty() ? reason.toRawUTF8() : nullptr);
+    return juce::String::fromUTF8(line.c_str());
+}
+
+struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::ComponentListener
 {
     EditorWindow(const juce::String& title, std::function<void(int, int)> onClose, AppSettings* settings, juce::String key)
         : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
@@ -635,14 +721,20 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
           key_(std::move(key))
     {
         setUsingNativeTitleBar(true);
-        setResizable(true, false);
-        setResizeLimits(320, 200, 4000, 2400);
     }
 
     ~EditorWindow() override
     {
+        if (auto* content = getContentComponent())
+            content->removeComponentListener(this);
         if (settings_ != nullptr && key_.isNotEmpty())
             settings_->saveNamedWindow(key_, getWindowStateAsString());
+    }
+
+    // HiDPI stays on the plugin. A second scale on this window crops it.
+    float getDesktopScaleFactor() const override
+    {
+        return editorHostScale(1.0f);
     }
 
     void place(int channel, int slot) noexcept
@@ -651,10 +743,52 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
         slot_ = slot;
     }
 
+    void watchContent()
+    {
+        if (auto* content = getContentComponent())
+        {
+            content->addComponentListener(this);
+            const int borderW = getWidth() - content->getWidth();
+            const int borderH = getHeight() - content->getHeight();
+            if (borderW >= 0)
+                frameW_ = borderW;
+            if (borderH >= 0)
+                frameH_ = borderH;
+        }
+    }
+
     void closeButtonPressed() override
     {
         if (onClose_ != nullptr)
             onClose_(channel_, slot_);
+    }
+
+    void componentMovedOrResized(juce::Component& component, bool, bool wasResized) override
+    {
+        // VST3 and Audio Unit views on the Mac are both in points. The window
+        // follows that view. It does not lock a later size that JUCE produced
+        // by dividing the VST3 view by the Retina backing scale. The hosted
+        // NSView stays 1:1 with this window.
+        if (! wasResized || fitting_ || &component != getContentComponent())
+            return;
+        const int contentW = component.getWidth();
+        const int contentH = component.getHeight();
+        if (contentW < 1 || contentH < 1)
+            return;
+        const int targetW = contentW + frameW_;
+        const int targetH = contentH + frameH_;
+        if (targetW == getWidth() && targetH == getHeight())
+            return;
+        fitting_ = true;
+        if (! isResizable())
+            setResizeLimits(targetW, targetH, targetW, targetH);
+        else if (auto* limits = getConstrainer())
+            setResizeLimits(std::min(limits->getMinimumWidth(), targetW),
+                            std::min(limits->getMinimumHeight(), targetH),
+                            std::max(limits->getMaximumWidth(), targetW),
+                            std::max(limits->getMaximumHeight(), targetH));
+        setSize(targetW, targetH);
+        fitting_ = false;
     }
 
     std::function<void(int, int)> onClose_;
@@ -662,6 +796,9 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
     juce::String key_;
     int channel_ = -1;
     int slot_ = -1;
+    int frameW_ = 0;
+    int frameH_ = 0;
+    bool fitting_ = false;
 };
 
 struct PluginRack::DeferredPluginRelease
@@ -689,80 +826,155 @@ public:
     {
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::String error;
-        owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+        const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
+        // An Audio Unit is created on the loader thread. A VST3 is created
+        // on the message thread, in the same turn as setActive.
+        if (! vst3)
+            owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
 
         // VST3 setupProcessing is on the message thread. The loader waits.
         // The audio callback is the first render, with the same channel count
         // and block size. No lock is held across the plugin calls. The message
         // thread publishes the instance only after this returns.
         PluginRack::OffThreadBuses setup;
-        if (instance != nullptr)
+        const int left = owner_.jobChannel_ & ~1;
+        const bool unlinkedMono = ! owner_.stereoLink(left);
+        auto* plugin = instance.get();
+        BusChoice measured;
+        auto setupPlugin = [&, plugin, unlinkedMono]()
         {
-            const int left = owner_.jobChannel_ & ~1;
-            const bool unlinkedMono = ! owner_.stereoLink(left);
-            auto* plugin = instance.get();
-            BusChoice measured;
-            const bool preparedOnMessage = owner_.runOnMessageThread([&, plugin, unlinkedMono]
+            // The captured pointer is the loader-thread instance. A VST3 is
+            // filled in on this same turn, after this lambda was built.
+            auto* live = plugin != nullptr ? plugin : instance.get();
+            if (live == nullptr)
+                return;
+            const auto buses = configureBuses(*live, unlinkedMono);
+            measured = buses;
+            setup.ready = true;
+            setup.ok = buses.ok;
+            setup.inputChannels = buses.inputChannels;
+            setup.outputChannels = buses.outputChannels;
+            setup.totalInputs = buses.totalInputs;
+            setup.totalOutputs = buses.totalOutputs;
+            setup.openInputs = buses.openInputs;
+            setup.openOutputs = buses.openOutputs;
+            setup.supportMono = buses.supportMono;
+            setup.supportSide = buses.supportSide;
+            setup.supportStereo = buses.supportStereo;
+            setup.openedStereo = buses.openedStereo;
+            setup.hasExtraBuses = buses.hasExtraBuses;
+            setup.attempts = buses.attempts;
+            if (! buses.ok)
+                return;
+            if (owner_.jobState_.getSize() > 0)
+                live->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
+            int liveIn = live->getTotalNumInputChannels();
+            int liveOut = live->getTotalNumOutputChannels();
+            // A saved state can reopen the stereo bus after the mono layout
+            // was accepted. Negotiating again keeps that width off the audio callback.
+            if (stateRestoredDifferentBuses(measured.totalInputs, measured.totalOutputs, liveIn, liveOut))
             {
-                const auto buses = configureBuses(*plugin, unlinkedMono);
-                measured = buses;
-                setup.ready = true;
-                setup.ok = buses.ok;
-                setup.inputChannels = buses.inputChannels;
-                setup.outputChannels = buses.outputChannels;
-                setup.totalInputs = buses.totalInputs;
-                setup.totalOutputs = buses.totalOutputs;
-                setup.openInputs = buses.openInputs;
-                setup.openOutputs = buses.openOutputs;
-                setup.supportMono = buses.supportMono;
-                setup.supportSide = buses.supportSide;
-                setup.supportStereo = buses.supportStereo;
-                setup.openedStereo = buses.openedStereo;
-                setup.hasExtraBuses = buses.hasExtraBuses;
-                setup.attempts = buses.attempts;
-                if (! buses.ok)
-                    return;
-                if (owner_.jobState_.getSize() > 0)
-                    plugin->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
-                const int liveIn = plugin->getTotalNumInputChannels();
-                const int liveOut = plugin->getTotalNumOutputChannels();
-                const int mainIn = plugin->getMainBusNumInputChannels();
-                const int mainOut = plugin->getMainBusNumOutputChannels();
-                if (liveIn > 0)
-                    measured.totalInputs = liveIn;
-                if (liveOut > 0)
-                    measured.totalOutputs = liveOut;
-                if (mainIn > 0)
-                    measured.inputChannels = mainIn;
-                if (mainOut > 0)
-                    measured.outputChannels = mainOut;
-                setup.inputChannels = measured.inputChannels;
-                setup.outputChannels = measured.outputChannels;
-                setup.totalInputs = measured.totalInputs;
-                setup.totalOutputs = measured.totalOutputs;
-                const int width = pluginProcessWidth(measured.totalInputs, measured.totalOutputs);
-                if (width < 1)
+                const auto again = configureBuses(*live, unlinkedMono);
+                setup.attempts.add("state changed buses, negotiated again");
+                setup.attempts.addArray(again.attempts);
+                if (again.ok)
                 {
-                    setup.ok = false;
-                    if (owner_.settings_ != nullptr)
-                        appendHostLog(*owner_.settings_,
-                                      "plugin " + owner_.jobDescription_.name
-                                          + " layout " + juce::String(measured.totalInputs) + "/"
-                                          + juce::String(measured.totalOutputs)
-                                          + " is wider than the process buffer, not activated");
-                    return;
+                    measured = again;
+                    setup.ok = true;
+                    setup.inputChannels = again.inputChannels;
+                    setup.outputChannels = again.outputChannels;
+                    setup.totalInputs = again.totalInputs;
+                    setup.totalOutputs = again.totalOutputs;
+                    setup.supportMono = again.supportMono;
+                    setup.supportSide = again.supportSide;
+                    setup.supportStereo = again.supportStereo;
+                    setup.openedStereo = again.openedStereo;
+                    setup.hasExtraBuses = again.hasExtraBuses;
+                    liveIn = again.totalInputs;
+                    liveOut = again.totalOutputs;
                 }
-                plugin->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
-                setup.latencySamples = plugin->getLatencySamples();
+            }
+            const int mainIn = live->getMainBusNumInputChannels();
+            const int mainOut = live->getMainBusNumOutputChannels();
+            if (liveIn > 0)
+                measured.totalInputs = liveIn;
+            if (liveOut > 0)
+                measured.totalOutputs = liveOut;
+            if (mainIn > 0)
+                measured.inputChannels = mainIn;
+            if (mainOut > 0)
+                measured.outputChannels = mainOut;
+            setup.inputChannels = measured.inputChannels;
+            setup.outputChannels = measured.outputChannels;
+            setup.totalInputs = measured.totalInputs;
+            setup.totalOutputs = measured.totalOutputs;
+            const int width = pluginProcessWidth(measured.totalInputs, measured.totalOutputs);
+            if (width < 1)
+            {
+                setup.ok = false;
+                if (owner_.settings_ != nullptr)
+                    appendHostLog(*owner_.settings_,
+                                  pluginLogLine("did-not-load",
+                                                owner_.jobChannel_,
+                                                owner_.jobSlot_,
+                                                owner_.jobDescription_.pluginFormatName,
+                                                owner_.jobDescription_.name,
+                                                pluginIdentifier(owner_.jobDescription_),
+                                                "layout " + juce::String(measured.totalInputs) + "/"
+                                                    + juce::String(measured.totalOutputs)
+                                                    + " is wider than the process buffer, not activated"));
+                return;
+            }
+            live->setNonRealtime(false);
+            live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+            setup.latencySamples = live->getLatencySamples();
+        };
+        bool preparedOnMessage = false;
+        if (vst3)
+        {
+            // VST3 setupProcessing is on the message thread.
+            preparedOnMessage = owner_.runOnMessageThread([&]()
+            {
+                // Factory, initialize, setupProcessing, setActive, and
+                // prepareToPlay are this one turn. A CFRunLoop timer the
+                // plugin arms during initialize cannot run until this
+                // returns, so it cannot fire into a component that is
+                // not active yet.
+                owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_,
+                                                         owner_.jobRate_,
+                                                         owner_.jobBlock_,
+                                                         instance,
+                                                         error,
+                                                         true);
+                if (instance != nullptr)
+                    setupPlugin();
             });
+        }
+        else if (instance != nullptr)
+        {
+            // An Audio Unit is prepared on the loader thread. Doing it on
+            // the message thread holds that thread, and the audio callback
+            // waits inside the Audio Units already running. The message
+            // thread stays in the runloop. blockProcessing_ stays false,
+            // so the callback does not pass the dry input.
+            setupPlugin();
+            preparedOnMessage = true;
+        }
+        if (vst3 || instance != nullptr)
+        {
             if (! preparedOnMessage)
             {
                 setup.ready = true;
                 setup.ok = false;
                 if (owner_.settings_ != nullptr)
                     appendHostLog(*owner_.settings_,
-                                  "plugin " + owner_.jobDescription_.name
-                                      + " prepare did not run on the message thread, not activated");
+                                  pluginLogLine("did-not-load",
+                                                owner_.jobChannel_,
+                                                owner_.jobSlot_,
+                                                owner_.jobDescription_.pluginFormatName,
+                                                owner_.jobDescription_.name,
+                                                pluginIdentifier(owner_.jobDescription_),
+                                                "prepare did not run on the message thread, not activated"));
             }
             else if (setup.ok)
             {
@@ -896,8 +1108,54 @@ void PluginRack::setActiveChannels(int count)
     const int previous = activeChannels_.exchange(count, std::memory_order_relaxed);
     if (previous == count)
         return;
-    std::lock_guard<std::mutex> lock(lifeLock_);
-    publishUnlocked();
+
+    struct IdleNote
+    {
+        int channel = 0;
+        int slot = 0;
+        juce::String name;
+        juce::String identifier;
+        bool running = false;
+    };
+    std::vector<IdleNote> idle;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        publishUnlocked();
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            const int packed = routing_.inputPacked[static_cast<std::size_t>(channel)];
+            const bool runs = channelProcessesPlugins(channel, count, packed);
+            const bool ran = channelProcessesPlugins(channel, previous, packed);
+            for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            {
+                auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+                if (model.plugin == nullptr || model.plugin->description.name.isEmpty())
+                    continue;
+                // A hidden channel can still hold a smoothed percent from when it
+                // was open. That leftover is what kept the meter and the journal
+                // saying the plugin was running after Offline -> 1 channel.
+                int leftover = 0;
+                if (! runs && model.plugin->gate != nullptr)
+                    leftover = model.plugin->gate->shownPercent.exchange(0, std::memory_order_relaxed);
+                if (runs == ran && leftover == 0)
+                    continue;
+                IdleNote note;
+                note.channel = channel;
+                note.slot = slot;
+                note.name = model.plugin->description.name;
+                note.identifier = pluginIdentifier(model.plugin->description);
+                note.running = runs;
+                idle.push_back(std::move(note));
+            }
+        }
+    }
+    for (const auto& note : idle)
+    {
+        if (note.running)
+            tracePlugin(note.channel, note.slot, "active", note.name, note.identifier, "input is open");
+        else
+            tracePlugin(note.channel, note.slot, "idle", note.name, note.identifier, "no input on this channel");
+    }
 }
 
 void PluginRack::process(float* const* outputs,
@@ -911,8 +1169,9 @@ void PluginRack::process(float* const* outputs,
     // A shorter callback is legal: the plugin was prepared for the maximum.
     // Re-preparing every time the device jitters (64, then 32, then 64)
     // restarts the plugin and is the dropout burst. Only a callback larger
-    // than the prepared maximum needs a new prepare.
-    if (numSamples > blockSize_ && blockSize_ > 0)
+    // than the prepared maximum needs a new prepare: numSamples > blockSize_.
+    int askedReprepare = 0;
+    if (blockAsksReprepare(numSamples, blockSize_))
     {
         const int previous = seenCallback_.load(std::memory_order_relaxed);
         if (previous == numSamples)
@@ -923,7 +1182,10 @@ void PluginRack::process(float* const* outputs,
             seenStreak_.store(1, std::memory_order_relaxed);
         }
         if (seenStreak_.load(std::memory_order_relaxed) >= 6)
+        {
             reprepareBlock_.store(numSamples, std::memory_order_relaxed);
+            askedReprepare = 1;
+        }
     }
     else if (numSamples > 0 && numSamples <= blockSize_)
     {
@@ -932,6 +1194,10 @@ void PluginRack::process(float* const* outputs,
 
     StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
     pluginPercentScratch_.store(0, std::memory_order_relaxed);
+    slowestNs_.store(0, std::memory_order_relaxed);
+    slowestBlockNs_.store(0, std::memory_order_relaxed);
+    slowestChannel_.store(-1, std::memory_order_relaxed);
+    slowestSlot_.store(-1, std::memory_order_relaxed);
     const auto started = steadyNs();
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
     auto* graph = published_.load(std::memory_order_acquire);
@@ -943,20 +1209,23 @@ void PluginRack::process(float* const* outputs,
     const bool bypass = bypassAll_.load(std::memory_order_relaxed) != 0;
     if (graph != nullptr && ! blocked && ! bypass && outputs != nullptr && numSamples > 0)
     {
-        if (! audioJoined_)
-        {
-            workgroup_.join(audioToken_);
-            audioJoined_ = static_cast<bool>(workgroup_);
-        }
+        joinAudioThread();
 
         jobGraph_ = graph;
         jobSamples_ = numSamples;
         int count = 0;
+        bool vst3Inline = false;
         const int limit = std::clamp(activeChannels, 0, kMaxChannels);
         for (int channel = 0; channel < limit; ++channel)
         {
             if (channelReset_[static_cast<std::size_t>(channel)].exchange(0, std::memory_order_acq_rel) != 0)
                 clearChannelMemory(*graph, channel);
+
+            // No input, hidden, or past the card: the plugin stays loaded and does not run.
+            // An output on its own is not an input. The right side of a one-input,
+            // two-output device stays in this skip.
+            if (! channelProcessesPlugins(channel, limit, routing.inputPacked[static_cast<std::size_t>(channel)]))
+                continue;
 
             const bool linkedRight = (channel & 1) == 1
                                      && stereoLink_[static_cast<std::size_t>(channel - 1)].load(std::memory_order_relaxed) != 0;
@@ -979,7 +1248,7 @@ void PluginRack::process(float* const* outputs,
             float* partner = nullptr;
             if ((channel & 1) == 0
                 && stereoLink_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed) != 0
-                && channel + 1 < limit
+                && channelProcessesPlugins(channel + 1, limit, routing.inputPacked[static_cast<std::size_t>(channel + 1)])
                 && channelIsOn(enabledLow, enabledHigh, channel + 1))
             {
                 const int packedRight = routing.outputPacked[static_cast<std::size_t>(channel + 1)];
@@ -989,18 +1258,52 @@ void PluginRack::process(float* const* outputs,
             if (! anyPlugin && ! delayed && partner == nullptr)
                 continue;
 
+            if (! vst3Inline)
+            {
+                for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+                    vst3Inline = vst3Inline || (graph->slots[channel][slot].vst3 && graph->slots[channel][slot].instance != nullptr);
+            }
             jobChannels_[count] = channel;
             jobOutputs_[count] = output;
             jobPartners_[count] = partner;
             ++count;
         }
 
-        if (count > 0 && pool_ != nullptr)
-            pool_->parallel(count, this);
-        else
+        // VST3 process stays on the audio thread. A worker would take the wrapper lock off that thread.
+        int waitNs = 0;
+        if (vst3Inline || count <= 1 || pool_ == nullptr || ! vst3ProcessOnAudioThread())
+        {
             for (int index = 0; index < count; ++index)
                 processJob(index);
+        }
+        else if (count > 0)
+        {
+            pool_->parallel(count, this);
+            waitNs = pool_->lastWaitNs();
+        }
+        blockNote_.vst3Inline = vst3Inline ? 1 : 0;
+        blockNote_.waitNs = waitNs;
     }
+    else
+    {
+        blockNote_.vst3Inline = 0;
+        blockNote_.waitNs = 0;
+    }
+
+    // Name is copied while this graph is still the in-use one. Releasing it
+    // first lets the message thread free the graph under the audio thread.
+    blockNote_.prepared = blockSize_;
+    blockNote_.reprepare = askedReprepare;
+    blockNote_.channel = slowestChannel_.load(std::memory_order_relaxed);
+    blockNote_.slot = slowestSlot_.load(std::memory_order_relaxed);
+    blockNote_.nanoseconds = slowestNs_.load(std::memory_order_relaxed);
+    blockNote_.blockNs = slowestBlockNs_.load(std::memory_order_relaxed);
+    blockNote_.name[0] = '\0';
+    if (graph != nullptr && blockNote_.channel >= 0 && blockNote_.slot >= 0
+        && blockNote_.channel < kMaxChannels && blockNote_.slot < kSlotsPerChannel)
+        copyPluginName(blockNote_.name,
+                       static_cast<int>(sizeof(blockNote_.name)),
+                       graph->slots[blockNote_.channel][blockNote_.slot].name);
 
     inUse_.store(nullptr, std::memory_order_release);
     callbackEpoch_.fetch_add(1, std::memory_order_release);
@@ -1010,6 +1313,14 @@ void PluginRack::process(float* const* outputs,
     livePluginPercent_.store(clampCpuPercent(pluginPercentScratch_.exchange(0, std::memory_order_relaxed)),
                              std::memory_order_relaxed);
     StallClock::get().audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
+}
+
+void PluginRack::joinAudioThread()
+{
+    if (audioJoined_)
+        return;
+    workgroup_.join(audioToken_);
+    audioJoined_ = static_cast<bool>(workgroup_);
 }
 
 void PluginRack::processJob(int index)
@@ -1117,6 +1428,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
     {
         if (buffer == nullptr || count <= 0)
             return;
+        bool sawPause = false;
+        bool ranPlugin = false;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& live = graph.slots[channel][slot];
@@ -1136,12 +1449,16 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
 
             auto* gate = live.gate;
             if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
+            {
+                sawPause = true;
                 continue;
+            }
             if (gate != nullptr)
                 gate->depth.fetch_add(1, std::memory_order_acq_rel);
             if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
             {
                 gate->depth.fetch_sub(1, std::memory_order_release);
+                sawPause = true;
                 continue;
             }
 
@@ -1149,6 +1466,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             for (int index = 0; index < LiveGraph::kScratchCap; ++index)
                 scratch[index] = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][static_cast<std::size_t>(index)];
             const bool trueStereo = ! extraBuses && right != nullptr && inputs >= 2 && outputsN >= 2;
+            // A 1-in/1-out plugin writes the channel buffer. Another host does
+            // that in place. The scratch copy is a second pass over this block.
+            const bool monoInPlace = ! extraBuses && ! trueStereo && std::max(inputs, outputsN) <= 1;
             bool scratchMissing = scratch[0] == nullptr;
             if (! scratchMissing)
             {
@@ -1156,34 +1476,42 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 for (int index = 0; index < need; ++index)
                     scratchMissing = scratchMissing || scratch[index] == nullptr;
             }
-            if (! trueStereo && scratchMissing)
+            if (! trueStereo && ! monoInPlace && scratchMissing)
             {
                 if (gate != nullptr)
                     gate->depth.fetch_sub(1, std::memory_order_release);
                 continue;
             }
 
+            ranPlugin = true;
+            int blockOnlyNs = 0;
             const auto began = steadyNs();
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
             const auto fold = stereoFoldFromInt(live.stereoFold);
             auto runOne = [&](float* mono)
             {
-                if (mono == nullptr || scratch[0] == nullptr)
+                if (mono == nullptr)
                     return;
                 const int viewWidth = std::max(1, std::min(std::max(inputs, outputsN), 2));
-                if (viewWidth > 1 && scratch[1] == nullptr)
+                if (viewWidth <= 1)
+                {
+                    float* plugin[1] = { mono };
+                    midi.clear();
+                    juce::AudioBuffer<float> view(plugin, 1, count);
+                    const auto blockBegan = steadyNs();
+                    instance->processBlock(view, midi);
+                    blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
+                    return;
+                }
+                if (scratch[0] == nullptr || scratch[1] == nullptr)
                     return;
                 float* plugin[2] = { scratch[0], scratch[1] };
                 preparePluginBlock(plugin, inputs, outputsN, mono, count);
                 midi.clear();
                 juce::AudioBuffer<float> view(plugin, viewWidth, count);
+                const auto blockBegan = steadyNs();
                 instance->processBlock(view, midi);
-                if (viewWidth <= 1)
-                {
-                    if (scratch[0] != mono)
-                        std::memcpy(mono, scratch[0], sizeof(float) * static_cast<std::size_t>(count));
-                    return;
-                }
+                blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 takeFoldedChannel(mono, plugin, outputsN, count, fold);
             };
             SanitizeReport leftReport;
@@ -1201,7 +1529,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                     feedPluginChannels(scratch, width, fed, count, left, rightFeed);
                     midi.clear();
                     juce::AudioBuffer<float> view(scratch, width, count);
+                    const auto blockBegan = steadyNs();
                     instance->processBlock(view, midi);
+                    blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                     if (partner == nullptr && outputsN >= 2)
                     {
                         takeFoldedChannel(left, scratch, outputsN, count, fold);
@@ -1229,7 +1559,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 float* pair[2] = { buffer, right };
                 midi.clear();
                 juce::AudioBuffer<float> view(pair, 2, count);
+                const auto blockBegan = steadyNs();
                 instance->processBlock(view, midi);
+                blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 leftReport = sanitizeAudioBlock(buffer, count);
                 rightReport = sanitizeAudioBlock(right, count);
             }
@@ -1258,8 +1590,26 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 const int shown = smoothCpuPercent(previous, instant);
                 gate->shownPercent.store(shown, std::memory_order_relaxed);
                 pluginPercentScratch_.fetch_add(shown, std::memory_order_relaxed);
+                const int ns = static_cast<int>(elapsed > static_cast<std::uint64_t>(2147483647) ? 2147483647 : elapsed);
+                int prior = slowestNs_.load(std::memory_order_relaxed);
+                while (ns > prior)
+                {
+                    if (! slowestNs_.compare_exchange_weak(prior, ns, std::memory_order_relaxed))
+                        continue;
+                    slowestBlockNs_.store(blockOnlyNs, std::memory_order_relaxed);
+                    slowestChannel_.store(channel, std::memory_order_relaxed);
+                    slowestSlot_.store(slot, std::memory_order_relaxed);
+                    break;
+                }
                 gate->depth.fetch_sub(1, std::memory_order_release);
             }
+        }
+        // A paused plugin must not leave the dry mic on the output.
+        if (replaceDryWhenPluginPaused(sawPause, ranPlugin))
+        {
+            std::memset(buffer, 0, sizeof(float) * static_cast<std::size_t>(count));
+            if (right != nullptr)
+                std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(count));
         }
     };
 
@@ -1377,8 +1727,11 @@ DspLoad PluginRack::dspLoad() const
 
     std::lock_guard<std::mutex> lock(lifeLock_);
     float pluginSum = 0.0f;
+    const int shown = activeChannels_.load(std::memory_order_relaxed);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
+            continue;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -1500,12 +1853,15 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
     PhaseScope phase(kPhasePrepare);
     const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
     const int block = blockSize > 0 ? blockSize : 512;
-    blockProcessing_.store(true, std::memory_order_release);
+    const double previousRate = sampleRate_;
+    const int previousBlock = blockSize_;
+    const bool sameQuantum = previousBlock > 0 && previousBlock == block
+                             && previousRate > rate - 1.0 && previousRate < rate + 1.0;
+    // Do not set blockProcessing_. That flag makes the callback skip every
+    // plugin after it has copied the dry input. A message-thread stall would
+    // then be the mic with no De-Feedback. signalDuringMessageStall stays plugins.
     if (! waitUntilOutsideCallback())
-    {
-        blockProcessing_.store(false, std::memory_order_release);
         return;
-    }
     workgroup_ = workgroup;
     audioJoined_ = false;
 
@@ -1522,17 +1878,30 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
                     hosted.push_back(slot.plugin);
     }
 
-    runOnMessageThread([&hosted, rate, block]
+    // Same rate and block: the instances are already prepared. Leave them in
+    // the callback. A device-mask dip must not re-prepare the whole rack.
+    if (! sameQuantum)
     {
         for (auto& plugin : hosted)
         {
-            if (plugin != nullptr && plugin->instance != nullptr)
+            if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr)
+                continue;
+            if (! pauseGate(*plugin->gate))
+                continue;
+            auto* instance = plugin->instance.get();
+            runOnMessageThread([instance, plugin, rate, block]
             {
-                plugin->instance->prepareToPlay(rate, block);
-                plugin->instance->reset();
-            }
+                if (instance == nullptr)
+                    return;
+                instance->setNonRealtime(false);
+                instance->prepareToPlay(rate, block);
+                instance->reset();
+                plugin->latencySamples = clampLatencySamples(instance->getLatencySamples());
+            });
+            plugin->prepared = true;
+            resumeGate(*plugin->gate);
         }
-    });
+    }
 
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1541,8 +1910,6 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
             if (plugin == nullptr)
                 continue;
             plugin->prepared = plugin->instance != nullptr;
-            if (plugin->instance != nullptr)
-                plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
         }
         publishUnlocked();
     }
@@ -1617,6 +1984,18 @@ void PluginRack::beginLoad(int channel,
         return;
     }
 
+    // A click that chooses a plugin owns this slot, including ch 1 slot 1 after
+    // "left crashed plugins off". A restore still waiting in the queue must not
+    // clear that plugin. The check is before the editor is detached.
+    if (restoreGeneration == 0)
+        claimSlotForManualLoad(channel, slot);
+    else if (restoreSkipsClaimedSlot(true, userClaimedSlot_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]))
+    {
+        finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
+        completeRestoreStep(restoreGeneration);
+        return;
+    }
+
     // Hide the old editor now. It stays allocated until the deferred AU view
     // callbacks have had a few turns on the message loop.
     detachEditor(channel, slot);
@@ -1632,32 +2011,59 @@ void PluginRack::beginLoad(int channel,
     }
     channelWork_[static_cast<std::size_t>(channel)].ticket = ticket;
 
-    if (isBlocked(description) || isSlotBlocked(channel, slot))
+    std::vector<SlotBlock> slotBlocks;
+    slotBlocks.reserve(blockedSlots_.size());
+    for (const auto& block : blockedSlots_)
     {
-        // Unload the instance and keep the slot. The session file still has
-        // the plugin description and its state, so the file stays compatible.
+        SlotBlock item;
+        item.channel = block.channel;
+        item.slot = block.slot;
+        item.identifier = block.identifier.toStdString();
+        slotBlocks.push_back(std::move(item));
+    }
+    const auto incomingId = pluginIdentifier(description).toStdString();
+    const auto formatName = description.pluginFormatName;
+    // The attempt is logged before anything else. Choosing a plugin always loads it.
+    tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description), {}, formatName);
+    // The dialog "Open session without this plugin" skips this automatic restore
+    // only. The slot stays empty. A later manual choice uses generation 0 and loads.
+    if (leaveOutOfThisLaunch(restoreGeneration != 0, omittedFromThisLaunch(channel, slot, incomingId)))
+    {
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
-        auto parkedSlot = std::make_shared<HostedPlugin>();
-        parkedSlot->description = description;
-        parkedSlot->state = state;
-        parkedSlot->bypassed = true;
-        parkedSlot->stereoFold = stereoFold;
         std::shared_ptr<HostedPlugin> previous;
         {
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             model.loading = false;
-            model.error = name + " may have crashed YouHost. It is turned off.";
+            model.error.clear();
+            model.note = kPluginCrashedLastTime;
             previous = std::move(model.plugin);
-            model.plugin = std::move(parkedSlot);
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
+        keepPluginInSessionFile(channel, slot, description, state, bypassed, stereoFold);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), kLeftOutOfThisLaunch, formatName);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
         return;
     }
+    dropKeptPlugin(channel, slot);
+    const auto admit = admitPluginIntoSlot(channel,
+                                           slot,
+                                           incomingId,
+                                           slotBlocks.data(),
+                                           static_cast<int>(slotBlocks.size()),
+                                           crashedBefore(description));
+    if (admit.clearSlot)
+        clearCrashBlock(channel, slot);
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        model.note = admit.reason != nullptr ? juce::String(admit.reason) : juce::String();
+    }
+    if (admit.reason != nullptr)
+        tracePlugin(channel, slot, "warn", description.name, pluginIdentifier(description), juce::String(admit.reason), formatName);
 
     double rate = 48000.0;
     int block = 512;
@@ -1667,11 +2073,10 @@ void PluginRack::beginLoad(int channel,
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
 
-    tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
-
-    // The loader thread creates the instance. The message thread must stay in
-    // the runloop: a slow AudioComponentInstanceNew on this thread holds the
-    // message lock, and the audio callback can block on that lock.
+    // The loader thread creates the instance for an Audio Unit. The message
+    // thread must stay in the runloop: a slow AudioComponentInstanceNew on
+    // this thread holds the message lock, and the audio callback can block
+    // on that lock.
     // Two AudioComponentInstanceNew calls at once deadlock. The loader waits
     // for the main thread, and the main thread is inside its own instantiate.
     if (catalogue_.prefersBackgroundInstance(description))
@@ -1740,7 +2145,8 @@ void PluginRack::beginLoad(int channel,
                                 return;
                             }
                             if (settings_ != nullptr)
-                                appendHostLog(*settings_, "plugin \"" + description.name + "\" instantiate callback moved onto the message thread");
+                                appendHostLog(*settings_, pluginLogLine("plugin", channel, slot, description.pluginFormatName, description.name, pluginIdentifier(description),
+                                                                        "instantiate callback moved onto the message thread"));
                             finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold,
                                        description, state, std::move(held->instance), held->error, restoreGeneration);
                         });
@@ -1765,6 +2171,9 @@ void PluginRack::finishLoad(int channel,
                             const juce::String& error,
                             std::uint64_t restoreGeneration)
 {
+    const auto refusedName = description.name;
+    const auto refusedId = pluginIdentifier(description);
+    const auto refusedFormat = description.pluginFormatName;
     // createPluginInstance has returned. Later paints are not part of the load.
     touchMessageBeat();
     StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
@@ -1800,6 +2209,9 @@ void PluginRack::finishLoad(int channel,
         }
         if (ownsGate)
             finishChannelWork(channel, ticket);
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId,
+                                                    "the slot changed before the plugin was ready"));
         return;
     }
 
@@ -1812,8 +2224,8 @@ void PluginRack::finishLoad(int channel,
     juce::String problem = error;
     const int left = channel & ~1;
     const bool unlinkedMono = ! stereoLink(left);
-    // Bus setup and prepare already finished on the message thread. Doing them
-    // again here would run setActive while this thread is also drawing.
+    // Bus setup and prepare already finished. Doing them again here would run
+    // setActive while this thread is also drawing.
     if (instance != nullptr && ! buses.ready)
         problem = "The plugin setup did not finish. See youhost.log.";
     juce::String attemptText;
@@ -1828,11 +2240,10 @@ void PluginRack::finishLoad(int channel,
                                                                    attemptText.toRawUTF8()));
     if (settings_ != nullptr)
     {
-        const auto prefix = "plugin \"" + description.name + "\" ch " + juce::String(channel + 1) + " slot " + juce::String(slot) + " ";
         if (instance == nullptr)
-            appendHostLog(*settings_, prefix + failureReason);
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId, failureReason));
         for (const auto& attempt : buses.attempts)
-            appendHostLog(*settings_, prefix + attempt);
+            appendHostLog(*settings_, pluginLogLine("plugin", channel, slot, refusedFormat, refusedName, refusedId, attempt));
     }
     if (instance != nullptr && (! buses.ready || ! buses.ok))
     {
@@ -1840,8 +2251,7 @@ void PluginRack::finishLoad(int channel,
             problem = pluginLoadMessage(true, unlinkedMono, buses.supportMono, buses.supportStereo, buses.supportSide,
                                         buses.openedStereo, buses.hasExtraBuses, nullptr);
         if (settings_ != nullptr)
-            appendHostLog(*settings_, "plugin \"" + description.name + "\" ch " + juce::String(channel + 1)
-                                          + " slot " + juce::String(slot) + " ui: " + problem);
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId, problem));
         auto retired = std::make_shared<HostedPlugin>();
         retired->instance.reset(instance.release(), InstanceDeleter { this });
         bury(std::move(retired), nullptr);
@@ -1875,8 +2285,9 @@ void PluginRack::finishLoad(int channel,
     bool openIt = false;
     bool loaded = false;
     bool replaced = false;
-    juce::String loadedName = description.name;
-    juce::String loadedId = pluginIdentifier(description);
+    bool channelFeeds = false;
+    juce::String loadedName = refusedName;
+    juce::String loadedId = refusedId;
     std::shared_ptr<HostedPlugin> previous;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1897,20 +2308,32 @@ void PluginRack::finishLoad(int channel,
             {
                 loadedName = model.plugin->description.name;
                 loadedId = pluginIdentifier(model.plugin->description);
+                channelFeeds = channelProcessesPlugins(channel,
+                                                       activeChannels_.load(std::memory_order_relaxed),
+                                                       routing_.inputPacked[static_cast<std::size_t>(channel)]);
             }
         }
     }
     if (! replaced)
     {
         bury(std::move(hosted), nullptr);
+        // The slot already belongs to a newer load. A journal upsert here would
+        // replace that plugin's mark, so the reason goes to the log only.
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId,
+                                                    "the slot changed before the plugin was ready"));
         if (ownsGate)
             finishChannelWork(channel, ticket);
         return;
     }
     bury(std::move(previous), nullptr);
 
-    tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId,
-                loaded ? juce::String() : failureReason);
+    if (! loaded)
+        tracePlugin(channel, slot, "unload", loadedName, loadedId, failureReason, refusedFormat);
+    else if (! channelFeeds)
+        tracePlugin(channel, slot, "idle", loadedName, loadedId, "no input on this channel", refusedFormat);
+    else
+        tracePlugin(channel, slot, "active", loadedName, loadedId, {}, refusedFormat);
 
     if (notify)
         notifyDirty();
@@ -1977,6 +2400,8 @@ void PluginRack::clearAll(bool markDirty)
         gate.inFlight = false;
         gate.ticket = 0;
     }
+    for (auto& row : userClaimedSlot_)
+        row.fill(false);
 
     std::vector<std::tuple<int, int, juce::String, juce::String>> unloaded;
     std::vector<std::shared_ptr<HostedPlugin>> retiredPlugins;
@@ -2008,12 +2433,14 @@ void PluginRack::clearAll(bool markDirty)
                 model.ticket = ++ticketSource_;
                 model.loading = false;
                 model.error.clear();
+                model.note.clear();
                 if (model.plugin != nullptr)
                     retiredPlugins.push_back(std::move(model.plugin));
             }
         }
         for (auto& excluded : excluded_)
             excluded = false;
+        keptInSessionFile_.clear();
         bypassAll_.store(0, std::memory_order_relaxed);
         publishUnlocked();
     }
@@ -2185,13 +2612,34 @@ void PluginRack::setBypassed(int channel, int slot, bool bypassed)
     if (! validSlot(channel, slot))
         return;
 
+    juce::PluginDescription retry;
+    juce::MemoryBlock state;
+    int fold = 0;
+    bool reload = false;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
         if (model.plugin == nullptr)
             return;
-        model.plugin->bypassed = bypassed;
-        publishUnlocked();
+        // A crash-parked slot has no instance. "Turn bypass off" frees it and loads.
+        if (! bypassed && model.plugin->instance == nullptr && model.error.isNotEmpty())
+        {
+            retry = model.plugin->description;
+            state = model.plugin->state;
+            fold = model.plugin->stereoFold;
+            reload = true;
+        }
+        else
+        {
+            model.plugin->bypassed = bypassed;
+            publishUnlocked();
+        }
+    }
+    if (reload)
+    {
+        clearCrashBlock(channel, slot);
+        beginLoad(channel, slot, std::move(retry), std::move(state), false, true, false, fold, 0);
+        return;
     }
     notifyDirty();
 }
@@ -2317,10 +2765,76 @@ void PluginRack::openEditor(int channel, int slot)
         settings_,
         key);
     window->place(channel, slot);
+    // VST3 and Audio Unit views on the Mac are both sized in points.
+    // The hosted NSView is added at 1:1. No AffineTransform scales it.
+    // The window is sized to the plugin view. setContentScaleFactor is not
+    // how the Audio Unit is fitted, and passing the Retina backing scale
+    // through it makes Vastaus redraw at the wrong size.
     window->setContentOwned(editor, true);
+    window->watchContent();
+    const int borderW = std::max(0, window->getWidth() - editor->getWidth());
+    const int borderH = std::max(0, window->getHeight() - editor->getHeight());
+    int minWidth = 0;
+    int minHeight = 0;
+    int maxWidth = 0;
+    int maxHeight = 0;
+    if (auto* constrainer = editor->getConstrainer())
+    {
+        minWidth = constrainer->getMinimumWidth();
+        minHeight = constrainer->getMinimumHeight();
+        maxWidth = constrainer->getMaximumWidth();
+        maxHeight = constrainer->getMaximumHeight();
+    }
+    if (minWidth > 0)
+        minWidth += borderW;
+    if (minHeight > 0)
+        minHeight += borderH;
+    if (maxWidth > 0 && maxWidth < 1000000)
+        maxWidth += borderW;
+    else if (editor->isResizable())
+        maxWidth = 8000 + borderW;
+    else
+        maxWidth = 0;
+    if (maxHeight > 0 && maxHeight < 1000000)
+        maxHeight += borderH;
+    else if (editor->isResizable())
+        maxHeight = 8000 + borderH;
+    else
+        maxHeight = 0;
+    float displayScale = 1.0f;
+    int screenWidth = 0;
+    int screenHeight = 0;
+    if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    {
+        displayScale = static_cast<float>(display->scale);
+        screenWidth = juce::roundToInt(display->userBounds.getWidth());
+        screenHeight = juce::roundToInt(display->userBounds.getHeight());
+    }
     const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
-    if (stored.isEmpty() || ! window->restoreWindowStateFromString(stored))
-        window->centreWithSize(juce::jmax(360, window->getWidth()), juce::jmax(240, window->getHeight()));
+    const auto saved = parseWindowState(stored.toStdString());
+    const int fittedWidth = std::max(editor->getWidth() + borderW, window->getWidth());
+    const int fittedHeight = std::max(editor->getHeight() + borderH, window->getHeight());
+    const auto plan = planEditorWindow(fittedWidth,
+                                       fittedHeight,
+                                       editor->isResizable(),
+                                       minWidth,
+                                       minHeight,
+                                       maxWidth,
+                                       maxHeight,
+                                       displayScale,
+                                       screenWidth,
+                                       screenHeight,
+                                       saved);
+    window->setResizable(plan.resizable, false);
+    if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
+        window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
+    if (plan.width > 0 && plan.height > 0)
+    {
+        if (saved.valid)
+            window->setBounds(saved.x, saved.y, plan.width, plan.height);
+        else
+            window->centreWithSize(plan.width, plan.height);
+    }
     if (commandKeys_ != nullptr)
         window->addKeyListener(commandKeys_);
     window->setVisible(true);
@@ -2373,11 +2887,16 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         auto& destination = snap.slots[static_cast<std::size_t>(slot)];
         destination.loading = model.loading;
         destination.error = model.error;
-        if (model.plugin == nullptr)
+        destination.note = model.note;
+        // A plugin with no instance is not on screen. Crash protection does not
+        // park a bypassed slot, so the button stays empty and can take any plugin.
+        // Channel 1 slot 1 after "left crashed plugins off" is this case.
+        destination.liveInstance = model.plugin != nullptr && model.plugin->instance != nullptr;
+        if (! destination.liveInstance)
             continue;
-        const bool parkedSlot = model.plugin->instance == nullptr && model.plugin->description.name.isNotEmpty();
-        destination.occupied = model.plugin->instance != nullptr || parkedSlot;
-        destination.bypassed = model.plugin->bypassed || parkedSlot;
+        destination.occupied = true;
+        destination.bypassed = model.plugin->bypassed;
+        destination.crashParked = false;
         destination.latencySamples = model.plugin->latencySamples;
         destination.inputChannels = model.plugin->inputChannels;
         destination.outputChannels = model.plugin->outputChannels;
@@ -2425,8 +2944,21 @@ void PluginRack::captureSession(SessionData& data)
                 auto& source = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
                 auto& slotOut = destination.slots[static_cast<std::size_t>(slot)];
                 slotOut = {};
-                if (source.plugin == nullptr)
+                if (source.plugin == nullptr || source.plugin->instance == nullptr)
+                {
+                    for (const auto& kept : keptInSessionFile_)
+                    {
+                        if (kept.channel != channel || kept.slot != slot || kept.description.name.isEmpty())
+                            continue;
+                        slotOut.occupied = true;
+                        slotOut.bypassed = kept.bypassed;
+                        slotOut.stereoFold = kept.stereoFold;
+                        slotOut.description = kept.description;
+                        slotOut.state = kept.state;
+                        break;
+                    }
                     continue;
+                }
                 // A parked slot has no instance. It is still written so the
                 // session file keeps the plugin after "Open session without this plugin".
                 const bool parkedSlot = source.plugin->instance == nullptr;
@@ -2714,8 +3246,11 @@ void PluginRack::rememberActiveNames()
             text[used++] = *chunk++;
     };
 
+    const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
+            continue;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -2769,7 +3304,7 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
     const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
-        if (channel >= shown)
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
         {
             chainSamples_[static_cast<std::size_t>(channel)] = 0;
             inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { 0, false, -1 };
@@ -2799,6 +3334,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             live.processChannels = std::max(live.totalInputs, live.totalOutputs);
             live.stereoFold = model.plugin->stereoFold;
             live.prepared = model.plugin->prepared;
+            live.vst3 = model.plugin->description.pluginFormatName == "VST3";
+            copyPluginName(live.name, static_cast<int>(sizeof(live.name)), model.plugin->description.name);
             graph->keepAlive.push_back(model.plugin);
         }
 
@@ -2868,12 +3405,119 @@ void PluginRack::setBlockedIdentifiers(const juce::StringArray& identifiers)
     blocked_ = identifiers;
 }
 
-void PluginRack::setBlockedSlots(const std::vector<std::pair<int, int>>& slots)
+void PluginRack::setBlockedSlots(const std::vector<CrashBlock>& slots)
 {
     blockedSlots_ = slots;
 }
 
-void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
+void PluginRack::rememberCrashedPlugins(const juce::StringArray& identifiers)
+{
+    crashedWarned_ = identifiers;
+}
+
+void PluginRack::omitFromNextRestore(const std::vector<CrashBlock>& slots)
+{
+    restoreOmit_ = slots;
+}
+
+void PluginRack::claimSlotForManualLoad(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+    userClaimedSlot_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = true;
+    std::vector<CrashBlock> keptOmit;
+    keptOmit.reserve(restoreOmit_.size());
+    for (const auto& block : restoreOmit_)
+        if (block.channel != channel || block.slot != slot)
+            keptOmit.push_back(block);
+    restoreOmit_.swap(keptOmit);
+
+    int dropped = 0;
+    std::vector<RestorePlugin> keptQueue;
+    keptQueue.reserve(restoreQueue_.size());
+    for (auto& item : restoreQueue_)
+    {
+        if (item.channel == channel && item.slot == slot)
+        {
+            ++dropped;
+            continue;
+        }
+        keptQueue.push_back(std::move(item));
+    }
+    restoreQueue_.swap(keptQueue);
+    if (dropped > 0)
+    {
+        loadCursor_.total -= dropped;
+        if (loadCursor_.total < loadCursor_.finished)
+            loadCursor_.total = loadCursor_.finished;
+        if (loadCursor_.total < 0)
+            loadCursor_.total = 0;
+    }
+}
+
+bool PluginRack::crashedBefore(const juce::PluginDescription& description) const
+{
+    if (description.fileOrIdentifier.isNotEmpty() && crashedWarned_.contains(description.fileOrIdentifier))
+        return true;
+    const auto created = description.createIdentifierString();
+    return created.isNotEmpty() && crashedWarned_.contains(created);
+}
+
+bool PluginRack::omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const
+{
+    std::vector<SlotBlock> listed;
+    listed.reserve(restoreOmit_.size());
+    for (const auto& block : restoreOmit_)
+    {
+        SlotBlock item;
+        item.channel = block.channel;
+        item.slot = block.slot;
+        item.identifier = block.identifier.toStdString();
+        listed.push_back(std::move(item));
+    }
+    return pluginListedForThisLaunch(channel, slot, identifier, listed.data(), static_cast<int>(listed.size()));
+}
+
+void PluginRack::keepPluginInSessionFile(int channel,
+                                         int slot,
+                                         const juce::PluginDescription& description,
+                                         const juce::MemoryBlock& state,
+                                         bool bypassed,
+                                         int stereoFold)
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    for (auto& kept : keptInSessionFile_)
+    {
+        if (kept.channel != channel || kept.slot != slot)
+            continue;
+        kept.description = description;
+        kept.state = state;
+        kept.bypassed = bypassed;
+        kept.stereoFold = stereoFold;
+        return;
+    }
+    KeptSessionPlugin kept;
+    kept.channel = channel;
+    kept.slot = slot;
+    kept.description = description;
+    kept.state = state;
+    kept.bypassed = bypassed;
+    kept.stereoFold = stereoFold;
+    keptInSessionFile_.push_back(std::move(kept));
+}
+
+void PluginRack::dropKeptPlugin(int channel, int slot)
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    std::vector<KeptSessionPlugin> kept;
+    kept.reserve(keptInSessionFile_.size());
+    for (auto& item : keptInSessionFile_)
+        if (item.channel != channel || item.slot != slot)
+            kept.push_back(std::move(item));
+    keptInSessionFile_.swap(kept);
+}
+
+void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
 }
@@ -2982,15 +3626,43 @@ bool PluginRack::isBlocked(const juce::PluginDescription& description) const
 bool PluginRack::isSlotBlocked(int channel, int slot) const
 {
     for (const auto& blocked : blockedSlots_)
-        if (blocked.first == channel && blocked.second == slot)
+        if (blocked.channel == channel && blocked.slot == slot)
             return true;
     return false;
 }
 
-void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
+void PluginRack::clearCrashBlock(int channel, int slot)
+{
+    juce::String identifier;
+    std::vector<CrashBlock> kept;
+    kept.reserve(blockedSlots_.size());
+    for (const auto& blocked : blockedSlots_)
+    {
+        if (blocked.channel == channel && blocked.slot == slot)
+        {
+            identifier = blocked.identifier;
+            continue;
+        }
+        kept.push_back(blocked);
+    }
+    blockedSlots_.swap(kept);
+    if (identifier.isEmpty())
+        return;
+    for (const auto& blocked : blockedSlots_)
+        if (blocked.identifier == identifier)
+            return;
+    blocked_.removeString(identifier);
+}
+
+PluginRack::BlockPluginNote PluginRack::blockPluginNote() const noexcept
+{
+    return blockNote_;
+}
+
+void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)
 {
     if (trace_ != nullptr)
-        trace_(channel, slot, phase, name, identifier, reason);
+        trace_(channel, slot, phase, name, identifier, reason, format);
 }
 
 void PluginRack::removePluginNow(int channel, int slot)
@@ -3007,6 +3679,7 @@ void PluginRack::removePluginNow(int channel, int slot)
 
     juce::String name;
     juce::String identifier;
+    const bool held = isSlotBlocked(channel, slot);
     std::shared_ptr<HostedPlugin> plugin;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -3019,12 +3692,22 @@ void PluginRack::removePluginNow(int channel, int slot)
         model.ticket = ++ticketSource_;
         model.loading = false;
         model.error.clear();
+        model.note.clear();
+        for (auto it = keptInSessionFile_.begin(); it != keptInSessionFile_.end();)
+        {
+            if (it->channel == channel && it->slot == slot)
+                it = keptInSessionFile_.erase(it);
+            else
+                ++it;
+        }
         plugin = std::move(model.plugin);
         publishUnlocked();
     }
     bury(std::move(plugin), std::move(window));
+    // Remove drops a remembered hold. The slot stays empty and can take any plugin.
+    clearCrashBlock(channel, slot);
     if (identifier.isNotEmpty() || name.isNotEmpty())
-        tracePlugin(channel, slot, "unload", name, identifier);
+        tracePlugin(channel, slot, "unload", name, identifier, held ? juce::String(kSlotFreedReason) : juce::String());
     notifyDirty();
 }
 
@@ -3213,9 +3896,10 @@ void PluginRack::pumpCondemned()
                 continue;
             }
         }
-        item.instance->removeListener(this);
-        item.instance->releaseResources();
-        delete item.instance;
+        auto* dying = item.instance;
+        item.instance = nullptr;
+        dying->removeListener(this);
+        releaseInstanceOffMessageThread(dying);
     }
     condemned_.swap(keep);
     if (! condemned_.empty())
@@ -3235,10 +3919,10 @@ void PluginRack::flushDeferred()
     {
         if (item.instance == nullptr)
             continue;
-        item.instance->removeListener(this);
-        item.instance->releaseResources();
-        delete item.instance;
+        auto* dying = item.instance;
         item.instance = nullptr;
+        dying->removeListener(this);
+        releaseInstanceOffMessageThread(dying);
     }
     condemned_.clear();
 }
@@ -3264,8 +3948,7 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
     {
         if (rack != nullptr)
             instance->removeListener(rack);
-        instance->releaseResources();
-        delete instance;
+        releaseInstanceOffMessageThread(instance);
         return;
     }
 

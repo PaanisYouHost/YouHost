@@ -42,7 +42,9 @@
 #include "engine/SessionFiles.h"
 #include "engine/TakeImport.h"
 #include "engine/TakePlan.h"
+#include "engine/BlockTiming.h"
 #include "engine/CrashJournal.h"
+#include "engine/Vst3Path.h"
 #include "engine/DeviceWatch.h"
 #include "engine/HostPath.h"
 #include "engine/HostColumns.h"
@@ -1835,6 +1837,28 @@ void testDeviceOpensAllChannels()
     for (bool& bit : full)
         bit = true;
     CHECK(youhost::deviceMaskIsComplete(full, 8));
+
+    // MacBook speakers after a 48-channel card: one reported input, two outputs.
+    // Bits left over from the wide mask are not channels.
+    CHECK(youhost::channelCapForDevice(false, 1, 48) == 1);
+    CHECK(youhost::channelCapForDevice(false, 2, 48) == 2);
+    CHECK(youhost::channelCapForDevice(true, 39, 48) == 48);
+    CHECK(youhost::channelCapForDevice(true, 0, 48) == 48);
+    CHECK(youhost::channelCapForDevice(false, 0, 48) == 0);
+    CHECK(youhost::channelCapForDevice(true, 64, 48) == 64);
+    CHECK(youhost::channelCapForDevice(false, 200, 0) == 128);
+    std::array<bool, youhost::kMaxChannels> wideMask {};
+    wideMask.fill(true);
+    youhost::applyChannelCap(wideMask.data(), youhost::channelCapForDevice(false, 1, 48));
+    CHECK(wideMask[0]);
+    for (int channel = 1; channel < 12; ++channel)
+        CHECK(! wideMask[static_cast<std::size_t>(channel)]);
+    std::array<bool, youhost::kMaxChannels> speakerOut {};
+    speakerOut.fill(true);
+    youhost::applyChannelCap(speakerOut.data(), youhost::channelCapForDevice(false, 2, 48));
+    CHECK(speakerOut[0]);
+    CHECK(speakerOut[1]);
+    CHECK(! speakerOut[2]);
 }
 
 void testMergePeaks()
@@ -3245,10 +3269,10 @@ void testDeviceListGrouping()
     bool sawHeadphones = false;
     for (const auto& row : pairedRows)
     {
-        if (row.name == "MacBook Pro")
+        if (row.name == "MacBook Pro (mic + speakers)")
         {
             ++macRows;
-            sawBuiltIn = row.label == "MacBook Pro (built-in) - 1 in / 2 out";
+            sawBuiltIn = row.label == "MacBook Pro (mic + speakers) - 1 in / 2 out";
             CHECK(row.kind == youhost::DeviceRowKind::builtin);
         }
         if (row.name == "MacBook Pro Microphone" || row.name == "MacBook Pro Speakers")
@@ -3264,14 +3288,128 @@ void testDeviceListGrouping()
         { "MacBook Pro-kaiuttimet", 0, 2 },
     });
     CHECK(finnish.size() == 1);
-    CHECK(finnish[0].name == "MacBook Pro");
+    CHECK(youhost::combinedBuiltinName("MacBook Pro") == "MacBook Pro (mic + speakers)");
+    CHECK(finnish[0].name == "MacBook Pro (mic + speakers)");
     CHECK(finnish[0].inputName == "MacBook Pro-mikrofoni");
     CHECK(finnish[0].outputName == "MacBook Pro-kaiuttimet");
+    // Mika 2026-10-21: after a switch the input name gained a space
+    // ("MacBook Pro -mikrofoni") and the speakers stayed "MacBook Pro-kaiuttimet".
+    // Those are one card. The name stays "MacBook Pro (mic + speakers)" on the next rebuild.
+    // An aggregate ("Koostelaite" / "koontilaite") stays its own row.
+    CHECK(youhost::builtinFamilyKey("MacBook Pro -mikrofoni") == "MacBook Pro");
+    CHECK(youhost::builtinFamilyKey("MacBook Pro-kaiuttimet") == "MacBook Pro");
+    CHECK(youhost::deviceNamesMatch("MacBook Pro -mikrofoni", "MacBook Pro-mikrofoni"));
+    youhost::ListedDevice macRow;
+    macRow.name = "MacBook Pro";
+    macRow.inputName = "MacBook Pro -mikrofoni";
+    macRow.outputName = "MacBook Pro-kaiuttimet";
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro"));
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro-mikrofoni"));
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro-kaiuttimet"));
+    CHECK(! youhost::listedDeviceCovers(macRow, "koontilaite"));
+    CHECK(! youhost::listedDeviceCovers(macRow, ""));
+    CHECK(youhost::audioCardKind("koontilaite") == youhost::AudioCardKind::virtualDevice);
+    CHECK(youhost::audioCardKind("Koostelaite") == youhost::AudioCardKind::virtualDevice);
+    const std::vector<youhost::ListedDevice> afterSwitch = {
+        { "MacBook Pro -mikrofoni", 1, 0 },
+        { "MacBook Pro-kaiuttimet", 0, 2 },
+        { "Koostelaite", 2, 2 },
+        { "koontilaite", 1, 1 },
+        { "WING 2", 48, 48 },
+    };
+    const auto switched = youhost::buildDeviceList(afterSwitch, "");
+    const auto switchedAgain = youhost::buildDeviceList(afterSwitch, "");
+    int macRowsAfter = 0;
+    int aggregateRows = 0;
+    std::string macLabel;
+    std::string macRaw;
+    for (const auto& row : switched)
+    {
+        if (row.name == "MacBook Pro (mic + speakers)")
+        {
+            ++macRowsAfter;
+            macLabel = row.label;
+            macRaw = row.name;
+            CHECK(row.inputName == "MacBook Pro -mikrofoni");
+            CHECK(row.outputName == "MacBook Pro-kaiuttimet");
+        }
+        if (row.name == "MacBook Pro -mikrofoni" || row.name == "MacBook Pro-kaiuttimet")
+            ++macRowsAfter;
+        if (youhost::audioCardKind(row.name) == youhost::AudioCardKind::virtualDevice)
+            ++aggregateRows;
+    }
+    CHECK(macRowsAfter == 1);
+    CHECK(macRaw == "MacBook Pro (mic + speakers)");
+    CHECK(macLabel == "MacBook Pro (mic + speakers) - 1 in / 2 out");
+    CHECK(aggregateRows == 2);
+    CHECK(switchedAgain.size() == switched.size());
+    CHECK(youhost::openDeviceIsChosen("MacBook Pro-kaiuttimet",
+                                      "MacBook Pro (mic + speakers)",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet"));
+    CHECK(youhost::openDeviceIsChosen("koontilaite",
+                                      "MacBook Pro (mic + speakers)",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet"));
+    CHECK(! youhost::openDeviceIsChosen("koontilaite",
+                                       "MacBook Pro (mic + speakers)",
+                                       "MacBook Pro -mikrofoni",
+                                       "MacBook Pro-kaiuttimet",
+                                       "koontilaite",
+                                       "koontilaite"));
+    CHECK(! youhost::openDeviceIsChosen("Koostelaite", "WING 2", "WING 2", "WING 2", "Koostelaite", "Koostelaite"));
+    CHECK(youhost::deviceChangeCauseAllowed("user chose the card"));
+    CHECK(youhost::deviceChangeCauseAllowed("session open"));
+    CHECK(youhost::deviceChangeCauseAllowed("reopening the chosen card"));
+    CHECK(! youhost::deviceChangeCauseAllowed("system opened another card"));
+    CHECK(youhost::deviceChangeLogLine("MacBook Pro (mic + speakers)", "koontilaite", "system opened another card")
+          == "device change from MacBook Pro (mic + speakers) to koontilaite cause=system opened another card");
+    CHECK(youhost::deviceChangeLogLine("", "MacBook Pro (mic + speakers)", "reopening the chosen card")
+          == "device change to MacBook Pro (mic + speakers) cause=reopening the chosen card");
+    const auto menusAfter = youhost::audioSetupMenus(afterSwitch, "MacBook Pro-kaiuttimet", false, 48000.0, 24, 32);
+    int selectedMac = 0;
+    int selectedAggregate = 0;
+    for (const auto& choice : menusAfter[0].choices)
+    {
+        if (choice.heading || choice.id != menusAfter[0].selectedId)
+            continue;
+        if (choice.raw == "MacBook Pro (mic + speakers)")
+            ++selectedMac;
+        if (youhost::audioCardKind(choice.raw) == youhost::AudioCardKind::virtualDevice)
+            ++selectedAggregate;
+    }
+    CHECK(selectedMac == 1);
+    CHECK(selectedAggregate == 0);
+    const auto menusUnknown = youhost::audioSetupMenus(afterSwitch, "no such card", false, 48000.0, 24, 32);
+    CHECK(menusUnknown[0].selectedId == 0);
+    const auto engineNow = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    CHECK(engineNow.find("wantedName_ = live->getName()") == std::string::npos);
+    CHECK(engineNow.find("wantedName_ = device->getName()") == std::string::npos);
+    CHECK(engineNow.find("system opened another card") != std::string::npos);
+    CHECK(engineNow.find("reopening the chosen card") != std::string::npos);
+    CHECK(engineNow.find("\"session open\"") != std::string::npos);
+    CHECK(engineNow.find("user chose the card") != std::string::npos);
+    CHECK(engineNow.find("listedDeviceCovers") != std::string::npos);
+    CHECK(engineNow.find("wantedName_ = menuName") != std::string::npos);
+    int sameName = 0;
+    for (const auto& row : switchedAgain)
+        if (row.name == "MacBook Pro (mic + speakers)")
+            ++sameName;
+    CHECK(sameName == 1);
+    CHECK(youhost::shortcutHelpText().find("does not move to another card") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("MacBook Pro (mic + speakers)") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("does not move to another card") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("MacBook Pro (mic + speakers)") != std::string::npos);
     const auto builtIn = youhost::pairBuiltinCards({
         { "Built-in Microphone", 1, 0 },
         { "Built-in Output", 0, 2 },
     });
     CHECK(builtIn.size() == 1);
+    CHECK(builtIn[0].name == "Built-in (mic + speakers)");
     CHECK(builtIn[0].inputName == "Built-in Microphone");
     CHECK(builtIn[0].outputName == "Built-in Output");
 
@@ -3972,7 +4110,7 @@ void testReleaseChecklist()
     });
     bool macbookOne = macbookPair.size() == 2;
     for (const auto& device : macbookPair)
-        if (device.name == "MacBook Pro")
+        if (device.name == "MacBook Pro (mic + speakers)")
             macbookOne = macbookOne && device.inputs == 1 && device.outputs == 2
                          && device.inputName == "MacBook Pro Microphone"
                          && device.outputName == "MacBook Pro Speakers";
@@ -4709,7 +4847,7 @@ void testReleaseChecklist()
              && help.find("short crossfade") != std::string::npos);
     const auto syncHeader = readWorkspaceFile("src/engine/SyncLost.h");
     const auto overlayUi = readWorkspaceFile("src/ui/SyncLostOverlay.h");
-    const auto choseOther = sliceBetween(engineSrc, "if (userChoseThis)", "A card that is not the session card");
+    const auto choseOther = sliceBetween(engineSrc, "void AudioEngine::pollDeviceStats()", "LatencyNumbers AudioEngine::latencyNumbers");
     const auto paintBody = sliceBetween(mainUi, "void MainComponent::paint(", "void MainComponent::resized()");
     item("SYNC LOST",
          alarmOn && stillLost && waitingForClick && alarmClear && restamped && dismissed
@@ -4740,8 +4878,11 @@ void testReleaseChecklist()
              && mainUi.find("drawText(\"SYNC LOST\"") == std::string::npos
              && mainUi.find("syncOverlay_.repaint()") == std::string::npos
              && paintBody.find("syncLostBlink") == std::string::npos
-             && choseOther.find("noteUserDeviceChange") != std::string::npos
+             && choseOther.find("noteUserDeviceChange") == std::string::npos
              && choseOther.find("deviceReturned") == std::string::npos
+             && choseOther.find("system opened another card") != std::string::npos
+             && choseOther.find("wantedName_ = device->getName()") == std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::openNamedDevice", "void AudioEngine::noteUserChoseDevice").find("noteUserDeviceChange") != std::string::npos
              && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
              && checklistDoc.find("SYNC LOST") != std::string::npos
              && checklistDoc.find("does not appear at startup") != std::string::npos
@@ -5100,11 +5241,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.5"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.7"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.5"
+             && std::string(youhost::versionNumber()) == "1.0.7"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.5") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.7") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5113,12 +5254,12 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.5") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.5-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.7") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.7-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-20") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-21") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
@@ -5686,6 +5827,27 @@ void testBeta090()
     const auto openedMono = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::opened);
     CHECK(! openedMono.ok);
     CHECK(std::string(openedMono.reason).find("opened main bus") != std::string::npos);
+    // v1.0.5, 2026-10-21 14:23, buffer 32. A mono De-Feedback VST3 logs
+    // extra=opened supported=no reason=opened main bus does not match, then
+    // extra=disable. The opened plan does not touch the plugin. disable is
+    // 1/1, and that is the width the audio block keeps.
+    int deFeedbackIn[1] = { 2 };
+    int deFeedbackOut[1] = { 2 };
+    const auto vst3Opened = youhost::planPluginLayout(deFeedbackIn, 1, deFeedbackOut, 1, 1, 1, youhost::ExtraBusMode::opened);
+    CHECK(! vst3Opened.ok);
+    CHECK(std::string(vst3Opened.reason) == "opened main bus does not match");
+    CHECK(! youhost::failedLayoutNeedsRestore(vst3Opened.ok));
+    const auto vst3Disable = youhost::planPluginLayout(deFeedbackIn, 1, deFeedbackOut, 1, 1, 1, youhost::ExtraBusMode::disable);
+    CHECK(vst3Disable.ok);
+    CHECK(vst3Disable.inputBuses[0] == 1);
+    CHECK(vst3Disable.outputBuses[0] == 1);
+    CHECK(vst3Disable.totalIn == 1);
+    CHECK(vst3Disable.totalOut == 1);
+    CHECK(youhost::pluginProcessWidth(vst3Disable.totalIn, vst3Disable.totalOut) == 1);
+    CHECK(youhost::failedLayoutNeedsRestore(vst3Disable.ok));
+    CHECK(youhost::stateRestoredDifferentBuses(1, 1, 2, 2));
+    CHECK(! youhost::stateRestoredDifferentBuses(1, 1, 1, 1));
+    CHECK(! youhost::stateRestoredDifferentBuses(1, 1, 0, 2));
     int disabledSideIn[2] = { 2, 0 };
     const auto sidechainMono = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::sidechainMono);
     CHECK(sidechainMono.ok);
@@ -5853,7 +6015,41 @@ void testBeta090()
     CHECK(processBody.find("pauseGate") == std::string::npos);
     CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
     CHECK(processBody.find("numSamples > blockSize_") != std::string::npos);
+    CHECK(processBody.find("channelProcessesPlugins") != std::string::npos);
+    CHECK(processBody.find("VST3 process stays on the audio thread") != std::string::npos);
     CHECK(processBody.find("lifeLock_") == std::string::npos);
+    // The 1.0.1 workgroup pool. One channel chain stays on the audio thread,
+    // which is why four inserts on ch 1 are serial. A second channel wakes a
+    // worker. The workers share the job cursor and join the device workgroup
+    // before they process.
+    const auto poolNow = sliceBetween(busSource, "void parallel(int count, PluginRack* rack)", "void runWorker(int index)");
+    CHECK(poolNow.find("count == 1") != std::string::npos);
+    CHECK(poolNow.find("std::min(static_cast<int>(threads_.size()), count - 1)") != std::string::npos);
+    CHECK(poolNow.find("cursor_.fetch_add(1, std::memory_order_acq_rel)") != std::string::npos);
+    CHECK(poolNow.find("left_.store(helpers + 1") != std::string::npos);
+    CHECK(poolNow.find(".signal()") != std::string::npos);
+    CHECK(poolNow.find("done_.wait()") != std::string::npos);
+    const auto workerNow = sliceBetween(busSource, "void runWorker(int index)", "std::vector<std::unique_ptr<Worker>>");
+    const auto joinAt = workerNow.find("workgroup_.join(token)");
+    const auto jobAt = workerNow.find("processJob(job)");
+    CHECK(joinAt != std::string::npos && jobAt != std::string::npos && joinAt < jobAt);
+    CHECK(workerNow.find("cursor_.fetch_add(1, std::memory_order_acq_rel)") != std::string::npos);
+    CHECK(workerNow.find("addCoreNs(index + 1") != std::string::npos);
+    const auto joinAudio = sliceBetween(busSource, "void PluginRack::joinAudioThread()", "void PluginRack::processJob");
+    CHECK(joinAudio.find("workgroup_.join(audioToken_)") != std::string::npos);
+    CHECK(processBody.find("joinAudioThread()") != std::string::npos);
+    CHECK(processBody.find("pool_->parallel") != std::string::npos);
+    CHECK(busSource.find("return std::clamp(cores - 1, 0, 7);") != std::string::npos);
+    CHECK(busSource.find("withApproximateAudioProcessingTime(128, 48000.0)") != std::string::npos);
+    auto helpersForChains = [](int chains, int workers)
+    {
+        if (chains <= 1 || workers <= 0)
+            return 0;
+        return std::min(workers, chains - 1);
+    };
+    CHECK(helpersForChains(1, 7) == 0);
+    CHECK(helpersForChains(4, 7) == 3);
+    CHECK(helpersForChains(12, 7) == 7);
     CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
     const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
     CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
@@ -5888,6 +6084,15 @@ void testBeta090()
     CHECK(busSource.find("backgroundQueue_") != std::string::npos);
     CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes:") == std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHostVst3Stress") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/HostLog.h").find("appendCrashGeneration") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/HostLog.h").find("rotateCrashHistory") != std::string::npos);
+    const auto loadBody = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                       "void PluginRack::beginLoad",
+                                       "void PluginRack::finishLoad");
+    CHECK(loadBody.find("admitPluginIntoSlot") != std::string::npos);
+    CHECK(loadBody.find("did-not-load") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("dspReading") != std::string::npos);
     const auto audioCallback = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                             "void AudioEngine::audioDeviceIOCallbackWithContext",
                                             "void AudioEngine::audioDeviceAboutToStart");
@@ -5923,7 +6128,8 @@ void testBeta090()
     const auto traceBody = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                         "void AudioEngine::notePluginTrace",
                                         "juce::String AudioEngine::dspLoadText");
-    CHECK(traceBody.find("reason=") != std::string::npos);
+    CHECK(traceBody.find("formatPluginAttemptLine") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginLoadPace.h").find("reason=") != std::string::npos);
     const auto matched = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::matchMain);
     CHECK(matched.ok);
     CHECK(matched.inputBuses[0] == 1);
@@ -6083,6 +6289,644 @@ void testBeta090()
     CHECK(std::string(youhost::helpButtonTip()) == "Open YouHost help.");
 }
 
+void testStability106()
+{
+    CHECK(! youhost::channelProcessesPlugins(5, 1, 0));
+    CHECK(! youhost::channelProcessesPlugins(7, 1, -1));
+    CHECK(! youhost::channelProcessesPlugins(0, 1, -1));
+    CHECK(! youhost::channelProcessesPlugins(0, 0, 0));
+    CHECK(youhost::channelProcessesPlugins(0, 1, 0));
+    // MacBook Pro speakers: UI channel 1 is the mic. UI channel 2 is the right
+    // speaker, an output with no input. UI channels 2-12 must not run plugins
+    // even when the loop limit is the whole rack and reveal shows every channel.
+    std::array<bool, youhost::kMaxChannels> speakerInputs {};
+    std::array<bool, youhost::kMaxChannels> speakerOutputs {};
+    speakerInputs.fill(true);
+    speakerOutputs.fill(true);
+    youhost::applyChannelCap(speakerInputs.data(), youhost::channelCapForDevice(false, 1, 12));
+    youhost::applyChannelCap(speakerOutputs.data(), youhost::channelCapForDevice(false, 2, 12));
+    const auto speakers = youhost::makeRouting(speakerInputs, speakerOutputs);
+    CHECK(speakers.inputCount == 1);
+    CHECK(speakers.outputCount == 2);
+    CHECK(speakers.visibleChannels == 2);
+    CHECK(speakers.inputPacked[0] == 0);
+    CHECK(speakers.inputPacked[1] == -1);
+    CHECK(speakers.outputPacked[0] == 0);
+    CHECK(speakers.outputPacked[1] == 1);
+    CHECK(youhost::channelProcessesPlugins(0, speakers.inputCount, speakers.inputPacked[0]));
+    for (int channel = 1; channel < 12; ++channel)
+    {
+        CHECK(! youhost::channelProcessesPlugins(channel, speakers.inputCount, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+        CHECK(! youhost::channelProcessesPlugins(channel, speakers.visibleChannels, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+        CHECK(! youhost::channelProcessesPlugins(channel, youhost::kMaxChannels, speakers.inputPacked[static_cast<std::size_t>(channel)]));
+    }
+    const auto speakerView = youhost::sessionChannelView(speakers.inputCount, true, false, true);
+    CHECK(speakerView.cardInputs == 1);
+    CHECK(speakerView.visible == youhost::kMaxChannels);
+    CHECK(! youhost::channelProcessesPlugins(1, speakerView.cardInputs, speakers.inputPacked[1]));
+    CHECK(! youhost::keepPluginsOnShrink(false, 12, 12, 1, 2));
+    CHECK(! youhost::blockAsksReprepare(32, 512));
+    CHECK(! youhost::blockAsksReprepare(32, 32));
+    CHECK(youhost::blockAsksReprepare(96, 32));
+    CHECK(youhost::vst3ProcessOnAudioThread());
+
+    const auto stress = youhost::runHeavyVst3At32(64);
+    CHECK(stress.liveCalls == 64);
+    CHECK(stress.hiddenCalls == 128);
+    CHECK(stress.reprepares == 0);
+    CHECK(stress.waits == 0);
+    CHECK(stress.meter != 52);
+    CHECK(stress.meter == stress.callbackPercent);
+    CHECK(stress.meter < 10);
+    const auto periodNs = youhost::expectedPeriodNs(48000.0, 32);
+    CHECK(youhost::callbackLoadPercent(static_cast<std::uint64_t>(periodNs * 2), 32, 48000.0) >= 180);
+    CHECK(youhost::periodLoadPercent(710000, static_cast<int>(periodNs)) >= 106);
+    CHECK(youhost::periodLoadPercent(710000, static_cast<int>(periodNs)) <= 107);
+    CHECK(youhost::periodLoadPercent(350000, static_cast<int>(periodNs)) <= 53);
+    CHECK(youhost::dspReading(90, 52) == 90);
+    CHECK(youhost::dspReading(52, 90) == 52);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 2), 32, 48000.0) == 100);
+
+    youhost::BlockTimingRecord block;
+    block.samples = 32;
+    block.prepared = 32;
+    block.reprepare = 0;
+    block.vst3Inline = 1;
+    block.waitNs = 0;
+    block.recordNs = 10000;
+    block.passNs = 8000;
+    block.pluginNs = 180000;
+    block.meterNs = 5000;
+    block.wallNs = 203000;
+    block.cpuNs = 150000;
+    block.periodNs = 666667;
+    block.blockNs = 130000;
+    block.slowestChannel = 0;
+    block.slowestSlot = 1;
+    block.slowestNs = 140000;
+    std::strncpy(block.slowestName, "De-Feedback", sizeof(block.slowestName) - 1);
+    CHECK(youhost::timingPartsNs(block) == block.wallNs);
+    CHECK(youhost::timingOffCpuNs(block.wallNs, block.cpuNs) == 53000);
+    const auto timingLine = youhost::formatBlockTimingLine(block);
+    CHECK(timingLine.find("samples 32") != std::string::npos);
+    CHECK(timingLine.find("prepared 32") != std::string::npos);
+    CHECK(timingLine.find("reprepare 0") != std::string::npos);
+    CHECK(timingLine.find("vst3-inline 1") != std::string::npos);
+    CHECK(timingLine.find("record 10us") != std::string::npos);
+    CHECK(timingLine.find("plugins 180us") != std::string::npos);
+    CHECK(timingLine.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
+    CHECK(timingLine.find("outside 40us") != std::string::npos);
+    CHECK(timingLine.find("wall 203us") != std::string::npos);
+    CHECK(timingLine.find("parts 203us") != std::string::npos);
+    CHECK(timingLine.find("cpu 150us") != std::string::npos);
+    CHECK(timingLine.find("off 53us") != std::string::npos);
+    CHECK(timingLine.find("period 666us") != std::string::npos);
+    CHECK(timingLine.find("block 130us") != std::string::npos);
+    CHECK(timingLine.find("wrap 10us") != std::string::npos);
+    // Plugins 350 us on one callback, wall 710 us on another. The line has to
+    // be the callback that overran, or the 350 us looks unaccounted.
+    youhost::BlockTimingRecord split[2];
+    split[0].pluginNs = 350000;
+    split[0].recordNs = 20000;
+    split[0].passNs = 20000;
+    split[0].meterNs = 10000;
+    split[0].wallNs = 400000;
+    split[1].pluginNs = 350000;
+    split[1].recordNs = 10000;
+    split[1].passNs = 20000;
+    split[1].meterNs = 330000;
+    split[1].wallNs = 710000;
+    split[1].cpuNs = 360000;
+    split[1].periodNs = 666667;
+    split[1].blockNs = 340000;
+    split[1].slowestNs = 350000;
+    CHECK(youhost::timingPartsNs(split[1]) == 710000);
+    CHECK(youhost::timingOffCpuNs(split[1].wallNs, split[1].cpuNs) == 350000);
+    CHECK(youhost::worstCallbackIndex(split, 2) == 1);
+    const auto overrunLine = youhost::formatCallbackSplit(split[1]);
+    CHECK(overrunLine.find("wall 710us") != std::string::npos);
+    CHECK(overrunLine.find("parts 710us") != std::string::npos);
+    CHECK(overrunLine.find("off 350us") != std::string::npos);
+    CHECK(overrunLine.find("block 340us") != std::string::npos);
+    CHECK(overrunLine.find("wrap 10us") != std::string::npos);
+    youhost::DropoutAccount everClean;
+    everClean.wallNs = 710000;
+    everClean.cpuNs = 360000;
+    everClean.periodNs = 666667;
+    everClean.recordNs = 10000;
+    everClean.passNs = 20000;
+    everClean.pluginNs = 350000;
+    everClean.meterNs = 330000;
+    everClean.blockNs = 340000;
+    const auto everCleanLine = youhost::formatDropoutAccount(everClean, 350000);
+    CHECK(everCleanLine.find("plugins 350us") != std::string::npos);
+    CHECK(everCleanLine.find("meters 330us") != std::string::npos);
+    CHECK(everCleanLine.find("off 350us") != std::string::npos);
+    CHECK(everCleanLine.find("wall 710us") != std::string::npos);
+    youhost::DropoutMark wallBatch[2] {};
+    wallBatch[0].account.wallNs = 400000;
+    wallBatch[0].account.pluginNs = 350000;
+    wallBatch[0].slowNs = 350000;
+    wallBatch[1].account = everClean;
+    wallBatch[1].slowNs = 350000;
+    const auto* fullest = youhost::fullestInDropoutBatch(wallBatch, 2);
+    CHECK(fullest != nullptr);
+    CHECK(fullest->account.wallNs == 710000);
+    youhost::DropoutAccount lateOnly;
+    lateOnly.lateNs = 380000;
+    CHECK(youhost::formatDropoutAccount(lateOnly, 0).find("late 380us") != std::string::npos);
+    CHECK(youhost::formatDropoutAccount(lateOnly, 0).find("wall") == std::string::npos);
+    youhost::DropoutMark slowBatch[2] {};
+    slowBatch[0].slowChannel = 0;
+    slowBatch[0].slowSlot = 0;
+    slowBatch[0].slowNs = 16000;
+    std::strncpy(slowBatch[0].slowName, "De-Feedback", sizeof(slowBatch[0].slowName) - 1);
+    slowBatch[1].slowChannel = 0;
+    slowBatch[1].slowSlot = 0;
+    slowBatch[1].slowNs = 700000;
+    std::strncpy(slowBatch[1].slowName, "De-Feedback", sizeof(slowBatch[1].slowName) - 1);
+    const auto* slowestMark = youhost::slowestInDropoutBatch(slowBatch, 2);
+    CHECK(slowestMark != nullptr);
+    CHECK(slowestMark->slowNs == 700000);
+    const auto reconciled = youhost::formatDropoutSlowest(slowestMark->slowChannel + 1,
+                                                          slowestMark->slowSlot + 1,
+                                                          slowestMark->slowName,
+                                                          slowestMark->slowNs / 1000);
+    CHECK(reconciled.find("De-Feedback 700us") != std::string::npos);
+    CHECK(reconciled.find("16us") == std::string::npos);
+    youhost::DropoutRing timedRing;
+    timedRing.push(1, -1, false, 32, 143, 1, 0, 0, 16000, "De-Feedback");
+    timedRing.push(2, -1, false, 32, 143, 1, 0, 0, 700000, "De-Feedback");
+    youhost::DropoutMark timedMarks[2];
+    CHECK(timedRing.drain(timedMarks, 2) == 2);
+    const auto* fromRing = youhost::slowestInDropoutBatch(timedMarks, 2);
+    CHECK(fromRing != nullptr);
+    CHECK(fromRing->slowNs == 700000);
+    CHECK(std::string(fromRing->slowName) == "De-Feedback");
+    const auto dropout = youhost::formatDropoutHostLine(3, 48000, 32, 180, 4);
+    CHECK(dropout == "dropout x3  take 48000  buffer 32  dsp 180%  plugins 4");
+    const auto named = dropout + youhost::formatDropoutSlowest(1, 2, "De-Feedback", 140);
+    CHECK(named.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
+
+    CHECK(std::string(youhost::kPluginCrashedLastTime) == "this plugin crashed last time");
+    CHECK(youhost::crashWarningNote(true) == youhost::kPluginCrashedLastTime);
+    CHECK(youhost::crashWarningNote(false) == nullptr);
+    CHECK(youhost::leaveOutOfThisLaunch(false, true) == false);
+    CHECK(youhost::leaveOutOfThisLaunch(true, true));
+    CHECK(youhost::leaveOutOfThisLaunch(true, false) == false);
+    youhost::SlotBlock crashed;
+    crashed.channel = 0;
+    crashed.slot = 1;
+    crashed.identifier = "vst3.proq";
+    const char* pluginIds[] = { "vst3.proq", "au.vastaus", "", "vst3.de-feedback" };
+    for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < youhost::kSlotsPerChannel; ++slot)
+        {
+            const auto id = pluginIds[slot];
+            const auto chosen = youhost::admitPluginIntoSlot(channel, slot, id, &crashed, 1, true);
+            CHECK(chosen.load);
+            CHECK(chosen.reason != nullptr);
+            CHECK(std::string(chosen.reason) == youhost::kPluginCrashedLastTime);
+            const auto fresh = youhost::admitPluginIntoSlot(channel, slot, id, nullptr, 0, false);
+            CHECK(fresh.load);
+            CHECK(fresh.reason == nullptr);
+            CHECK(fresh.clearSlot == false);
+        }
+    }
+    const auto again = youhost::admitPluginIntoSlot(0, 1, "vst3.proq", &crashed, 1, true);
+    CHECK(again.load);
+    CHECK(again.clearSlot);
+    CHECK(std::string(again.reason) == youhost::kPluginCrashedLastTime);
+    const auto replacement = youhost::admitPluginIntoSlot(0, 1, "vst3.de-feedback", &crashed, 1, false);
+    CHECK(replacement.load);
+    CHECK(replacement.clearSlot);
+    CHECK(replacement.reason == nullptr);
+    const auto after = youhost::admitPluginIntoSlot(0, 1, "au.other", nullptr, 0, false);
+    CHECK(after.load);
+    CHECK(after.clearSlot == false);
+    youhost::SlotBlock unknown;
+    unknown.channel = 3;
+    unknown.slot = 2;
+    const auto unknownChoice = youhost::admitPluginIntoSlot(3, 2, "", &unknown, 1, false);
+    CHECK(unknownChoice.load);
+    CHECK(std::string(unknownChoice.reason) == youhost::kPluginCrashedLastTime);
+    youhost::SlotBlock listed;
+    listed.channel = 0;
+    listed.slot = 0;
+    listed.identifier = "au.vastaus";
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &listed, 1));
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &listed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(1, 0, "au.vastaus", &listed, 1) == false);
+    // Mika: after crash protection left ch 1 slot 1 off, no plugin would open.
+    // The log line is 1-based. The slot is channel index 0, slot index 0.
+    // The same plugin, a different plugin, and an empty crash id all load.
+    // A click with no live instance opens the plugin list.
+    youhost::SlotBlock channelOneSlotOne;
+    channelOneSlotOne.channel = 0;
+    channelOneSlotOne.slot = 0;
+    channelOneSlotOne.identifier = "au.vastaus";
+    CHECK(youhost::leaveOutOfThisLaunch(true, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &channelOneSlotOne, 1)));
+    CHECK(youhost::leaveOutOfThisLaunch(false, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &channelOneSlotOne, 1)) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &channelOneSlotOne, 1) == false);
+    CHECK(youhost::leaveOutOfThisLaunch(false, youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &channelOneSlotOne, 1)) == false);
+    const auto ch1Same = youhost::admitPluginIntoSlot(0, 0, "au.vastaus", &channelOneSlotOne, 1, true);
+    CHECK(ch1Same.load);
+    CHECK(ch1Same.clearSlot);
+    CHECK(std::string(ch1Same.reason) == youhost::kPluginCrashedLastTime);
+    const auto ch1Other = youhost::admitPluginIntoSlot(0, 0, "vst3.pro-q", &channelOneSlotOne, 1, false);
+    CHECK(ch1Other.load);
+    CHECK(ch1Other.clearSlot);
+    CHECK(ch1Other.reason == nullptr);
+    youhost::SlotBlock emptyListed;
+    emptyListed.channel = 0;
+    emptyListed.slot = 0;
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &emptyListed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &emptyListed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "", &emptyListed, 1));
+    CHECK(youhost::leaveOutOfThisLaunch(true, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &emptyListed, 1)) == false);
+    const auto emptyBlockChoice = youhost::admitPluginIntoSlot(0, 0, "vst3.pro-q", &emptyListed, 1, false);
+    CHECK(emptyBlockChoice.load);
+    CHECK(emptyBlockChoice.reason == nullptr);
+    CHECK(youhost::slotClickOpensPluginList(false, false));
+    CHECK(youhost::slotClickOpensPluginList(false, true) == false);
+    CHECK(youhost::slotClickOpensPluginList(true, false) == false);
+    CHECK(youhost::restoreSkipsClaimedSlot(true, true));
+    CHECK(youhost::restoreSkipsClaimedSlot(false, true) == false);
+    CHECK(youhost::restoreSkipsClaimedSlot(true, false) == false);
+
+    youhost::CrashJournal first;
+    youhost::CrashMark proq;
+    proq.phase = "active";
+    proq.channel = 0;
+    proq.slot = 1;
+    proq.name = "Pro-Q 4";
+    proq.identifier = "vst3.proq";
+    youhost::upsertCrashMark(first, proq);
+    const auto saved = youhost::appendCrashGeneration("", first);
+    youhost::CrashJournal armed;
+    armed.clean = false;
+    const auto restarted = youhost::appendCrashGeneration(saved, armed);
+    CHECK(restarted.find("Pro-Q 4") != std::string::npos);
+    CHECK(restarted.find("---") != std::string::npos);
+    const auto latest = youhost::readLatestCrashJournal(restarted);
+    CHECK(latest.marks.empty());
+    CHECK(! latest.clean);
+    const auto history = youhost::readCrashJournal(saved);
+    CHECK(history.marks.size() == 1);
+    CHECK(history.marks[0].name == "Pro-Q 4");
+    // Crash, restart, choose the same plugin or another one. Both load.
+    // The same plugin only adds the warning note.
+    const auto crashRead = youhost::readLatestCrashJournal(saved);
+    const auto skip = youhost::crashPluginsToSkip(crashRead);
+    CHECK(skip.size() == 1);
+    CHECK(skip[0].name == "Pro-Q 4");
+    youhost::SlotBlock parked;
+    parked.channel = skip[0].channel;
+    parked.slot = skip[0].slot;
+    parked.identifier = skip[0].identifier;
+    const auto retrySame = youhost::admitPluginIntoSlot(parked.channel, parked.slot, parked.identifier, &parked, 1, true);
+    CHECK(retrySame.load);
+    CHECK(std::string(retrySame.reason) == youhost::kPluginCrashedLastTime);
+    const auto chosen = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", &parked, 1, false);
+    CHECK(chosen.load);
+    CHECK(chosen.clearSlot);
+    CHECK(chosen.reason == nullptr);
+    const auto works = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", nullptr, 0, false);
+    CHECK(works.load);
+    CHECK(works.clearSlot == false);
+    std::string bulky = restarted;
+    while (bulky.size() < 400)
+        bulky = youhost::appendCrashGeneration(bulky, first);
+    const auto rotated = youhost::rotateCrashHistory(bulky, 180);
+    CHECK(rotated.size() <= bulky.size());
+    CHECK(rotated.find("clean=") != std::string::npos);
+    CHECK(youhost::readLatestCrashJournal(rotated).marks.size() == 1);
+
+    CHECK(youhost::keepPluginsOnShrink(true, 48, 48, 39, 39));
+    CHECK(! youhost::keepPluginsOnShrink(true, 48, 48, 48, 48));
+    CHECK(! youhost::keepPluginsOnShrink(true, 48, 48, 64, 64));
+    CHECK(! youhost::keepPluginsOnShrink(false, 48, 48, 39, 39));
+    CHECK(! youhost::keepPluginsOnShrink(true, 0, 0, 0, 0));
+    CHECK(youhost::signalDuringMessageStall(false) == youhost::StallSignal::plugins);
+    CHECK(youhost::signalDuringMessageStall(true) == youhost::StallSignal::dry);
+    CHECK(youhost::replaceDryWhenPluginPaused(true, false));
+    CHECK(! youhost::replaceDryWhenPluginPaused(false, false));
+    CHECK(! youhost::replaceDryWhenPluginPaused(true, true));
+    const auto sliceBetween = [](const std::string& source, const char* begin, const char* end)
+    {
+        const auto start = source.find(begin);
+        const auto stop = source.find(end, start == std::string::npos ? 0 : start);
+        if (start == std::string::npos || stop == std::string::npos || stop < start)
+            return std::string();
+        return source.substr(start, stop - start);
+    };
+    const auto prepareBody = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                          "void PluginRack::prepare(",
+                                          "void PluginRack::deviceStopped");
+    CHECK(prepareBody.find("blockProcessing_.store(true") == std::string::npos);
+    CHECK(prepareBody.find("signalDuringMessageStall") != std::string::npos);
+    const auto loaderRun = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                        "createInstanceBlocking",
+                                        "deliverOffThreadInstance");
+    CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("stateRestoredDifferentBuses") != std::string::npos);
+    CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    const auto stateAt = loaderRun.find("stateRestoredDifferentBuses");
+    const auto prepareAt = loaderRun.find("prepareToPlay");
+    CHECK(stateAt != std::string::npos && prepareAt != std::string::npos && stateAt < prepareAt);
+    const auto messageTurn = sliceBetween(loaderRun, "runOnMessageThread", "An Audio Unit is prepared on the loader thread");
+    CHECK(messageTurn.find("createInstanceBlocking") != std::string::npos);
+    CHECK(messageTurn.find("setupPlugin()") != std::string::npos);
+    CHECK(messageTurn.find("CFRunLoop timer") != std::string::npos);
+    const auto createdAt = messageTurn.find("createInstanceBlocking");
+    const auto setupCallAt = messageTurn.find("setupPlugin()");
+    CHECK(createdAt != std::string::npos && setupCallAt != std::string::npos && createdAt < setupCallAt);
+    const auto catalogue = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
+    CHECK(catalogue.find("allowMessageThread") != std::string::npos);
+    CHECK(catalogue.find("This plugin is opened on the message thread.") != std::string::npos);
+    const auto audioEngine = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto drainLog = sliceBetween(audioEngine, "void AudioEngine::drainDropoutLog", "DropoutSnapshot AudioEngine::dropoutSnapshot");
+    CHECK(drainLog.find("slowest_.read") == std::string::npos);
+    CHECK(drainLog.find("slowestInDropoutBatch") != std::string::npos);
+    CHECK(drainLog.find("dropoutCoalesceSlowNs_") != std::string::npos);
+    CHECK(drainLog.find("fullestInDropoutBatch") != std::string::npos);
+    CHECK(drainLog.find("formatDropoutAccount") != std::string::npos);
+    CHECK(drainLog.find("dropoutSawWake_") != std::string::npos);
+    const auto audioCallback = sliceBetween(audioEngine,
+                                            "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                            "void AudioEngine::audioDeviceAboutToStart");
+    CHECK(audioCallback.find("lastSlowNs_") != std::string::npos);
+    CHECK(audioCallback.find("timing.slowestNs") != std::string::npos);
+    CHECK(audioCallback.find("timing.wallNs") != std::string::npos);
+    CHECK(audioCallback.find("joinAudioThread") != std::string::npos);
+    CHECK(audioCallback.find("threadCpuNowNs") != std::string::npos);
+    CHECK(audioCallback.find("halOverloadPending_") != std::string::npos);
+    CHECK(audioCallback.find("slowest_.read") == std::string::npos);
+    CHECK(audioEngine.find("CLOCK_THREAD_CPUTIME_ID") != std::string::npos);
+    CHECK(audioEngine.find("worstCallbackIndex") != std::string::npos);
+    const auto halListener = sliceBetween(audioEngine, "OSStatus overloadListener", "AudioObjectPropertyAddress overloadAddress");
+    CHECK(halListener.find("noteHalOverload") != std::string::npos);
+    CHECK(halListener.find("noteDropout") == std::string::npos);
+    const auto halBody = sliceBetween(audioEngine, "void AudioEngine::noteHalOverload", "void AudioEngine::drainDropoutLog");
+    CHECK(halBody.find("halOverloadPending_") != std::string::npos);
+    CHECK(halBody.find("noteDropout") == std::string::npos);
+    CHECK(halBody.find("dropoutRing_") == std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("plugins stay on the open channels") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("not reopening") != std::string::npos);
+
+    const auto attemptSlot = youhost::formatPluginAttemptLine("plugin", 0, 0, "VST3", "De-Feedback", "vst3.de-feedback", "attempt 1/1 extra=opened supported=no reason=opened main bus does not match");
+    const auto activeSlot = youhost::formatPluginAttemptLine("active", 0, 0, "VST3", "De-Feedback", "vst3.de-feedback", nullptr);
+    CHECK(attemptSlot.find(" slot 1 ") != std::string::npos);
+    CHECK(activeSlot.find(" slot 1 ") != std::string::npos);
+    CHECK(attemptSlot.find(" slot 0") == std::string::npos);
+    CHECK(activeSlot.find(" slot 0") == std::string::npos);
+    const auto vastaus = youhost::formatPluginAttemptLine("loading", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", nullptr);
+    CHECK(vastaus == "loading  ch 1 slot 2  AudioUnit  Vastaus  id=AudioUnit:Effects/aufx,vast,test");
+    const auto vastausFailed = youhost::formatPluginAttemptLine("did-not-load", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", "instantiate failed: no reason from the host");
+    CHECK(vastausFailed.find(" ch 1 slot 2 ") != std::string::npos);
+    CHECK(vastausFailed.find(" ch 1 slot 1") == std::string::npos);
+    CHECK(vastausFailed.find("AudioUnit") != std::string::npos);
+    CHECK(vastausFailed.find("reason=instantiate failed: no reason from the host") != std::string::npos);
+    const auto guessedFormat = youhost::formatPluginAttemptLine("loading", 0, 1, "", "Vastaus", "AudioUnit:Effects/aufx,vast,test", nullptr);
+    CHECK(guessedFormat.find("  AudioUnit  ") != std::string::npos);
+    CHECK(youhost::audioUnitScanIncludesAsync());
+    const auto scanFailure = youhost::formatScanFailureLine("AudioUnit", "/Library/Audio/Plug-Ins/Components/Vastaus.component", "Plugin crashed the scanner");
+    CHECK(scanFailure.find("AudioUnit") != std::string::npos);
+    CHECK(scanFailure.find("Vastaus.component") != std::string::npos);
+    CHECK(scanFailure.find("reason=Plugin crashed the scanner") != std::string::npos);
+
+    youhost::SavedWindowSize smallFrame;
+    smallFrame.valid = true;
+    smallFrame.x = 40;
+    smallFrame.y = 50;
+    smallFrame.width = 400;
+    smallFrame.height = 300;
+    const auto croppedEditor = youhost::planEditorWindow(800, 600, true, 200, 150, 2000, 1500, 2.0f, 1920, 1080, smallFrame);
+    CHECK(croppedEditor.hostScale == 1.0f);
+    CHECK(youhost::editorHostScale(2.0f) == 1.0f);
+    // Vastaus. The Audio Unit view is in points. The VST3 getSize on macOS is
+    // that same point size. Dividing by the 2x Retina backing scale, which is
+    // what the old test locked in, makes the VST3 window half the Audio Unit.
+    // Windows still converts physical pixels.
+    CHECK(youhost::vst3ViewPoints(800, 2.0f, true) == 800);
+    CHECK(youhost::vst3ViewPoints(800, 1.0f, true) == 800);
+    CHECK(youhost::vst3ViewPoints(1600, 2.0f, false) == 800);
+    CHECK(youhost::vst3ViewPoints(800, 2.0f, true) == youhost::vst3ViewPoints(800, 1.0f, true));
+    CHECK(youhost::vst3ContentScale(2.0f, true) == 1.0f);
+    CHECK(youhost::vst3ContentScale(1.0f, true) == 1.0f);
+    CHECK(youhost::vst3ContentScale(2.0f, false) == 2.0f);
+    CHECK(youhost::vst3ContentScale(0.0f, false) == 1.0f);
+    CHECK(youhost::vst3ViewPoints(0, 2.0f, true) == 0);
+    // Vastaus AU draws at the right point size and the clicks miss those
+    // controls when the hosted NSView is scaled. The frame stays the view's
+    // point size at a Retina scale of 2, and bounds must equal that frame.
+    const auto hitFrame = youhost::hostedViewFrame(4, 8, 800, 500, 2.0f);
+    CHECK(hitFrame.x == 4);
+    CHECK(hitFrame.y == 8);
+    CHECK(hitFrame.width == 800);
+    CHECK(hitFrame.height == 500);
+    CHECK(hitFrame.width != 1600);
+    CHECK(hitFrame.height != 1000);
+    CHECK(youhost::hostedViewFrame(0, 0, 800, 500, 1.0f).width == 800);
+    CHECK(youhost::hostedViewClicksMatch(800, 500, 800, 500));
+    CHECK(! youhost::hostedViewClicksMatch(800, 500, 1600, 1000));
+    CHECK(! youhost::hostedViewClicksMatch(800, 500, 400, 250));
+    CHECK(! youhost::hostedViewClicksMatch(0, 500, 0, 500));
+    CHECK(croppedEditor.width >= 800);
+    CHECK(croppedEditor.height >= 600);
+    CHECK(! croppedEditor.restoreSaved);
+    CHECK(croppedEditor.minWidth == 200);
+    CHECK(croppedEditor.minHeight == 150);
+    youhost::SavedWindowSize largeFrame = smallFrame;
+    largeFrame.width = 1000;
+    largeFrame.height = 800;
+    const auto keptEditor = youhost::planEditorWindow(800, 600, true, 200, 150, 2000, 1500, 2.0f, 1920, 1080, largeFrame);
+    CHECK(keptEditor.restoreSaved);
+    CHECK(keptEditor.width >= 1000);
+    CHECK(keptEditor.height >= 800);
+    const auto fixedEditor = youhost::planEditorWindow(800, 600, false, 0, 0, 0, 0, 2.0f, 1920, 1080, largeFrame);
+    CHECK(! fixedEditor.resizable);
+    CHECK(! fixedEditor.restoreSaved);
+    CHECK(fixedEditor.width == 800);
+    CHECK(fixedEditor.height == 600);
+    CHECK(fixedEditor.minWidth == 800 && fixedEditor.maxWidth == 800);
+    CHECK(fixedEditor.minHeight == 600 && fixedEditor.maxHeight == 600);
+    const auto lateSize = youhost::planEditorWindow(0, 0, true, 500, 400, 900, 700, 2.0f, 1920, 1080, {});
+    CHECK(lateSize.width >= 500);
+    CHECK(lateSize.height >= 400);
+    CHECK(lateSize.width != 360);
+    CHECK(lateSize.height != 240);
+
+    const auto rackNow = readWorkspaceFile("src/engine/PluginRack.cpp");
+    CHECK(rackNow.find("setResizeLimits(320, 200") == std::string::npos);
+    CHECK(rackNow.find("jmax(360") == std::string::npos);
+    CHECK(rackNow.find("getDesktopScaleFactor") != std::string::npos);
+    CHECK(rackNow.find("The audio thread does not wait on the message thread") != std::string::npos);
+    CHECK(rackNow.find("failedLayoutNeedsRestore") != std::string::npos);
+    CHECK(rackNow.find("juce::String(slot)") == std::string::npos);
+    const auto processBody = sliceBetween(rackNow, "void PluginRack::process(", "void PluginRack::processJob");
+    CHECK(processBody.find("setBusesLayout") == std::string::npos);
+    CHECK(processBody.find("configureBuses") == std::string::npos);
+    const auto runsAt = processBody.find("channelProcessesPlugins");
+    const auto outputAt = processBody.find("outputPacked");
+    CHECK(runsAt != std::string::npos && outputAt != std::string::npos && runsAt < outputAt);
+    const auto audioNow = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto callbackNow = sliceBetween(audioNow,
+                                          "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                          "void AudioEngine::audioDeviceAboutToStart");
+    const auto rackCall = callbackNow.find("rack_->process(");
+    CHECK(rackCall != std::string::npos);
+    const auto rackArgs = callbackNow.substr(rackCall, 180);
+    CHECK(rackArgs.find("config.routing") != std::string::npos);
+    CHECK(rackArgs.find("playConfig") == std::string::npos);
+    CHECK(callbackNow.find("playConfig.routing.inputPacked") != std::string::npos);
+    CHECK(audioNow.find("channelCapForDevice") != std::string::npos);
+    CHECK(audioNow.find("applyChannelCap") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("one-input, two-output") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("weak baseline") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Plugins on a hidden channel, or a channel with no input, do not run.") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("weak baseline") != std::string::npos);
+    const auto oneChannel = sliceBetween(rackNow, "void PluginRack::processOneChannel", "bool PluginRack::pauseGate");
+    CHECK(oneChannel.find("setBusesLayout") == std::string::npos);
+    CHECK(oneChannel.find("configureBuses") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("The audio block does not renegotiate") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("does not renegotiate buses") != std::string::npos);
+    const auto finishNow = sliceBetween(rackNow, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
+    CHECK(finishNow.find("juce::String(slot)") == std::string::npos);
+    CHECK(finishNow.find("pluginLogLine") != std::string::npos);
+    const auto openNow = sliceBetween(rackNow, "void PluginRack::openEditor", "void PluginRack::setGlobalKeyListener");
+    CHECK(openNow.find("pauseGate") == std::string::npos);
+    CHECK(openNow.find("createEditorAndMakeActive") != std::string::npos);
+    CHECK(openNow.find("planEditorWindow") != std::string::npos);
+    CHECK(openNow.find("sized in points") != std::string::npos);
+    CHECK(openNow.find("setContentScaleFactor") != std::string::npos);
+    CHECK(openNow.find("settleAfterPeerScale") == std::string::npos);
+    CHECK(openNow.find("editorWaitsForPeerScale") == std::string::npos);
+    CHECK(openNow.find("setResizeLimits") != std::string::npos);
+    CHECK(openNow.find("1:1") != std::string::npos);
+    CHECK(openNow.find("AffineTransform") != std::string::npos);
+    CHECK(openNow.find("->setScaleFactor") == std::string::npos);
+    CHECK(openNow.find("setTransform") == std::string::npos);
+    const auto listenerNow = sliceBetween(rackNow, "void componentMovedOrResized", "std::function<void(int, int)> onClose_");
+    CHECK(listenerNow.find("Retina backing scale") != std::string::npos);
+    CHECK(listenerNow.find("waitsForPeerScale_") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("same point size as its Audio Unit") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("after the plugin's content scale") == std::string::npos);
+    const auto scalePatch = readWorkspaceFile("cmake/patch_juce_vst3_mac_scale.py");
+    CHECK(scalePatch.find("nativeScaleFactor = 1.0f") != std::string::npos);
+    CHECK(scalePatch.find("JUCE_MAC") != std::string::npos);
+    CHECK(scalePatch.find("setContentScaleFactor") != std::string::npos);
+    CHECK(scalePatch.find("logical points") != std::string::npos);
+    const auto viewPatch = readWorkspaceFile("cmake/patch_juce_editor_view.py");
+    CHECK(viewPatch.find("JuceHostedViewOneToOne_") != std::string::npos);
+    CHECK(viewPatch.find("isFlipped") != std::string::npos);
+    CHECK(viewPatch.find("setBounds:") != std::string::npos);
+    CHECK(viewPatch.find("CGAffineTransformIdentity") != std::string::npos);
+    CHECK(viewPatch.find("NSMakeSize (0.f, 0.f)") != std::string::npos);
+    CHECK(viewPatch.find("Added at 1:1") != std::string::npos);
+    CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_editor_view.py") != std::string::npos);
+    const auto realtimePatch = readWorkspaceFile("cmake/patch_juce_realtime_callback.py");
+    CHECK(realtimePatch.find("youhostCallbackInFlight") != std::string::npos);
+    CHECK(realtimePatch.find("youhostCopyDeviceChannels") != std::string::npos);
+    CHECK(realtimePatch.find("kAudioDevicePropertyIOCycleUsage") != std::string::npos);
+    CHECK(realtimePatch.find("memcpy") != std::string::npos);
+    CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_realtime_callback.py") != std::string::npos);
+    CHECK(rackNow.find("setNonRealtime(false)") != std::string::npos);
+    CHECK(oneChannel.find("monoInPlace") != std::string::npos);
+    const auto auRelease = readWorkspaceFile("cmake/patch_juce_au_release.py");
+    CHECK(auRelease.find("youhostUnlock") != std::string::npos);
+    CHECK(auRelease.find("AudioComponentInstanceDispose") != std::string::npos);
+    CHECK(auRelease.find("does not wait") != std::string::npos);
+    CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_au_release.py") != std::string::npos);
+    CHECK(rackNow.find("This thread does not wait") != std::string::npos);
+    const auto condemnNow = sliceBetween(rackNow, "void PluginRack::pumpCondemned", "void PluginRack::flushDeferred");
+    CHECK(condemnNow.find("releaseInstanceOffMessageThread") != std::string::npos);
+    CHECK(condemnNow.find("releaseResources") == std::string::npos);
+    CHECK(condemnNow.find("delete ") == std::string::npos);
+    const auto flushNow = sliceBetween(rackNow, "void PluginRack::flushDeferred", "void PluginRack::destroyInstance");
+    CHECK(flushNow.find("releaseInstanceOffMessageThread") != std::string::npos);
+    CHECK(flushNow.find("releaseResources") == std::string::npos);
+    CHECK(flushNow.find("delete ") == std::string::npos);
+    const auto destroyNow = sliceBetween(rackNow, "void PluginRack::destroyInstance", "\n} // namespace youhost");
+    CHECK(destroyNow.find("releaseInstanceOffMessageThread") != std::string::npos);
+    CHECK(destroyNow.find("releaseResources") == std::string::npos);
+    CHECK(destroyNow.find("delete instance") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("Clicks land on the control that is drawn.") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Clicks land on the control that is drawn.") != std::string::npos);
+    const auto beginNow = sliceBetween(rackNow, "void PluginRack::beginLoad", "void PluginRack::finishLoad");
+    const auto loadingAt = beginNow.find("\"loading\"");
+    const auto admitAt = beginNow.find("admitPluginIntoSlot");
+    CHECK(loadingAt != std::string::npos && admitAt != std::string::npos && loadingAt < admitAt);
+    const auto catalogueNow = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
+    CHECK(catalogueNow.find("audioUnitScanIncludesAsync") != std::string::npos);
+    CHECK(catalogueNow.find("searchPathsForPlugins(paths, true, false)") == std::string::npos);
+    CHECK(catalogueNow.find("AudioUnit scan listed") != std::string::npos);
+    CHECK(catalogueNow.find("formatScanFailureLine") != std::string::npos);
+
+    CHECK(beginNow.find("leaveOutOfThisLaunch") != std::string::npos);
+    CHECK(beginNow.find("claimSlotForManualLoad") != std::string::npos);
+    CHECK(beginNow.find("restoreSkipsClaimedSlot") != std::string::npos);
+    const auto claimAt = beginNow.find("claimSlotForManualLoad");
+    const auto detachAt = beginNow.find("detachEditor");
+    CHECK(claimAt != std::string::npos && detachAt != std::string::npos && claimAt < detachAt);
+    CHECK(beginNow.find("! admit.load") == std::string::npos);
+    CHECK(beginNow.find("->bypassed = true") == std::string::npos);
+    CHECK(beginNow.find("kPluginCrashedLastTime") != std::string::npos);
+    const auto choiceNow = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                        "void AudioEngine::acceptCrashChoice",
+                                        "void AudioEngine::prepareForQuit");
+    CHECK(choiceNow.find("rememberCrashedPlugins") != std::string::npos);
+    CHECK(choiceNow.find("omitFromNextRestore") != std::string::npos);
+    CHECK(choiceNow.find("setBlockedSlots") == std::string::npos);
+    CHECK(choiceNow.find("setBlockedIdentifiers") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("this plugin crashed last time") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("including channel 1 slot 1") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("this plugin crashed last time") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("including channel 1 slot 1") != std::string::npos);
+    youhost::SlotBlock held[1];
+    held[0].channel = 0;
+    held[0].slot = 0;
+    held[0].identifier = "AudioUnit:Effects/aufx,vast,test";
+    std::string releasedId;
+    const int freed = youhost::releaseCrashSlot(held, 1, 0, 0, &releasedId);
+    CHECK(freed == 0);
+    CHECK(releasedId == "AudioUnit:Effects/aufx,vast,test");
+    CHECK(! youhost::identifierHeldBySlot(held, freed, releasedId));
+    const auto loadAgain = youhost::admitPluginIntoSlot(0, 0, releasedId, held, freed, false);
+    CHECK(loadAgain.load);
+    youhost::SlotBlock both[2];
+    both[0].channel = 0;
+    both[0].slot = 0;
+    both[0].identifier = "au.vastaus";
+    both[1].channel = 1;
+    both[1].slot = 0;
+    both[1].identifier = "au.vastaus";
+    std::string stillHeld;
+    const int remain = youhost::releaseCrashSlot(both, 2, 0, 0, &stillHeld);
+    CHECK(remain == 1);
+    CHECK(youhost::identifierHeldBySlot(both, remain, stillHeld));
+    const auto blockedId = youhost::admitPluginIntoSlot(0, 0, stillHeld, both, remain, true);
+    CHECK(blockedId.load);
+    CHECK(std::string(blockedId.reason) == youhost::kPluginCrashedLastTime);
+    const auto removeNow = sliceBetween(rackNow, "void PluginRack::removePluginNow", "void PluginRack::enqueueChannel");
+    CHECK(removeNow.find("clearCrashBlock") != std::string::npos);
+    CHECK(removeNow.find("kSlotFreedReason") != std::string::npos);
+    const auto pageNow = readWorkspaceFile("src/ui/PluginPage.cpp");
+    CHECK(pageNow.find("Turn bypass off") != std::string::npos);
+    CHECK(pageNow.find("slotClickOpensPluginList") != std::string::npos);
+    CHECK(pageNow.find("snap.liveInstance") != std::string::npos);
+    CHECK(pageNow.find("kSlotLoadAgain") == std::string::npos);
+    CHECK(pageNow.find("kSlotRetryClick") == std::string::npos);
+    CHECK(pageNow.find("crashParked") == std::string::npos);
+    CHECK(pageNow.find("left off") == std::string::npos);
+    CHECK(pageNow.find("source.note") != std::string::npos);
+
+    std::cout << "hidden channels skipped " << stress.hiddenCalls
+              << ", meter " << stress.meter
+              << "%, any plugin loads in any slot, ch 1 slot 1 stays open, vst3 mono width 1, speaker ch 2-12 idle\n";
+}
+
 } // namespace
 
 int main()
@@ -6113,6 +6957,7 @@ int main()
     testTimelineZoom();
     testInsertMenuAndStall();
     testCrashJournal();
+    testStability106();
     testDeviceWatch();
     testDeviceOpensAllChannels();
     testMergePeaks();

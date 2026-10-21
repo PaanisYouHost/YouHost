@@ -120,6 +120,18 @@ jobs:
           fi
           "${TEST}"
 
+      - name: VST3 and AU stress
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release --target YouHostVst3Stress
+          TEST=build/YouHostVst3Stress
+          if [ ! -x "${TEST}" ]; then
+            echo "YouHostVst3Stress was not produced"
+            find build -name 'YouHostVst3Stress*' -print
+            exit 1
+          fi
+          "${TEST}"
+
       - name: Ad-hoc sign
         run: |
           set -euo pipefail
@@ -204,10 +216,21 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
-            2026-10-20
+            2026-10-21
 
-            YouHost 1.0.5 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.7 is a prerelease for testing. It is not the Latest release.
 
+            - The device callback does not hold its lock while plugins run. A mono plugin is processed in place. Core Audio gives the callback the whole buffer period.
+
+            - A channel with no input, a hidden channel, or a channel past the card does not run its plugins and does not use CPU.
+            - A one-input, two-output device runs plugins only on the channel that has the input. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. Switching to another device changes the clock. That reading is a weak baseline for plugin speed.
+            - The MacBook microphone and speakers stay one device entry, MacBook Pro (mic + speakers), including the Finnish names. YouHost does not move to another card on its own. A device change is written to youhost.log with its cause.
+            - A message-thread stall does not bypass plugins or pass the dry input. If the open card briefly reports fewer active channels, those plugins stay in the signal. YouHost does not reopen the card for that dip.
+            - A plugin window opens at the plugin's own size and scale, and only resizes as far as the plugin allows. A VST3 window on the Mac uses the same point size as its Audio Unit. The Retina backing scale is not applied a second time. Clicks land on the control that is drawn. Every load attempt is logged with the format and the slot, including an Audio Unit that does not open. Audio Units that instantiate asynchronously are included in the scan.
+            - Choosing a plugin always loads it, in any slot. If that plugin crashed last time, YouHost shows a small note: this plugin crashed last time. Open session without this plugin leaves that plugin out of this launch. The slot stays empty. A click opens the plugin list, and any plugin loads there, including channel 1 slot 1. The session file keeps it until the next save.
+            - Each audio block records how long the stages and the slowest plugin took. A dropout line names that plugin. The DSP meter follows the callback, so it cannot sit at a latched plugin sum.
+            - VST3 process runs on the audio thread. A worker thread is not used for it. A mono VST3 settles its buses once at load, including the retry from extra=opened to extra=disable. A rejected attempt does not call setBusesLayout again. The audio block does not renegotiate buses.
+            - After a crash, choosing any plugin in that slot loads it, including the one that crashed. Channel 1 slot 1 is not locked. The log says why a plugin did not load. The crash journal keeps history across restarts.
             - VST3 prepare (setupProcessing and setActive) runs on the message thread. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule.
             - A load-time silence reading no longer turns a plugin off. Lookahead plugins and gates are silent until they have had enough audio, and that reading was rejecting working plugins.
             - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence.

@@ -5,6 +5,7 @@
 #include "StereoLink.h"
 #include "CrashJournal.h"
 #include "DisplayLayout.h"
+#include "BlockTiming.h"
 #include "DropoutDetect.h"
 #include "DropoutLog.h"
 #include "LatencyMath.h"
@@ -93,6 +94,15 @@ public:
     int inputCount() const;
     int outputCount() const;
     juce::String deviceName() const { return deviceName_; }
+    // The menu name the user picked. The HAL output name is not a second card.
+    juce::String cardMenuName() const
+    {
+        if (offlineTemplate_)
+            return juce::String(kOfflineDeviceName);
+        if (wantedName_.isNotEmpty())
+            return wantedName_;
+        return deviceName_;
+    }
     juce::String openError() const { return openError_; }
 
     float rmsFor(int channel) const;
@@ -109,7 +119,17 @@ public:
     // would leave the last full-scale reading on screen.
     void silenceLiveState();
     void resetDropouts();
-    void noteDropout(int events);
+    void noteDropout(int events,
+                     bool overrun,
+                     int slowChannel = -1,
+                     int slowSlot = -1,
+                     int slowNs = 0,
+                     const char* slowName = nullptr,
+                     const DropoutAccount* account = nullptr,
+                     bool wake = false);
+    // CoreAudio overload. Raises a flag only. The audio thread writes the ring,
+    // and a miss it already recorded is not written again as an overrun.
+    void noteHalOverload(int events);
     void watchClockSync();
     void noteClockProperty() noexcept;
     void drainDropoutLog();
@@ -201,7 +221,7 @@ public:
     juce::String pressTransport(TransportPress press);
     void finishTransport();
     std::vector<ListedDevice> connectedDevices();
-    void openNamedDevice(const juce::String& name);
+    void openNamedDevice(const juce::String& name, const char* cause = "user chose the card");
     void noteUserChoseDevice(const juce::String& name);
     void transportLocate(std::int64_t sample);
     void dropMarker();
@@ -303,7 +323,7 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void applyPreferredTiming();
 
-    void publishConfig(juce::AudioIODevice& device);
+    void publishConfig(juce::AudioIODevice& device, int inputCap, int outputCap);
     void publishSessionChannelLimit();
     void reconcileStartupDevice();
     void pollStartupDeviceList();
@@ -352,10 +372,11 @@ private:
     void noteHardwareDeviceList();
     void tryReopenWanted();
     void rejectForeignDevice();
+    bool deviceIsChosenCard(const juce::AudioIODevice& device);
     void installDeviceListListener();
     void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
-    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason);
+    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format = {});
     void rememberSavedSetup(const juce::XmlElement* saved);
 
     AppSettings& settings_;
@@ -490,6 +511,23 @@ private:
     int dropoutCoalesceDsp_ = 0;
     int dropoutCoalescePlugins_ = 0;
     std::int64_t dropoutCoalesceTake_ = -1;
+    int dropoutCoalesceSlowChannel_ = -1;
+    int dropoutCoalesceSlowSlot_ = -1;
+    int dropoutCoalesceSlowNs_ = 0;
+    char dropoutCoalesceSlowName_[40] {};
+    int lastSlowChannel_ = -1;
+    int lastSlowSlot_ = -1;
+    int lastSlowNs_ = 0;
+    char lastSlowName_[40] {};
+    std::atomic<int> dropoutSawOverrun_ { 0 };
+    std::atomic<int> dropoutSawWake_ { 0 };
+    std::atomic<int> halOverloadPending_ { 0 };
+    DropoutAccount lastAccount_ {};
+    DropoutAccount dropoutCoalesceAccount_ {};
+    std::atomic<int> lastCallbackLoad_ { 0 };
+    std::atomic<int> callbackShownPeak_ { 0 };
+    BlockTimingRing timingRing_;
+    SlowestPublish slowest_;
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool resumeRecordingOnReturn_ = false;
@@ -507,6 +545,9 @@ private:
     int preparedBuffer_ = 0;
     juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;
     juce::String wantedName_;
+    juce::String chosenInputName_;
+    juce::String chosenOutputName_;
+    bool refusedForeignDevice_ = false;
     std::vector<ListedDevice> deviceInventory_;
     juce::uint32 deviceInventoryMs_ = 0;
     juce::String startupFallbackName_;

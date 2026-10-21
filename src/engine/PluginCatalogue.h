@@ -88,16 +88,19 @@ public:
                              juce::AudioPluginFormat::PluginCreationCallback callback);
 
     // True when this format may be constructed off the message thread.
-    // AudioUnit is never background: it uses createPluginInstanceAsync.
+    // AudioUnit is created on the loader thread, including an AUv3. The
+    // message thread stays in the runloop and is not blocked on the instantiate.
     bool prefersBackgroundInstance(const juce::PluginDescription& description) const;
 
-    // Called on a background thread. The callback inside the format runs
-    // before this returns.
+    // Called on a background thread. Pass allowMessageThread only for a VST3
+    // whose factory, initialize, setupProcessing, and setActive must share one
+    // message-thread turn. The callback inside the format runs before this returns.
     bool createInstanceBlocking(const juce::PluginDescription& description,
                                 double sampleRate,
                                 int blockSize,
                                 std::unique_ptr<juce::AudioPluginInstance>& instance,
-                                juce::String& error) const;
+                                juce::String& error,
+                                bool allowMessageThread = false) const;
 
 private:
     class DirectoryScanThread;

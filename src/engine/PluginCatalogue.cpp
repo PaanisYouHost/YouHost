@@ -2,6 +2,7 @@
 #include "PluginBuses.h"
 #include "PluginLoadPace.h"
 #include "AppSettings.h"
+#include "HostLog.h"
 #include "ScanJobs.h"
 
 #include <algorithm>
@@ -653,16 +654,23 @@ bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& desc
                                              double sampleRate,
                                              int blockSize,
                                              std::unique_ptr<juce::AudioPluginInstance>& instance,
-                                             juce::String& error) const
+                                             juce::String& error,
+                                             bool allowMessageThread) const
 {
     instance.reset();
     error.clear();
-    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    // VST3 createPluginInstance calls back before it returns, so waiting here
+    // on the message thread does not pump the run loop and does not deadlock.
+    // Every other format still refuses the message thread.
+    if (! allowMessageThread)
     {
-        if (messages->isThisTheMessageThread())
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
         {
-            error = "This plugin is opened on the message thread.";
-            return false;
+            if (messages->isThisTheMessageThread())
+            {
+                error = "This plugin is opened on the message thread.";
+                return false;
+            }
         }
     }
     if (! prefersBackgroundInstance(description))
@@ -853,7 +861,12 @@ void PluginCatalogue::runScan()
 #endif
             // AudioUnit ignores the path and walks the AudioComponent registry,
             // which is how /Library/Audio/Plug-Ins/Components is discovered.
-            const auto identifiers = format->searchPathsForPlugins(paths, true, false);
+            // The last flag must be true for AudioUnit: false drops every AUv3,
+            // and that plugin then never gets a load line.
+            const bool allowAsync = format->getName() == "AudioUnit" && audioUnitScanIncludesAsync();
+            const auto identifiers = format->searchPathsForPlugins(paths, true, allowAsync);
+            if (format->getName() == "AudioUnit")
+                appendHostLog(settings_, "AudioUnit scan listed " + juce::String(identifiers.size()) + " plugins");
             for (const auto& identifier : identifiers)
             {
                 const auto candidate = makeScanCandidate(format->getName().toStdString(), identifier.toStdString());
@@ -1073,7 +1086,10 @@ void PluginCatalogue::runScan()
         const std::lock_guard<std::mutex> lock(listMutex_);
         if (! outcome.ok)
         {
-            rememberFailure(job.identifier, outcome.reason.isNotEmpty() ? outcome.reason : juce::String("Failed"));
+            const auto reason = outcome.reason.isNotEmpty() ? outcome.reason : juce::String("Failed");
+            rememberFailure(job.identifier, reason);
+            const auto line = formatScanFailureLine(job.format.toRawUTF8(), job.identifier.toRawUTF8(), reason.toRawUTF8());
+            appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         }
         else
         {

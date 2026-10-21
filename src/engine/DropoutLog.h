@@ -1,12 +1,30 @@
 #pragma once
 
+#include "BlockTiming.h"
+
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace youhost
 {
+
+// One callback's wall time and the stages that add up to it.
+// lateNs is the start past the buffer period and is not part of wallNs.
+struct DropoutAccount
+{
+    int wallNs = 0;
+    int cpuNs = 0;
+    int periodNs = 0;
+    int recordNs = 0;
+    int passNs = 0;
+    int pluginNs = 0;
+    int meterNs = 0;
+    int blockNs = 0;
+    int lateNs = 0;
+};
 
 struct DropoutMark
 {
@@ -16,6 +34,13 @@ struct DropoutMark
     int bufferSamples = 0;
     int dspPercent = 0;
     int pluginCount = 0;
+    // Slowest plugin on the callback that produced this mark. Frozen here so a
+    // later short callback cannot replace it when the line is formatted.
+    int slowChannel = -1;
+    int slowSlot = -1;
+    int slowNs = 0;
+    char slowName[40] {};
+    DropoutAccount account {};
 };
 
 struct CpuSample
@@ -36,7 +61,12 @@ public:
               bool recording,
               int bufferSamples = 0,
               int dspPercent = 0,
-              int pluginCount = 0) noexcept
+              int pluginCount = 0,
+              int slowChannel = -1,
+              int slowSlot = -1,
+              int slowNs = 0,
+              const char* slowName = nullptr,
+              const DropoutAccount* account = nullptr) noexcept
     {
         const auto index = write_.load(std::memory_order_relaxed);
         auto& slot = slots_[static_cast<std::size_t>(index % kCapacity)];
@@ -46,6 +76,18 @@ public:
         slot.bufferSamples = bufferSamples;
         slot.dspPercent = dspPercent;
         slot.pluginCount = pluginCount;
+        slot.slowChannel = slowChannel;
+        slot.slowSlot = slowSlot;
+        slot.slowNs = slowNs;
+        slot.slowName[0] = '\0';
+        if (slowName != nullptr)
+        {
+            int name = 0;
+            for (; name < static_cast<int>(sizeof(slot.slowName)) - 1 && slowName[name] != '\0'; ++name)
+                slot.slowName[name] = slowName[name];
+            slot.slowName[name] = '\0';
+        }
+        slot.account = account != nullptr ? *account : DropoutAccount {};
         write_.store(index + 1, std::memory_order_release);
     }
 
@@ -68,6 +110,16 @@ public:
             destination[count].bufferSamples = slot.bufferSamples;
             destination[count].dspPercent = slot.dspPercent;
             destination[count].pluginCount = slot.pluginCount;
+            destination[count].slowChannel = slot.slowChannel;
+            destination[count].slowSlot = slot.slowSlot;
+            destination[count].slowNs = slot.slowNs;
+            destination[count].account = slot.account;
+            for (int name = 0; name < static_cast<int>(sizeof(destination[count].slowName)); ++name)
+            {
+                destination[count].slowName[name] = slot.slowName[name];
+                if (slot.slowName[name] == '\0')
+                    break;
+            }
             ++count;
             ++read_;
         }
@@ -88,6 +140,11 @@ private:
         int bufferSamples = 0;
         int dspPercent = 0;
         int pluginCount = 0;
+        int slowChannel = -1;
+        int slowSlot = -1;
+        int slowNs = 0;
+        char slowName[40] {};
+        DropoutAccount account {};
     };
 
     Slot slots_[kCapacity] {};
@@ -125,6 +182,83 @@ inline int countMarksInWindow(const DropoutMark* marks, int count, std::int64_t 
     return inside;
 }
 
+// The dropout line names the slowest plugin in the coalesced batch. A later
+// 16 us callback must not replace a 700 us overrun that is already in the batch.
+inline const DropoutMark* slowestInDropoutBatch(const DropoutMark* marks, int count) noexcept
+{
+    const DropoutMark* best = nullptr;
+    if (marks == nullptr || count <= 0)
+        return nullptr;
+    for (int index = 0; index < count; ++index)
+    {
+        const auto& mark = marks[index];
+        if (mark.slowName[0] == '\0' || mark.slowChannel < 0 || mark.slowSlot < 0)
+            continue;
+        if (best == nullptr || mark.slowNs > best->slowNs)
+            best = &mark;
+    }
+    return best;
+}
+
+// The mark whose callback wall was longest. A later short plugin must not
+// replace the callback that actually overran.
+inline const DropoutMark* fullestInDropoutBatch(const DropoutMark* marks, int count) noexcept
+{
+    const DropoutMark* best = nullptr;
+    if (marks == nullptr || count <= 0)
+        return nullptr;
+    for (int index = 0; index < count; ++index)
+    {
+        const auto& mark = marks[index];
+        const int score = mark.account.wallNs > 0 ? mark.account.wallNs : mark.account.lateNs;
+        if (score <= 0)
+            continue;
+        if (best == nullptr)
+        {
+            best = &mark;
+            continue;
+        }
+        const int bestScore = best->account.wallNs > 0 ? best->account.wallNs : best->account.lateNs;
+        if (score > bestScore)
+            best = &mark;
+    }
+    return best;
+}
+
+// Stages plus wall, the sum of those stages, thread CPU, off-CPU, period, and
+// a late start. slowNs is the plugin timer so wrap can be split from processBlock.
+inline std::string formatDropoutAccount(const DropoutAccount& account, int slowNs)
+{
+    if (account.wallNs <= 0 && account.lateNs <= 0)
+        return {};
+    if (account.wallNs <= 0)
+        return " late " + std::to_string(account.lateNs / 1000) + "us";
+
+    BlockTimingRecord block;
+    block.wallNs = account.wallNs;
+    block.cpuNs = account.cpuNs;
+    block.periodNs = account.periodNs;
+    block.recordNs = account.recordNs;
+    block.passNs = account.passNs;
+    block.pluginNs = account.pluginNs;
+    block.meterNs = account.meterNs;
+    block.blockNs = account.blockNs;
+    block.lateNs = account.lateNs;
+    block.slowestNs = slowNs > 0 ? slowNs : 0;
+    const auto us = [](int ns)
+    {
+        if (ns < 0)
+            ns = 0;
+        return std::to_string(ns / 1000);
+    };
+    std::string line = " record " + us(account.recordNs) + "us";
+    line += " pass " + us(account.passNs) + "us";
+    line += " plugins " + us(account.pluginNs) + "us";
+    line += " meters " + us(account.meterNs) + "us";
+    line += formatCallbackSplit(block);
+    return line;
+}
+
 inline std::int64_t latestMarkNs(const DropoutMark* marks, int count)
 {
     std::int64_t latest = 0;
@@ -154,6 +288,28 @@ inline std::string formatDropoutHostLine(int count, std::int64_t timelineSample,
     line += "  dsp " + std::to_string(dspPercent) + "%";
     line += "  plugins " + std::to_string(pluginCount);
     return line;
+}
+
+// Added after formatDropoutHostLine. Names the plugin that took the longest
+// on the callback that dropped out. channel and slot are 1-based, as in the log.
+inline std::string formatDropoutSlowest(int channel, int slot, std::string_view name, int microseconds)
+{
+    if (name.empty() || channel < 1 || slot < 1 || microseconds < 0)
+        return {};
+    std::string safe;
+    safe.reserve(name.size());
+    for (char raw : name)
+    {
+        const auto character = static_cast<unsigned char>(raw);
+        if (character < 32 || character == '\t')
+            safe.push_back(' ');
+        else
+            safe.push_back(static_cast<char>(character));
+    }
+    if (safe.empty())
+        return {};
+    return "  slowest ch " + std::to_string(channel) + " slot " + std::to_string(slot) + " " + safe
+           + " " + std::to_string(microseconds) + "us";
 }
 
 // First event logs immediately. Later events inside 500 ms stay in one line.

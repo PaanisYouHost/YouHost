@@ -196,6 +196,185 @@ inline std::vector<CrashMark> crashPluginsToSkip(const CrashJournal& journal)
     return out;
 }
 
+// One generation per save. "---" starts the next one. Startup appends a new
+// generation; it does not erase the ones already in the file.
+inline std::string appendCrashGeneration(std::string_view existing, const CrashJournal& journal)
+{
+    std::string text(existing);
+    if (! text.empty() && text.back() != '\n')
+        text.push_back('\n');
+    if (! text.empty())
+        text += "---\n";
+    text += writeCrashJournal(journal);
+    return text;
+}
+
+inline CrashJournal readLatestCrashJournal(std::string_view text)
+{
+    std::string_view latest = text;
+    std::size_t cursor = 0;
+    while (cursor < text.size())
+    {
+        const auto end = text.find('\n', cursor);
+        auto line = text.substr(cursor, end == std::string_view::npos ? text.size() - cursor : end - cursor);
+        if (! line.empty() && line.back() == '\r')
+            line.remove_suffix(1);
+        if (line == "---")
+            latest = text.substr(end == std::string_view::npos ? text.size() : end + 1);
+        cursor = end == std::string_view::npos ? text.size() : end + 1;
+    }
+    return readCrashJournal(latest);
+}
+
+// Drop whole generations from the front until the file fits. The latest
+// generation stays even if it is the only one left.
+inline std::string rotateCrashHistory(std::string_view text, std::size_t maxBytes)
+{
+    if (text.size() <= maxBytes)
+        return std::string(text);
+    if (maxBytes < 64)
+        maxBytes = 64;
+    std::size_t start = text.size() > maxBytes ? text.size() - maxBytes : 0;
+    const auto mark = text.find("---\n", start);
+    if (mark == std::string_view::npos)
+        return std::string(text.substr(text.size() > maxBytes ? text.size() - maxBytes : 0));
+    return std::string(text.substr(mark + 4));
+}
+
+// Choosing a plugin always loads it. A previous crash is only a warning.
+struct SlotBlock
+{
+    int channel = -1;
+    int slot = -1;
+    std::string identifier;
+};
+
+struct SlotAdmit
+{
+    bool load = false;
+    bool clearSlot = false;
+    const char* reason = nullptr;
+};
+
+inline constexpr const char* kPluginCrashedLastTime = "this plugin crashed last time";
+inline constexpr const char* kLeftOutOfThisLaunch = "left out of this launch";
+inline constexpr const char* kSlotFreedReason = "the slot is free";
+
+// Small non-blocking note. nullptr when this plugin has no crash warning.
+inline const char* crashWarningNote(bool crashedBefore) noexcept
+{
+    return crashedBefore ? kPluginCrashedLastTime : nullptr;
+}
+
+// "Open session without this plugin" skips the automatic restore only.
+// A manual choice (automaticRestore == false) always loads.
+inline bool leaveOutOfThisLaunch(bool automaticRestore, bool listedForThisLaunch) noexcept
+{
+    return automaticRestore && listedForThisLaunch;
+}
+
+// The user already chose a plugin for this slot. The automatic restore must
+// not clear it. Channel 1 slot 1 is the same rule as every other slot.
+inline bool restoreSkipsClaimedSlot(bool automaticRestore, bool userClaimedSlot) noexcept
+{
+    return automaticRestore && userClaimedSlot;
+}
+
+// An empty slot opens the plugin list. A live plugin toggles its editor.
+// A slot left off after a crash has no live instance, so the click opens the list.
+inline bool slotClickOpensPluginList(bool liveInstance, bool loading) noexcept
+{
+    return ! loading && ! liveInstance;
+}
+
+// True when this channel and slot were named by the dialog for this launch.
+// The identifier must be the same plugin. An empty crash id does not match
+// every plugin, so it cannot lock the slot.
+inline bool pluginListedForThisLaunch(int channel,
+                                      int slot,
+                                      std::string_view identifier,
+                                      const SlotBlock* listed,
+                                      int count) noexcept
+{
+    if (listed == nullptr || count <= 0)
+        return false;
+    for (int index = 0; index < count; ++index)
+    {
+        if (listed[index].channel != channel || listed[index].slot != slot)
+            continue;
+        if (listed[index].identifier == identifier)
+            return true;
+    }
+    return false;
+}
+
+// Drops one remembered slot. The identifier remains while another slot still names it.
+inline int releaseCrashSlot(SlotBlock* blocks,
+                            int count,
+                            int channel,
+                            int slot,
+                            std::string* releasedIdentifier)
+{
+    if (releasedIdentifier != nullptr)
+        releasedIdentifier->clear();
+    if (blocks == nullptr || count <= 0)
+        return count < 0 ? 0 : count;
+    int kept = 0;
+    for (int index = 0; index < count; ++index)
+    {
+        if (blocks[index].channel == channel && blocks[index].slot == slot)
+        {
+            if (releasedIdentifier != nullptr)
+                *releasedIdentifier = blocks[index].identifier;
+            continue;
+        }
+        if (kept != index)
+            blocks[kept] = blocks[index];
+        ++kept;
+    }
+    return kept;
+}
+
+inline bool identifierHeldBySlot(const SlotBlock* blocks, int count, std::string_view identifier) noexcept
+{
+    if (blocks == nullptr || identifier.empty())
+        return false;
+    for (int index = 0; index < count; ++index)
+        if (blocks[index].identifier == identifier)
+            return true;
+    return false;
+}
+
+// Any plugin, any slot. load is always true. A leftover hold is cleared.
+// reason is the warning note when this plugin crashed before, otherwise nullptr.
+inline SlotAdmit admitPluginIntoSlot(int channel,
+                                     int slot,
+                                     std::string_view identifier,
+                                     const SlotBlock* blocks,
+                                     int blockCount,
+                                     bool identifierBlocked) noexcept
+{
+    const SlotBlock* slotBlock = nullptr;
+    if (blocks != nullptr)
+    {
+        for (int index = 0; index < blockCount; ++index)
+        {
+            if (blocks[index].channel == channel && blocks[index].slot == slot)
+                slotBlock = &blocks[index];
+        }
+    }
+
+    const bool samePlugin = slotBlock != nullptr && ! slotBlock->identifier.empty()
+                            && slotBlock->identifier == identifier;
+    const bool unknownPlugin = slotBlock != nullptr && slotBlock->identifier.empty() && identifier.empty();
+
+    SlotAdmit admitted;
+    admitted.load = true;
+    admitted.clearSlot = slotBlock != nullptr;
+    admitted.reason = crashWarningNote(identifierBlocked || samePlugin || unknownPlugin);
+    return admitted;
+}
+
 inline std::string crashDialogMessage(const CrashJournal& journal)
 {
     const auto skip = crashPluginsToSkip(journal);

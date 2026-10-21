@@ -71,23 +71,13 @@ inline std::vector<AudioSetupMenu> audioSetupMenus(const std::vector<ListedDevic
         choice.id = row.kind == DeviceRowKind::offline ? kOfflineDeviceItemId : nextId++;
         if (offline && row.kind == DeviceRowKind::offline)
             card.selectedId = choice.id;
-        else if (! offline && ! selectedDevice.empty()
-                 && (row.name == selectedDevice || choice.text == selectedDevice))
+        else if (! offline && deviceRowMatches(row, selectedDevice))
             card.selectedId = choice.id;
         card.choices.push_back(std::move(choice));
     }
     if (offline)
         card.selectedId = kOfflineDeviceItemId;
-    else if (card.selectedId == 0)
-    {
-        for (const auto& choice : card.choices)
-        {
-            if (choice.heading || choice.id == kOfflineDeviceItemId)
-                continue;
-            card.selectedId = choice.id;
-            break;
-        }
-    }
+    // No match leaves the menu with nothing selected. The first row is not a choice.
     menus.push_back(std::move(card));
 
     AudioSetupMenu rate;

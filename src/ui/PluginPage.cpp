@@ -10,13 +10,13 @@
 #include "engine/SignalPath.h"
 #include "engine/DisplayLayout.h"
 #include "engine/HostColumns.h"
+#include "engine/CrashJournal.h"
 #include "engine/InsertMenu.h"
 #include "engine/PluginBuses.h"
 #include "engine/StereoLink.h"
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
 #include "engine/Shortcuts.h"
-
 namespace youhost
 {
 namespace
@@ -973,7 +973,11 @@ public:
                 if (source.outputChannels > 1)
                     tip << ", stereo on mono: " << stereoFoldToken(stereoFoldFromInt(source.stereoFold));
             }
-            button.setTooltip(source.error.isNotEmpty() ? source.error : tip);
+            if (source.note.isNotEmpty())
+                tip << "\n" << source.note;
+            if (source.error.isNotEmpty())
+                tip = source.error;
+            button.setTooltip(tip);
         }
         const bool selected = engine_.isChannelSelected(channel_);
         const int color = engine_.channelColor(channel_);
@@ -1159,16 +1163,16 @@ private:
     void slotClicked(int slot)
     {
         const auto snap = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
-        if (snap.loading)
-            return;
-        if (snap.occupied)
+        // No live instance opens the list. After a crash the slot is empty,
+        // including ch 1 slot 1, and the click must not try to open a missing editor.
+        if (slotClickOpensPluginList(snap.liveInstance, snap.loading))
         {
-            engine_.togglePluginEditor(channel_, slot);
+            if (auto* page = findParentComponentOfClass<PluginPage>())
+                page->showPluginList(channel_, slot);
             return;
         }
-
-        if (auto* page = findParentComponentOfClass<PluginPage>())
-            page->showPluginList(channel_, slot);
+        if (snap.liveInstance)
+            engine_.togglePluginEditor(channel_, slot);
     }
 
     void showMenu(int slot)

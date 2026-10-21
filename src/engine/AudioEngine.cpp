@@ -25,6 +25,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include <execinfo.h>
@@ -45,6 +46,23 @@ int64_t steadyNowNs()
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+int64_t threadCpuNowNs() noexcept
+{
+    timespec ts {};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0;
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
+}
+
+int clampTimingNs(int64_t ns) noexcept
+{
+    if (ns <= 0)
+        return 0;
+    if (ns > 2147483647LL)
+        return 2147483647;
+    return static_cast<int>(ns);
 }
 
 // A saved mask is ignored. Missing channel attributes make the device open its default set,
@@ -185,7 +203,7 @@ OSStatus overloadListener(AudioObjectID,
 {
     auto* engine = static_cast<AudioEngine*>(client);
     if (engine != nullptr)
-        engine->noteDropout(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses));
+        engine->noteHalOverload(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses));
     return noErr;
 }
 
@@ -302,9 +320,9 @@ AudioEngine::AudioEngine(AppSettings& settings)
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
-    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
+    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)
     {
-        notePluginTrace(channel, slot, phase, name, identifier, reason);
+        notePluginTrace(channel, slot, phase, name, identifier, reason, format);
     });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
@@ -424,8 +442,10 @@ void AudioEngine::pollDeviceStats()
     const bool open = device != nullptr && device->isOpen();
     if (reopenInProgress_)
     {
-        if (open)
-            applyOpenDevice(*device, device->getName() == wantedName_);
+        if (open && deviceIsChosenCard(*device))
+            applyOpenDevice(*device, true);
+        else if (open)
+            rejectForeignDevice();
         return;
     }
 
@@ -435,37 +455,46 @@ void AudioEngine::pollDeviceStats()
         return;
     }
 
-    juce::AudioDeviceManager::AudioDeviceSetup current;
-    deviceManager_.getAudioDeviceSetup(current);
-    const bool namedBySetup = device->getName() == current.outputDeviceName || device->getName() == current.inputDeviceName;
-    const bool userChoseThis = namedBySetup && wantedName_.isNotEmpty() && device->getName() != wantedName_
-                               && ! awaitingSavedDevice_ && ! setupLocked_;
-    if (userChoseThis)
+    // A card the system opened is not a choice. The menu name stays, and the
+    // chosen halves are opened again. An aggregate does not become the host.
+    if (wantedName_.isNotEmpty() && ! deviceIsChosenCard(*device))
     {
-        noteUserDeviceChange();
-        wantedName_ = device->getName();
-        applyOpenDevice(*device, true);
-        return;
-    }
-
-    // A card that is not the session card is not the host. The built-in
-    // device must not take over when the X32 is unplugged.
-    if (wantedName_.isNotEmpty() && device->getName() != wantedName_
-        && (setupLocked_ || awaitingSavedDevice_ || deviceLostBanner_ || lossFinalized_))
-    {
-        if (! awaitingSavedDevice_)
+        if (! refusedForeignDevice_)
         {
-            if (downSinceMs_ == 0)
-                downSinceMs_ = juce::Time::getMillisecondCounter();
-            noteSyncLost();
+            refusedForeignDevice_ = true;
+            if (! awaitingSavedDevice_)
+            {
+                if (downSinceMs_ == 0)
+                    downSinceMs_ = juce::Time::getMillisecondCounter();
+                noteSyncLost();
+            }
+            appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine(wantedName_.toStdString(),
+                                                                                device->getName().toStdString(),
+                                                                                "system opened another card").c_str()));
+            tryReopenWanted();
         }
-        rejectForeignDevice();
         return;
     }
+    refusedForeignDevice_ = false;
 
     // applyOpenDevice clears the loss flags after it has logged the gap
     // and, when a take was recording, started the next one.
     applyOpenDevice(*device, true);
+}
+
+bool AudioEngine::deviceIsChosenCard(const juce::AudioIODevice& device)
+{
+    if (wantedName_.isEmpty())
+        return false;
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup(setup);
+    const auto openName = device.getName().toStdString();
+    const auto chosen = wantedName_.toStdString();
+    const auto inputName = chosenInputName_.toStdString();
+    const auto outputName = chosenOutputName_.toStdString();
+    const auto setupInput = setup.inputDeviceName.toStdString();
+    const auto setupOutput = setup.outputDeviceName.toStdString();
+    return openDeviceIsChosen(openName, chosen, inputName, outputName, setupInput, setupOutput);
 }
 
 LatencyNumbers AudioEngine::latencyNumbers() const
@@ -762,7 +791,7 @@ void AudioEngine::resetDropouts()
     file.appendText(juce::String(juce::Time::currentTimeMillis()) + ",reset,0,0\n");
 }
 
-void AudioEngine::noteDropout(int events)
+void AudioEngine::noteDropout(int events, bool overrun, int slowChannel, int slowSlot, int slowNs, const char* slowName, const DropoutAccount* account, bool wake)
 {
     if (events <= 0)
         return;
@@ -771,11 +800,23 @@ void AudioEngine::noteDropout(int events)
     const auto sample = recording ? recorder_->playhead() : static_cast<std::int64_t>(-1);
     const auto stamp = steadyNowNs();
     const int buffer = bufferSamples_.load(std::memory_order_relaxed);
-    const int dsp = rack_ != nullptr ? rack_->livePluginPercent() : 0;
+    // The callback's own time, not the smoothed plugin sum. That sum could sit
+    // at 52 while this callback had already overrun the buffer.
+    const int dsp = lastCallbackLoad_.load(std::memory_order_relaxed);
+    if (overrun)
+        dropoutSawOverrun_.store(1, std::memory_order_relaxed);
     const int plugins = StallClock::get().activePlugins.load(std::memory_order_relaxed);
+    if (wake)
+        dropoutSawWake_.store(1, std::memory_order_relaxed);
     const int marks = std::min(events, 8);
     for (int index = 0; index < marks; ++index)
-        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins);
+        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins, slowChannel, slowSlot, slowNs, slowName, account);
+}
+
+void AudioEngine::noteHalOverload(int events)
+{
+    if (events > 0)
+        halOverloadPending_.fetch_add(events, std::memory_order_relaxed);
 }
 
 void AudioEngine::drainDropoutLog()
@@ -821,17 +862,59 @@ void AudioEngine::drainDropoutLog()
         dropoutCoalescePlugins_ = last.pluginCount;
         if (last.recording)
             dropoutCoalesceTake_ = last.timelineSample;
+        // The name was stored on the mark when the callback dropped out.
+        // Reading the live slowest snapshot here attached a later 16 us block
+        // to a line whose dsp% came from a 700 us overrun.
+        if (const auto* slow = slowestInDropoutBatch(batch, count))
+        {
+            if (slow->slowNs > dropoutCoalesceSlowNs_)
+            {
+                dropoutCoalesceSlowNs_ = slow->slowNs;
+                dropoutCoalesceSlowChannel_ = slow->slowChannel;
+                dropoutCoalesceSlowSlot_ = slow->slowSlot;
+                for (int name = 0; name < static_cast<int>(sizeof(dropoutCoalesceSlowName_)); ++name)
+                {
+                    dropoutCoalesceSlowName_[name] = slow->slowName[name];
+                    if (slow->slowName[name] == '\0')
+                        break;
+                }
+            }
+        }
+        if (const auto* full = fullestInDropoutBatch(batch, count))
+        {
+            if (full->account.wallNs > dropoutCoalesceAccount_.wallNs
+                || (dropoutCoalesceAccount_.wallNs <= 0 && full->account.lateNs > dropoutCoalesceAccount_.lateNs))
+                dropoutCoalesceAccount_ = full->account;
+        }
     }
     if (dropoutLogDue(nowSteady, lastDropoutLogNs_, dropoutCoalesceCount_))
     {
-        appendHostLog(settings_, juce::String::fromUTF8(formatDropoutHostLine(dropoutCoalesceCount_,
-                                                                              dropoutCoalesceTake_,
-                                                                              dropoutCoalesceBuffer_,
-                                                                              dropoutCoalesceDsp_,
-                                                                              dropoutCoalescePlugins_).c_str()));
+        int dsp = dropoutCoalesceDsp_;
+        if (dropoutCoalesceAccount_.wallNs > 0 && dropoutCoalesceAccount_.periodNs > 0)
+            dsp = periodLoadPercent(dropoutCoalesceAccount_.wallNs, dropoutCoalesceAccount_.periodNs);
+        auto line = formatDropoutHostLine(dropoutCoalesceCount_,
+                                          dropoutCoalesceTake_,
+                                          dropoutCoalesceBuffer_,
+                                          dsp,
+                                          dropoutCoalescePlugins_);
+        if (dropoutCoalesceSlowChannel_ >= 0 && dropoutCoalesceSlowSlot_ >= 0 && dropoutCoalesceSlowName_[0] != '\0')
+            line += formatDropoutSlowest(dropoutCoalesceSlowChannel_ + 1,
+                                         dropoutCoalesceSlowSlot_ + 1,
+                                         dropoutCoalesceSlowName_,
+                                         dropoutCoalesceSlowNs_ / 1000);
+        line += formatDropoutAccount(dropoutCoalesceAccount_, dropoutCoalesceSlowNs_);
+        const bool sawOverrun = dropoutSawOverrun_.exchange(0, std::memory_order_relaxed) != 0;
+        const bool sawWake = dropoutSawWake_.exchange(0, std::memory_order_relaxed) != 0;
+        line += sawOverrun ? " overrun" : (sawWake ? " wake" : " gap");
+        appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         lastDropoutLogNs_ = nowSteady;
         dropoutCoalesceCount_ = 0;
         dropoutCoalesceTake_ = -1;
+        dropoutCoalesceSlowChannel_ = -1;
+        dropoutCoalesceSlowSlot_ = -1;
+        dropoutCoalesceSlowNs_ = 0;
+        dropoutCoalesceSlowName_[0] = '\0';
+        dropoutCoalesceAccount_ = {};
     }
 
     if (lastCpuSampleNs_ == 0 || nowSteady - lastCpuSampleNs_ >= 200000000)
@@ -866,6 +949,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     juce::ignoreUnused(context);
 
     const int64_t startedNs = steadyNowNs();
+    const int64_t startedCpu = threadCpuNowNs();
     {
         auto& clock = StallClock::get();
         clock.noteThread(clock.audioThread);
@@ -873,6 +957,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         clock.audioNs.store(startedNs, std::memory_order_relaxed);
         clock.audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
     }
+    if (rack_ != nullptr)
+        rack_->joinAudioThread();
     const int slot = configIndex_.load(std::memory_order_acquire);
     const AudioThreadConfig& config = configs_[static_cast<std::size_t>(slot)];
 
@@ -880,7 +966,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
     callbackSerial_.fetch_add(1, std::memory_order_relaxed);
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
-    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap));
+    int lateNs = 0;
+    if (! skipGap && previousNs > 0 && config.expectedPeriodNs > 0 && startedNs > previousNs)
+    {
+        const auto interval = startedNs - previousNs;
+        if (interval > config.expectedPeriodNs)
+            lateNs = clampTimingNs(interval - config.expectedPeriodNs);
+    }
+    // A gap is this wake-up. The account is the previous callback, already
+    // finished. lateNs is this start, and it is not inside that callback's wall.
+    DropoutAccount gapAccount = lastAccount_;
+    gapAccount.lateNs = lateNs;
+    const int gapEvents = dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap);
+    noteDropout(gapEvents,
+                false,
+                lastSlowChannel_,
+                lastSlowSlot_,
+                lastSlowNs_,
+                lastSlowName_,
+                &gapAccount);
 
     // Record and the host chain are independent while live or recording:
     // the tap copies the device input, and the same input feeds the chain.
@@ -900,6 +1004,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                  kMaxChannels,
                                  numSamples,
                                  kMaxChannels);
+    const auto recordNs = steadyNowNs();
 
     const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
     const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
@@ -958,9 +1063,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            enabledHigh);
     }
 
+    const auto passNs = steadyNowNs();
     // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
+    // Playback remaps playConfig only. The rack keeps config.routing, so a channel
+    // with no device input does not run, including one that has an output.
     if (rack_ != nullptr)
         rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels);
+    const auto pluginNs = steadyNowNs();
 
     if (outputChannelData != nullptr && numSamples > 0)
     {
@@ -1000,11 +1109,89 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     }
 
     const auto finishedNs = steadyNowNs();
+    const auto finishedCpu = threadCpuNowNs();
     StallClock::get().audioNs.store(finishedNs, std::memory_order_relaxed);
     const auto elapsedNs = finishedNs - startedNs;
     if (elapsedNs > 0)
         callbackElapsedNs_.store(static_cast<std::uint64_t>(elapsedNs), std::memory_order_relaxed);
-    noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs));
+    const double rate = sampleRate_.load(std::memory_order_relaxed);
+    const int load = callbackLoadPercent(static_cast<std::uint64_t>(elapsedNs > 0 ? elapsedNs : 0), numSamples, rate);
+    lastCallbackLoad_.store(load, std::memory_order_relaxed);
+    const int shown = clampCpuPercent(load);
+    int peak = callbackShownPeak_.load(std::memory_order_relaxed);
+    while (shown > peak && ! callbackShownPeak_.compare_exchange_weak(peak, shown, std::memory_order_relaxed))
+    {
+    }
+    // record + pass + plugins + meters is this same span. cpu is the thread's
+    // own run time, so off-cpu is a deschedule, not a hidden host loop.
+    DropoutAccount account;
+    account.wallNs = clampTimingNs(elapsedNs);
+    account.cpuNs = startedCpu > 0 && finishedCpu > startedCpu ? clampTimingNs(finishedCpu - startedCpu) : 0;
+    account.periodNs = clampTimingNs(config.expectedPeriodNs);
+    account.lateNs = lateNs;
+    account.recordNs = clampTimingNs(recordNs > startedNs ? recordNs - startedNs : 0);
+    account.passNs = clampTimingNs(passNs > recordNs ? passNs - recordNs : 0);
+    account.pluginNs = clampTimingNs(pluginNs > passNs ? pluginNs - passNs : 0);
+    account.meterNs = clampTimingNs(finishedNs > pluginNs ? finishedNs - pluginNs : 0);
+    if (rack_ != nullptr)
+    {
+        BlockTimingRecord timing;
+        const auto note = rack_->blockPluginNote();
+        timing.samples = numSamples;
+        timing.prepared = note.prepared;
+        timing.reprepare = note.reprepare;
+        timing.vst3Inline = note.vst3Inline;
+        timing.waitNs = note.waitNs;
+        timing.recordNs = account.recordNs;
+        timing.passNs = account.passNs;
+        timing.pluginNs = account.pluginNs;
+        timing.meterNs = account.meterNs;
+        timing.wallNs = account.wallNs;
+        timing.cpuNs = account.cpuNs;
+        timing.periodNs = account.periodNs;
+        timing.lateNs = account.lateNs;
+        timing.blockNs = note.blockNs;
+        account.blockNs = note.blockNs;
+        timing.slowestChannel = note.channel;
+        timing.slowestSlot = note.slot;
+        timing.slowestNs = note.nanoseconds;
+        for (int index = 0; index < static_cast<int>(sizeof(timing.slowestName)) && note.name[index] != '\0'; ++index)
+            timing.slowestName[index] = note.name[index];
+        timingRing_.push(timing);
+        slowest_.publish(note.channel, note.slot, note.nanoseconds, note.name);
+        lastSlowChannel_ = timing.slowestChannel;
+        lastSlowSlot_ = timing.slowestSlot;
+        lastSlowNs_ = timing.slowestNs;
+        for (int index = 0; index < static_cast<int>(sizeof(lastSlowName_)); ++index)
+        {
+            lastSlowName_[index] = timing.slowestName[index];
+            if (timing.slowestName[index] == '\0')
+                break;
+        }
+        lastAccount_ = account;
+        const int overrunEvents = dropoutOverrunCount(elapsedNs, config.expectedPeriodNs);
+        noteDropout(overrunEvents,
+                    true,
+                    timing.slowestChannel,
+                    timing.slowestSlot,
+                    timing.slowestNs,
+                    timing.slowestName,
+                    &account);
+        // A driver overload that this callback did not already record is a late
+        // wakeup or time outside this function. It is not a second overrun.
+        const int halEvents = halOverloadPending_.exchange(0, std::memory_order_relaxed);
+        if (halEvents > 0 && gapEvents == 0 && overrunEvents == 0)
+            noteDropout(halEvents, false, timing.slowestChannel, timing.slowestSlot, timing.slowestNs, timing.slowestName, &account, true);
+    }
+    else
+    {
+        lastAccount_ = account;
+        const int overrunEvents = dropoutOverrunCount(elapsedNs, config.expectedPeriodNs);
+        noteDropout(overrunEvents, true, -1, -1, 0, nullptr, &account);
+        const int halEvents = halOverloadPending_.exchange(0, std::memory_order_relaxed);
+        if (halEvents > 0 && gapEvents == 0 && overrunEvents == 0)
+            noteDropout(halEvents, false, -1, -1, 0, nullptr, &account, true);
+    }
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
@@ -1061,7 +1248,7 @@ void AudioEngine::audioDeviceError(const juce::String& errorMessage)
     deviceError_.store(true, std::memory_order_relaxed);
 }
 
-void AudioEngine::publishConfig(juce::AudioIODevice& device)
+void AudioEngine::publishConfig(juce::AudioIODevice& device, int inputCap, int outputCap)
 {
     std::array<bool, kMaxChannels> inputs {};
     std::array<bool, kMaxChannels> outputs {};
@@ -1075,6 +1262,10 @@ void AudioEngine::publishConfig(juce::AudioIODevice& device)
         strips_[static_cast<std::size_t>(channel)].inputIndex = channel;
         strips_[static_cast<std::size_t>(channel)].outputIndex = channel;
     }
+    // The menu can say 1 in / 2 out while the mask still has bits from the
+    // previous card. Those bits are not inputs, so their plugins do not run.
+    applyChannelCap(inputs.data(), inputCap);
+    applyChannelCap(outputs.data(), outputCap);
 
     AudioThreadConfig next;
     next.routing = makeRouting(inputs, outputs);
@@ -1445,6 +1636,24 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
         && lastFullOpenOutputs_ == outputNames.size())
         return;
 
+    // A smaller name list on the card that is already open used to call
+    // setAudioDeviceSetup. That stops the callback and then prepare() skips
+    // every plugin, so the dry mic goes out. Leave the open stream alone.
+    if (lastFullOpenName_ == device.getName()
+        && lastFullOpenInputs_ >= 0
+        && (inputNames.size() < lastFullOpenInputs_ || outputNames.size() < lastFullOpenOutputs_))
+    {
+        appendHostLog(settings_, "device " + device.getName()
+                                     + " reported inputs " + juce::String(lastFullOpenInputs_)
+                                     + "->" + juce::String(inputNames.size())
+                                     + " outputs " + juce::String(lastFullOpenOutputs_)
+                                     + "->" + juce::String(outputNames.size())
+                                     + ", not reopening");
+        lastFullOpenInputs_ = inputNames.size();
+        lastFullOpenOutputs_ = outputNames.size();
+        return;
+    }
+
     lastFullOpenName_ = device.getName();
     lastFullOpenInputs_ = inputNames.size();
     lastFullOpenOutputs_ = outputNames.size();
@@ -1493,7 +1702,12 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (live == nullptr || ! live->isOpen())
         return;
 
-    if (deviceName_ != live->getName())
+    const bool sameOpenCard = deviceOpen_.load(std::memory_order_relaxed)
+                              && ! offlineTemplate_
+                              && deviceName_.isNotEmpty()
+                              && deviceName_ == live->getName();
+    // A new HAL name for the card the user already chose is not a card change.
+    if (deviceName_ != live->getName() && ! deviceIsChosenCard(*live))
         revealUnsupported_ = false;
     deviceName_ = live->getName();
 
@@ -1506,10 +1720,26 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const auto outputMask = live->getActiveOutputChannels();
     const bool masksChanged = inputMask != lastInputMask_ || outputMask != lastOutputMask_;
     const bool needPrepare = starting || rateChanged || bufferChanged;
-
-    if (needPrepare || masksChanged)
+    const int runningInputs = currentConfig().routing.inputCount;
+    const int runningOutputs = currentConfig().routing.outputCount;
+    const int nextInputs = inputMask.countNumberOfSetBits();
+    const int nextOutputs = outputMask.countNumberOfSetBits();
+    const int inputCap = channelCapForDevice(sameOpenCard, live->getInputChannelNames().size(), runningInputs);
+    const int outputCap = channelCapForDevice(sameOpenCard, live->getOutputChannelNames().size(), runningOutputs);
+    // "active 48" then "active 39" is this mask. Keep the plugins on the
+    // channels that were already open. A different card still follows its count.
+    const bool keep = keepPluginsOnShrink(sameOpenCard, runningInputs, runningOutputs, nextInputs, nextOutputs);
+    if (keep && masksChanged)
     {
-        publishConfig(*live);
+        appendHostLog(settings_, "device " + live->getName()
+                                     + " active inputs " + juce::String(runningInputs) + "->" + juce::String(nextInputs)
+                                     + " outputs " + juce::String(runningOutputs) + "->" + juce::String(nextOutputs)
+                                     + ", plugins stay on the open channels");
+    }
+
+    if (! keep && (needPrepare || masksChanged))
+    {
+        publishConfig(*live, inputCap, outputCap);
     }
     else
     {
@@ -1532,7 +1762,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         preparedBuffer_ = buffer;
         installOverloadListener(live->getName());
     }
-    else if (masksChanged && rack_ != nullptr)
+    else if (masksChanged && ! keep && rack_ != nullptr)
     {
         rack_->updateRouting(currentConfig().routing);
     }
@@ -1552,9 +1782,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     lastInputMask_ = inputMask;
     lastOutputMask_ = outputMask;
-    const bool sameCard = wantedName_.isEmpty() || live->getName() == wantedName_;
-    const bool cameBack = remember && sameCard && live->getName() == wantedName_
-                          && (deviceLostBanner_ || lossFinalized_);
+    const bool sameCard = wantedName_.isEmpty() || live->getName() == wantedName_ || deviceIsChosenCard(*live);
+    const bool cameBack = remember && sameCard && (deviceLostBanner_ || lossFinalized_);
     const auto lostMs = downSinceMs_;
     const auto gapMs = lostMs == 0 ? std::int64_t { 0 }
                                    : static_cast<std::int64_t>(juce::Time::getMillisecondCounter() - lostMs);
@@ -1571,7 +1800,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         downSinceMs_ = 0;
         resumeRecordingOnReturn_ = false;
         deviceDown_.store(false, std::memory_order_relaxed);
-        if (live->getName() == wantedName_)
+        if (live->getName() == wantedName_ || deviceIsChosenCard(*live))
             setupLocked_ = true;
     }
     if (cameBack)
@@ -1587,15 +1816,17 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     }
     refreshSampleRateWarning();
 
-    if (remember && (needPrepare || masksChanged || wantedName_ != live->getName()))
+    if (remember && (needPrepare || masksChanged))
     {
-        const bool lockedToOther = setupLocked_ && wantedName_.isNotEmpty() && live->getName() != wantedName_;
-        if (! lockedToOther)
-        {
-            deviceManager_.getAudioDeviceSetup(wantedSetup_);
-            wantedName_ = live->getName();
-            saveSetupIfAllowed();
-        }
+        auto setup = wantedSetup_;
+        deviceManager_.getAudioDeviceSetup(setup);
+        // The menu name stays. The saved setup keeps the two halves, not an aggregate.
+        if (chosenInputName_.isNotEmpty())
+            setup.inputDeviceName = chosenInputName_;
+        if (chosenOutputName_.isNotEmpty())
+            setup.outputDeviceName = chosenOutputName_;
+        wantedSetup_ = setup;
+        saveSetupIfAllowed();
     }
 }
 
@@ -1715,7 +1946,7 @@ void AudioEngine::noteHardwareDeviceList()
         return;
 
     auto* live = deviceManager_.getCurrentAudioDevice();
-    if (live != nullptr && live->isOpen() && live->getName() == wantedName_)
+    if (live != nullptr && live->isOpen() && deviceIsChosenCard(*live))
         return;
 
     const bool waiting = deviceLostBanner_ || awaitingSavedDevice_ || lossFinalized_
@@ -1744,9 +1975,7 @@ void AudioEngine::rejectForeignDevice()
             if (reopenInProgress_ || ! started_)
                 return;
             auto* live = deviceManager_.getCurrentAudioDevice();
-            if (live == nullptr || ! live->isOpen() || live->getName() == wantedName_)
-                return;
-            if (! setupLocked_ && ! awaitingSavedDevice_ && ! deviceLostBanner_ && ! lossFinalized_)
+            if (live == nullptr || ! live->isOpen() || deviceIsChosenCard(*live))
                 return;
             closingDevice_.store(true, std::memory_order_release);
             deviceManager_.closeAudioDevice();
@@ -1789,17 +2018,25 @@ void AudioEngine::tryReopenWanted()
 {
     if (reopenInProgress_ || closingDevice_.load(std::memory_order_acquire) || wantedName_.isEmpty())
         return;
-
-    // The caller already saw this name on the device-list notification.
-    if (! deviceNameListed(wantedName_))
+    if (! deviceChangeCauseAllowed("reopening the chosen card"))
         return;
+
+    const auto outputName = chosenOutputName_.isNotEmpty() ? chosenOutputName_ : wantedName_;
+    const auto inputName = chosenInputName_.isNotEmpty() ? chosenInputName_ : wantedName_;
+    // The menu name is not a HAL device. Either half being listed is enough.
+    if (! deviceNameListed(outputName) && ! deviceNameListed(inputName) && ! deviceNameListed(wantedName_))
+    {
+        rejectForeignDevice();
+        return;
+    }
 
     reopenInProgress_ = true;
     auto setup = wantedSetup_;
-    if (setup.outputDeviceName.isEmpty())
-        setup.outputDeviceName = wantedName_;
-    if (setup.inputDeviceName.isEmpty())
-        setup.inputDeviceName = wantedName_;
+    setup.outputDeviceName = outputName;
+    setup.inputDeviceName = inputName;
+    setup.useDefaultInputChannels = true;
+    setup.useDefaultOutputChannels = true;
+    appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine({}, wantedName_.toStdString(), "reopening the chosen card").c_str()));
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     reopenInProgress_ = false;
     if (error.isNotEmpty())
@@ -1811,13 +2048,20 @@ bool AudioEngine::deviceNameListed(const juce::String& name)
     if (name.isEmpty())
         return false;
 
+    const auto wanted = name.toStdString();
     for (auto* type : deviceManager_.getAvailableDeviceTypes())
     {
         if (type == nullptr)
             continue;
         type->scanForDevices();
-        if (type->getDeviceNames(false).contains(name) || type->getDeviceNames(true).contains(name))
-            return true;
+        const juce::StringArray listedOutputs = type->getDeviceNames(false);
+        const juce::StringArray listedInputs = type->getDeviceNames(true);
+        for (const auto& listed : listedOutputs)
+            if (listed == name || deviceNamesMatch(listed.toStdString(), wanted))
+                return true;
+        for (const auto& listed : listedInputs)
+            if (listed == name || deviceNamesMatch(listed.toStdString(), wanted))
+                return true;
     }
     return false;
 }
@@ -1843,6 +2087,8 @@ void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
     wantedSetup_.sampleRate = saved->getDoubleAttribute("audioDeviceRate", wantedSetup_.sampleRate);
     wantedName_ = wantedSetup_.outputDeviceName.isNotEmpty() ? wantedSetup_.outputDeviceName
                                                              : wantedSetup_.inputDeviceName;
+    chosenInputName_ = wantedSetup_.inputDeviceName;
+    chosenOutputName_ = wantedSetup_.outputDeviceName;
 }
 
 void AudioEngine::saveSetupIfAllowed()
@@ -1896,23 +2142,30 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
     // Recording is not touched. This runs before the session window, and it
     // must not stop a take if it is ever reached while audio is up.
     const auto skip = crashPluginsToSkip(journal_);
-    juce::StringArray blocked;
-    std::vector<std::pair<int, int>> slots;
-    slots.reserve(skip.size());
+    juce::StringArray warned;
+    std::vector<PluginRack::CrashBlock> omit;
+    omit.reserve(skip.size());
     for (const auto& mark : skip)
     {
-        slots.emplace_back(mark.channel, mark.slot);
-        if (mark.identifier.empty())
-            continue;
-        const auto identifier = juce::String::fromUTF8(mark.identifier.c_str());
-        blocked.addIfNotAlreadyThere(identifier);
-        settings_.addSuspiciousPlugin(identifier);
+        PluginRack::CrashBlock block;
+        block.channel = mark.channel;
+        block.slot = mark.slot;
+        if (! mark.identifier.empty())
+        {
+            block.identifier = juce::String::fromUTF8(mark.identifier.c_str());
+            warned.addIfNotAlreadyThere(block.identifier);
+            settings_.addSuspiciousPlugin(block.identifier);
+        }
+        omit.push_back(std::move(block));
     }
 
-    if (leaveOff && rack_ != nullptr)
+    // The warning list is not a load gate. "Open session without this plugin"
+    // only skips the automatic restore. Choosing a plugin still loads it.
+    if (rack_ != nullptr)
     {
-        rack_->setBlockedIdentifiers(blocked);
-        rack_->setBlockedSlots(slots);
+        rack_->rememberCrashedPlugins(warned);
+        if (leaveOff)
+            rack_->omitFromNextRestore(omit);
     }
 
     journal_.marks.clear();
@@ -1952,7 +2205,8 @@ void AudioEngine::notePluginTrace(int channel,
                                   const juce::String& phase,
                                   const juce::String& name,
                                   const juce::String& identifier,
-                                  const juce::String& reason)
+                                  const juce::String& reason,
+                                  const juce::String& format)
 {
     if (quitPrepared_)
         return;
@@ -1972,10 +2226,14 @@ void AudioEngine::notePluginTrace(int channel,
 
     journal_.clean = false;
     storeCrashJournal(settings_, journal_);
-    juce::String line = phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name;
-    if (reason.isNotEmpty())
-        line += "  reason=" + reason;
-    appendHostLog(settings_, line);
+    const auto line = formatPluginAttemptLine(phase.toRawUTF8(),
+                                              channel,
+                                              slot,
+                                              format.toRawUTF8(),
+                                              name.toRawUTF8(),
+                                              identifier.toRawUTF8(),
+                                              reason.toRawUTF8());
+    appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
 }
 
 juce::String AudioEngine::dspLoadText() const
@@ -2658,18 +2916,42 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
             const auto cached = std::find_if(deviceInventory_.begin(), deviceInventory_.end(),
                                              [&item](const ListedDevice& known)
                                              {
-                                                 return known.name == item.name || known.inputName == item.name
-                                                        || known.outputName == item.name;
+                                                 return deviceNamesMatch(known.name, item.name)
+                                                        || deviceNamesMatch(known.inputName, item.name)
+                                                        || deviceNamesMatch(known.outputName, item.name);
                                              });
             if (cached != deviceInventory_.end() && cached->inputs >= 0 && cached->outputs >= 0
                 && (cached->inputs > 0 || cached->outputs > 0))
             {
-                found.push_back(*cached);
+                // Keep the raw HAL row. Copying the paired card here listed the
+                // mic and the speakers as two entries after the next switch.
+                const bool paired = ! cached->inputName.empty() || ! cached->outputName.empty();
+                if (paired && deviceNamesMatch(cached->inputName, item.name))
+                {
+                    item.inputs = cached->inputs > 0 ? cached->inputs : 0;
+                    item.outputs = 0;
+                }
+                else if (paired && deviceNamesMatch(cached->outputName, item.name))
+                {
+                    item.inputs = 0;
+                    item.outputs = cached->outputs > 0 ? cached->outputs : 0;
+                }
+                else
+                {
+                    item.inputs = cached->inputs;
+                    item.outputs = cached->outputs;
+                    if (paired)
+                    {
+                        item.inputName = cached->inputName;
+                        item.outputName = cached->outputName;
+                    }
+                }
+                found.push_back(std::move(item));
                 continue;
             }
             if (auto* live = deviceManager_.getCurrentAudioDevice())
             {
-                if (live->getName() == name && live->isOpen())
+                if (live->isOpen() && deviceNamesMatch(live->getName().toStdString(), item.name))
                 {
                     item.inputs = live->getInputChannelNames().size();
                     item.outputs = live->getOutputChannelNames().size();
@@ -2708,10 +2990,11 @@ void AudioEngine::sampleLiveCpu()
     }
 
     const auto nowMs = static_cast<std::int64_t>(juce::Time::getMillisecondCounter());
-    const auto elapsed = callbackElapsedNs_.load(std::memory_order_relaxed);
-    const int samples = bufferSamples_.load(std::memory_order_relaxed);
-    const double rate = sampleRate_.load(std::memory_order_relaxed);
-    const int dsp = dspDisplay_.push(nowMs, blockCpuPercent(elapsed, samples, rate));
+    const int latest = clampCpuPercent(lastCallbackLoad_.load(std::memory_order_relaxed));
+    const int peak = callbackShownPeak_.exchange(latest, std::memory_order_relaxed);
+    const int sample = peak > latest ? peak : latest;
+    // Peak of the callbacks since the last paint. A latched plugin sum is not used.
+    const int dsp = dspDisplay_.push(nowMs, dspReading(sample, rack_->livePluginPercent()));
     callbackCpuPercent_.store(dsp, std::memory_order_relaxed);
     dspPeakPercent_.store(dspDisplay_.peak, std::memory_order_relaxed);
     cpuUsage_.store(static_cast<float>(dsp) / 100.0f, std::memory_order_relaxed);
@@ -2739,9 +3022,12 @@ void AudioEngine::sampleLiveCpu()
     }
 }
 
-void AudioEngine::openNamedDevice(const juce::String& name)
+void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
 {
     if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
+        return;
+    const char* why = cause != nullptr && cause[0] != '\0' ? cause : "user chose the card";
+    if (! deviceChangeCauseAllowed(why))
         return;
     if (! recordActionAllowed(RecordDisrupt::changeDevice, isRecording(), recordLockArmed_))
     {
@@ -2755,10 +3041,14 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     deviceManager_.getAudioDeviceSetup(setup);
     juce::String inputName = name;
     juce::String outputName = name;
+    juce::String menuName = name;
     for (const auto& listed : deviceInventory_)
     {
-        if (listed.name != name.toStdString() && listed.inputName != name.toStdString())
+        if (! listedDeviceCovers(listed, name.toStdString()))
             continue;
+        // "MacBook Pro-mikrofoni" from a session file is still the one menu row.
+        if (! listed.name.empty())
+            menuName = juce::String(listed.name);
         if (! listed.inputName.empty())
             inputName = juce::String(listed.inputName);
         if (! listed.outputName.empty())
@@ -2773,7 +3063,17 @@ void AudioEngine::openNamedDevice(const juce::String& name)
         setup.sampleRate = preferredRate_;
     if (preferredBuffer_ >= 16)
         setup.bufferSize = preferredBuffer_;
-    wantedName_ = name;
+    const auto previous = wantedName_.toStdString();
+    chosenInputName_ = inputName;
+    chosenOutputName_ = outputName;
+    wantedSetup_.inputDeviceName = inputName;
+    wantedSetup_.outputDeviceName = outputName;
+    wantedSetup_.useDefaultInputChannels = true;
+    wantedSetup_.useDefaultOutputChannels = true;
+    wantedName_ = menuName;
+    refusedForeignDevice_ = false;
+    if (previous != menuName.toStdString())
+        appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine(previous, menuName.toStdString(), why).c_str()));
     awaitingSavedDevice_ = false;
     startupDeviceNote_.clear();
     setupLocked_ = false;
@@ -2790,6 +3090,7 @@ void AudioEngine::openNamedDevice(const juce::String& name)
         parkOfflineAfterFailedOpen(name);
         return;
     }
+    setupLocked_ = true;
     deviceInventoryMs_ = 0;
 }
 
@@ -3136,6 +3437,16 @@ void AudioEngine::maintainSession()
     if (catalogue_ != nullptr)
         catalogue_->flushSave();
     drainDropoutLog();
+    BlockTimingRecord timing[BlockTimingRing::kCapacity];
+    const int timingCount = timingRing_.drain(timing, BlockTimingRing::kCapacity);
+    if (timingCount > 0)
+    {
+        const int worst = worstCallbackIndex(timing, timingCount);
+        auto line = formatBlockTimingLine(timing[worst]);
+        if (timingCount > 1)
+            line += "  blocks " + std::to_string(timingCount);
+        appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
+    }
 
     if (sessionDirty_ && sessionFolder_ != juce::File()
         && juce::Time::getMillisecondCounter() - sessionDirtyAtMs_ >= 1500u)
@@ -3338,7 +3649,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
         inventoryForce_ = true;
         const auto present = connectedDevices();
         for (const auto& listed : present)
-            if (listed.name == data.inputDevice.toStdString() || listed.inputName == data.inputDevice.toStdString())
+            if (listedDeviceCovers(listed, data.inputDevice.toStdString()))
                 return true;
         return false;
     }();
@@ -3361,7 +3672,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     }
     else if (restored.useSaved)
     {
-        openNamedDevice(juce::String(restored.input));
+        openNamedDevice(juce::String(restored.input), "session open");
     }
     if (data.bufferSamples >= 16)
         setPreferredBuffer(data.bufferSamples);

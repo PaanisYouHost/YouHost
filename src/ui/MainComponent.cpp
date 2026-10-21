@@ -253,7 +253,7 @@ private:
         const auto devices = engine_.connectedDevices();
         const bool offline = engine_.offlineTemplate();
         const auto menus = audioSetupMenus(devices,
-                                            engine_.deviceName().toStdString(),
+                                            engine_.cardMenuName().toStdString(),
                                             offline,
                                             engine_.preferredSampleRate(),
                                             engine_.wavBitDepth(),
@@ -3135,7 +3135,7 @@ void MainComponent::refresh()
     pluginPage_.refresh();
     const int cpuNow = engine_.callbackCpuPercent();
     std::string statusKey = engine_.missingCardStatus().isNotEmpty() ? engine_.missingCardStatus().toStdString()
-                                                                     : engine_.deviceName().toStdString();
+                                                                     : engine_.cardMenuName().toStdString();
     statusKey += "|";
     statusKey += std::to_string(engine_.inputCount());
     statusKey += "|";
@@ -3204,7 +3204,7 @@ void MainComponent::paint(juce::Graphics& graphics)
 
     const auto numbers = engine_.latencyNumbers();
     const auto cardStatus = engine_.missingCardStatus();
-    std::string device = cardStatus.isNotEmpty() ? cardStatus.toStdString() : engine_.deviceName().toStdString();
+    std::string device = cardStatus.isNotEmpty() ? cardStatus.toStdString() : engine_.cardMenuName().toStdString();
     std::string io;
     std::string rate;
     if (numbers.deviceOpen && numbers.sampleRate > 0.0)

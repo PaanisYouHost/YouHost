@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,12 +30,17 @@ struct SlotSnapshot
     bool occupied = false;
     bool bypassed = false;
     bool loading = false;
+    bool crashParked = false;
+    // True only while this slot has a plugin instance. A crash leave-off does not.
+    bool liveInstance = false;
     int latencySamples = 0;
     int inputChannels = 0;
     int outputChannels = 0;
     int stereoFold = 0;
     juce::String name;
     juce::String error;
+    // Non-blocking crash note. Empty when this plugin has no warning.
+    juce::String note;
 };
 
 struct ChannelSnapshot
@@ -101,6 +107,8 @@ public:
                  std::uint64_t enabledLow,
                  std::uint64_t enabledHigh,
                  int activeChannels);
+    // Join the device workgroup for this whole callback, not only the plugin section.
+    void joinAudioThread();
     void setActiveChannels(int count);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
@@ -156,9 +164,37 @@ public:
     void setPluginSlotHandler(std::function<void(int channel)> handler);
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
+    struct CrashBlock
+    {
+        int channel = -1;
+        int slot = -1;
+        juce::String identifier;
+    };
+
+    // Filled by the audio thread during process(). Read on that same thread
+    // before the callback returns, then copied into the timing ring.
+    struct BlockPluginNote
+    {
+        int prepared = 0;
+        int reprepare = 0;
+        int waitNs = 0;
+        int vst3Inline = 0;
+        int channel = -1;
+        int slot = -1;
+        int nanoseconds = 0;
+        // processBlock only. nanoseconds includes the scratch copy and sanitize.
+        int blockNs = 0;
+        char name[40] {};
+    };
+
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
-    void setBlockedSlots(const std::vector<std::pair<int, int>>& slots);
-    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
+    void setBlockedSlots(const std::vector<CrashBlock>& slots);
+    // Warning only. Remembering a crash does not stop a later load.
+    void rememberCrashedPlugins(const juce::StringArray& identifiers);
+    // Skipped on the automatic restore for this launch. A manual choice still loads.
+    void omitFromNextRestore(const std::vector<CrashBlock>& slots);
+    BlockPluginNote blockPluginNote() const noexcept;
+    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
@@ -190,6 +226,7 @@ private:
         std::uint64_t ticket = 0;
         bool loading = false;
         juce::String error;
+        juce::String note;
     };
 
     void timerCallback() override;
@@ -258,8 +295,18 @@ private:
     void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
+    bool crashedBefore(const juce::PluginDescription& description) const;
+    bool omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const;
+    void claimSlotForManualLoad(int channel, int slot);
+    void keepPluginInSessionFile(int channel,
+                                 int slot,
+                                 const juce::PluginDescription& description,
+                                 const juce::MemoryBlock& state,
+                                 bool bypassed,
+                                 int stereoFold);
+    void dropKeptPlugin(int channel, int slot);
     bool isSlotBlocked(int channel, int slot) const;
-    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {});
+    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {}, const juce::String& format = {});
     bool validSlot(int channel, int slot) const noexcept;
 
     PluginCatalogue& catalogue_;
@@ -424,8 +471,31 @@ private:
     static void completeMessageJob(const std::shared_ptr<MessageThreadJob>& job);
     bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
-    std::vector<std::pair<int, int>> blockedSlots_;
-    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
+    std::vector<CrashBlock> blockedSlots_;
+    juce::StringArray crashedWarned_;
+    std::vector<CrashBlock> restoreOmit_;
+    // A manual choice owns the slot for this launch. Automatic restore skips it.
+    std::array<std::array<bool, kSlotsPerChannel>, kMaxChannels> userClaimedSlot_ {};
+    // Written into the session file while the slot stays empty on screen.
+    // "Open session without this plugin" keeps the plugin on disk until a save
+    // replaces that slot. It is not a live plugin and it is not bypassed.
+    struct KeptSessionPlugin
+    {
+        int channel = -1;
+        int slot = -1;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        bool bypassed = false;
+        int stereoFold = 0;
+    };
+    std::vector<KeptSessionPlugin> keptInSessionFile_;
+    void clearCrashBlock(int channel, int slot);
+    BlockPluginNote blockNote_ {};
+    std::atomic<int> slowestNs_ { 0 };
+    std::atomic<int> slowestBlockNs_ { 0 };
+    std::atomic<int> slowestChannel_ { -1 };
+    std::atomic<int> slowestSlot_ { -1 };
+    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 
 } // namespace youhost

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace youhost
 {
@@ -28,6 +29,71 @@ inline PluginInstantiateWhere pluginInstantiateWhere(bool audioUnit, bool requir
     (void) audioUnit;
     (void) requiresUnblockedMessageThread;
     return PluginInstantiateWhere::background;
+}
+
+// JUCE omits an Audio Unit from searchPathsForPlugins when this is false and
+// the component is AUv3. That plugin then never appears, and the log has no
+// load line for it. The loader already waits for the async instantiate.
+inline bool audioUnitScanIncludesAsync() noexcept
+{
+    return true;
+}
+
+inline const char* pluginFormatLabel(const char* format, const char* identifier) noexcept
+{
+    if (format != nullptr && format[0] != '\0')
+        return format;
+    if (identifier != nullptr)
+    {
+        if (std::strncmp(identifier, "AudioUnit:", 10) == 0)
+            return "AudioUnit";
+        if (std::strstr(identifier, ".vst3") != nullptr || std::strstr(identifier, ".VST3") != nullptr)
+            return "VST3";
+    }
+    return "unknown-format";
+}
+
+// Slot is stored 0-based and written 1-based, the same way as "loading ch 1 slot 2".
+// Every attempt names the format, so an Audio Unit is visible even when it fails.
+inline std::string formatPluginAttemptLine(const char* phase,
+                                           int channel,
+                                           int slot,
+                                           const char* format,
+                                           const char* name,
+                                           const char* identifier,
+                                           const char* reason)
+{
+    std::string line = phase != nullptr && phase[0] != '\0' ? phase : "plugin";
+    line += "  ch ";
+    line += std::to_string(channel + 1);
+    line += " slot ";
+    line += std::to_string(slot + 1);
+    line += "  ";
+    line += pluginFormatLabel(format, identifier);
+    line += "  ";
+    line += name != nullptr && name[0] != '\0' ? name : "Plugin";
+    if (identifier != nullptr && identifier[0] != '\0')
+    {
+        line += "  id=";
+        line += identifier;
+    }
+    if (reason != nullptr && reason[0] != '\0')
+    {
+        line += "  reason=";
+        line += reason;
+    }
+    return line;
+}
+
+inline std::string formatScanFailureLine(const char* format, const char* identifier, const char* reason)
+{
+    std::string line = "did-not-load  scan  ";
+    line += pluginFormatLabel(format, identifier);
+    line += "  ";
+    line += identifier != nullptr && identifier[0] != '\0' ? identifier : "unknown";
+    line += "  reason=";
+    line += reason != nullptr && reason[0] != '\0' ? reason : "no reason from the host";
+    return line;
 }
 
 // One session plugin is in flight at a time. The next one starts on a later
