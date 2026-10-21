@@ -429,7 +429,7 @@ void AudioDeviceManager::removeAudioCallback (AudioIODeviceCallback* callbackToR
     output_insert = """        youhostCopyDeviceChannels (outOutputData,
                                    activeChannelMap[toUnderlyingType (Direction::output)],
                                    numSamples,
-                                   reinterpret_cast<float* const*> (outputSamples),
+                                   const_cast<float* const*> (outputSamples),
                                    true);
 """
     start_needle = """    bool start()
