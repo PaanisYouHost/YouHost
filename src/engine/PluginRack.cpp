@@ -230,6 +230,10 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
     ExtraBusMode modes[5] {};
     const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
+    // True while the plugin still has the layout it opened with. A planner
+    // rejection leaves it there. setBusesLayout(remember) is only needed after
+    // a real offer changed it.
+    bool pluginLeftOpened = true;
 
     for (int layout = 0; layout < 3; ++layout)
     {
@@ -238,6 +242,8 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
             const auto mode = modes[modeIndex];
             const auto plan = planPluginLayout(inputDefaults, inputBusCount, outputDefaults, outputBusCount,
                                                wantIn[layout], wantOut[layout], mode);
+            if (plan.ok)
+                pluginLeftOpened = false;
             juce::String why;
             const bool ok = offerLayout(instance, plan, remember, why);
             juce::String line;
@@ -250,7 +256,13 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
             choice.attempts.add(line);
             if (! ok)
             {
-                instance.setBusesLayout(remember);
+                // The planner can reject "opened" before the plugin is touched.
+                // Restoring that layout would be a second setBusesLayout.
+                if (failedLayoutNeedsRestore(plan.ok))
+                {
+                    instance.setBusesLayout(remember);
+                    pluginLeftOpened = true;
+                }
                 continue;
             }
 
@@ -275,7 +287,8 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         }
     }
 
-    instance.setBusesLayout(remember);
+    if (! pluginLeftOpened)
+        instance.setBusesLayout(remember);
     int liveIn[kPluginBusCap] {};
     int liveOut[kPluginBusCap] {};
     const int liveInputBuses = std::min(instance.getBusCount(true), kPluginBusCap);
@@ -931,8 +944,32 @@ public:
                     return;
                 if (owner_.jobState_.getSize() > 0)
                     plugin->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
-                const int liveIn = plugin->getTotalNumInputChannels();
-                const int liveOut = plugin->getTotalNumOutputChannels();
+                int liveIn = plugin->getTotalNumInputChannels();
+                int liveOut = plugin->getTotalNumOutputChannels();
+                // A saved state can reopen the stereo bus after the mono layout
+                // was accepted. Negotiating again keeps that width off the audio callback.
+                if (stateRestoredDifferentBuses(measured.totalInputs, measured.totalOutputs, liveIn, liveOut))
+                {
+                    const auto again = configureBuses(*plugin, unlinkedMono);
+                    setup.attempts.add("state changed buses, negotiated again");
+                    setup.attempts.addArray(again.attempts);
+                    if (again.ok)
+                    {
+                        measured = again;
+                        setup.ok = true;
+                        setup.inputChannels = again.inputChannels;
+                        setup.outputChannels = again.outputChannels;
+                        setup.totalInputs = again.totalInputs;
+                        setup.totalOutputs = again.totalOutputs;
+                        setup.supportMono = again.supportMono;
+                        setup.supportSide = again.supportSide;
+                        setup.supportStereo = again.supportStereo;
+                        setup.openedStereo = again.openedStereo;
+                        setup.hasExtraBuses = again.hasExtraBuses;
+                        liveIn = again.totalInputs;
+                        liveOut = again.totalOutputs;
+                    }
+                }
                 const int mainIn = plugin->getMainBusNumInputChannels();
                 const int mainOut = plugin->getMainBusNumOutputChannels();
                 if (liveIn > 0)

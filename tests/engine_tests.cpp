@@ -5688,6 +5688,27 @@ void testBeta090()
     const auto openedMono = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::opened);
     CHECK(! openedMono.ok);
     CHECK(std::string(openedMono.reason).find("opened main bus") != std::string::npos);
+    // v1.0.5, 2026-10-21 14:23, buffer 32. A mono De-Feedback VST3 logs
+    // extra=opened supported=no reason=opened main bus does not match, then
+    // extra=disable. The opened plan does not touch the plugin. disable is
+    // 1/1, and that is the width the audio block keeps.
+    int deFeedbackIn[1] = { 2 };
+    int deFeedbackOut[1] = { 2 };
+    const auto vst3Opened = youhost::planPluginLayout(deFeedbackIn, 1, deFeedbackOut, 1, 1, 1, youhost::ExtraBusMode::opened);
+    CHECK(! vst3Opened.ok);
+    CHECK(std::string(vst3Opened.reason) == "opened main bus does not match");
+    CHECK(! youhost::failedLayoutNeedsRestore(vst3Opened.ok));
+    const auto vst3Disable = youhost::planPluginLayout(deFeedbackIn, 1, deFeedbackOut, 1, 1, 1, youhost::ExtraBusMode::disable);
+    CHECK(vst3Disable.ok);
+    CHECK(vst3Disable.inputBuses[0] == 1);
+    CHECK(vst3Disable.outputBuses[0] == 1);
+    CHECK(vst3Disable.totalIn == 1);
+    CHECK(vst3Disable.totalOut == 1);
+    CHECK(youhost::pluginProcessWidth(vst3Disable.totalIn, vst3Disable.totalOut) == 1);
+    CHECK(youhost::failedLayoutNeedsRestore(vst3Disable.ok));
+    CHECK(youhost::stateRestoredDifferentBuses(1, 1, 2, 2));
+    CHECK(! youhost::stateRestoredDifferentBuses(1, 1, 1, 1));
+    CHECK(! youhost::stateRestoredDifferentBuses(1, 1, 0, 2));
     int disabledSideIn[2] = { 2, 0 };
     const auto sidechainMono = youhost::planPluginLayout(disabledSideIn, 2, sideDefaultsOut, 1, 2, 2, youhost::ExtraBusMode::sidechainMono);
     CHECK(sidechainMono.ok);
@@ -6312,9 +6333,20 @@ void testStability106()
                                         "createInstanceBlocking",
                                         "deliverOffThreadInstance");
     CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("stateRestoredDifferentBuses") != std::string::npos);
+    CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    const auto stateAt = loaderRun.find("stateRestoredDifferentBuses");
+    const auto prepareAt = loaderRun.find("prepareToPlay");
+    CHECK(stateAt != std::string::npos && prepareAt != std::string::npos && stateAt < prepareAt);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("plugins stay on the open channels") != std::string::npos);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("not reopening") != std::string::npos);
 
+    const auto attemptSlot = youhost::formatPluginAttemptLine("plugin", 0, 0, "VST3", "De-Feedback", "vst3.de-feedback", "attempt 1/1 extra=opened supported=no reason=opened main bus does not match");
+    const auto activeSlot = youhost::formatPluginAttemptLine("active", 0, 0, "VST3", "De-Feedback", "vst3.de-feedback", nullptr);
+    CHECK(attemptSlot.find(" slot 1 ") != std::string::npos);
+    CHECK(activeSlot.find(" slot 1 ") != std::string::npos);
+    CHECK(attemptSlot.find(" slot 0") == std::string::npos);
+    CHECK(activeSlot.find(" slot 0") == std::string::npos);
     const auto vastaus = youhost::formatPluginAttemptLine("loading", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", nullptr);
     CHECK(vastaus == "loading  ch 1 slot 2  AudioUnit  Vastaus  id=AudioUnit:Effects/aufx,vast,test");
     const auto vastausFailed = youhost::formatPluginAttemptLine("did-not-load", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", "instantiate failed: no reason from the host");
@@ -6379,6 +6411,16 @@ void testStability106()
     CHECK(rackNow.find("jmax(360") == std::string::npos);
     CHECK(rackNow.find("getDesktopScaleFactor") != std::string::npos);
     CHECK(rackNow.find("The audio thread does not wait on the message thread") != std::string::npos);
+    CHECK(rackNow.find("failedLayoutNeedsRestore") != std::string::npos);
+    CHECK(rackNow.find("juce::String(slot)") == std::string::npos);
+    const auto processBody = sliceBetween(rackNow, "void PluginRack::process(", "void PluginRack::processJob");
+    CHECK(processBody.find("setBusesLayout") == std::string::npos);
+    CHECK(processBody.find("configureBuses") == std::string::npos);
+    const auto oneChannel = sliceBetween(rackNow, "void PluginRack::processOneChannel", "bool PluginRack::pauseGate");
+    CHECK(oneChannel.find("setBusesLayout") == std::string::npos);
+    CHECK(oneChannel.find("configureBuses") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("The audio block does not renegotiate") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("does not renegotiate buses") != std::string::npos);
     const auto finishNow = sliceBetween(rackNow, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
     CHECK(finishNow.find("juce::String(slot)") == std::string::npos);
     CHECK(finishNow.find("pluginLogLine") != std::string::npos);
@@ -6462,7 +6504,7 @@ void testStability106()
 
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
-              << "%, any plugin loads in any slot, ch 1 slot 1 stays open\n";
+              << "%, any plugin loads in any slot, ch 1 slot 1 stays open, vst3 mono width 1\n";
 }
 
 } // namespace
