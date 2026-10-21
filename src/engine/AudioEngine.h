@@ -356,7 +356,7 @@ private:
     void installDeviceListListener();
     void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
-    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason);
+    void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format = {});
     void rememberSavedSetup(const juce::XmlElement* saved);
 
     AppSettings& settings_;

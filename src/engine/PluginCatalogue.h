@@ -88,7 +88,8 @@ public:
                              juce::AudioPluginFormat::PluginCreationCallback callback);
 
     // True when this format may be constructed off the message thread.
-    // AudioUnit is never background: it uses createPluginInstanceAsync.
+    // AudioUnit is created on the loader thread, including an AUv3. The
+    // message thread stays in the runloop and is not blocked on the instantiate.
     bool prefersBackgroundInstance(const juce::PluginDescription& description) const;
 
     // Called on a background thread. The callback inside the format runs

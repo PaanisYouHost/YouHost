@@ -13,6 +13,7 @@
 #include "SessionChannels.h"
 #include "Vst3Path.h"
 #include "CrashJournal.h"
+#include "WindowFit.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -650,15 +651,41 @@ struct PluginRack::RealtimePool
 
 static juce::String editorWindowKey(const juce::PluginDescription& description)
 {
-    auto name = description.name.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+    auto keep = [](juce::String text)
+    {
+        text = text.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+        if (text.length() > 24)
+            text = text.substring(0, 24);
+        return text;
+    };
+    auto format = keep(description.pluginFormatName);
+    if (format.isEmpty())
+        format = "Plugin";
+    auto name = keep(description.name);
     if (name.isEmpty())
         name = "Plugin";
-    if (name.length() > 48)
-        name = name.substring(0, 48);
-    return "windowEditor" + name;
+    return "windowEditor" + format + name;
 }
 
-struct PluginRack::EditorWindow : public juce::DocumentWindow
+juce::String pluginLogLine(const char* phase,
+                           int channel,
+                           int slot,
+                           const juce::String& format,
+                           const juce::String& name,
+                           const juce::String& identifier,
+                           const juce::String& reason)
+{
+    const auto line = formatPluginAttemptLine(phase,
+                                              channel,
+                                              slot,
+                                              format.toRawUTF8(),
+                                              name.toRawUTF8(),
+                                              identifier.toRawUTF8(),
+                                              reason.isNotEmpty() ? reason.toRawUTF8() : nullptr);
+    return juce::String::fromUTF8(line.c_str());
+}
+
+struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::ComponentListener
 {
     EditorWindow(const juce::String& title, std::function<void(int, int)> onClose, AppSettings* settings, juce::String key)
         : juce::DocumentWindow(title, theme::background, juce::DocumentWindow::closeButton),
@@ -667,14 +694,20 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
           key_(std::move(key))
     {
         setUsingNativeTitleBar(true);
-        setResizable(true, false);
-        setResizeLimits(320, 200, 4000, 2400);
     }
 
     ~EditorWindow() override
     {
+        if (auto* content = getContentComponent())
+            content->removeComponentListener(this);
         if (settings_ != nullptr && key_.isNotEmpty())
             settings_->saveNamedWindow(key_, getWindowStateAsString());
+    }
+
+    // HiDPI stays on the plugin. A second scale on this window crops it.
+    float getDesktopScaleFactor() const override
+    {
+        return editorHostScale(1.0f);
     }
 
     void place(int channel, int slot) noexcept
@@ -683,10 +716,48 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
         slot_ = slot;
     }
 
+    void watchContent()
+    {
+        if (auto* content = getContentComponent())
+        {
+            content->addComponentListener(this);
+            const int borderW = getWidth() - content->getWidth();
+            const int borderH = getHeight() - content->getHeight();
+            if (borderW >= 0)
+                frameW_ = borderW;
+            if (borderH >= 0)
+                frameH_ = borderH;
+        }
+    }
+
     void closeButtonPressed() override
     {
         if (onClose_ != nullptr)
             onClose_(channel_, slot_);
+    }
+
+    void componentMovedOrResized(juce::Component& component, bool, bool wasResized) override
+    {
+        if (! wasResized || fitting_ || &component != getContentComponent())
+            return;
+        const int contentW = component.getWidth();
+        const int contentH = component.getHeight();
+        if (contentW < 1 || contentH < 1)
+            return;
+        const int targetW = contentW + frameW_;
+        const int targetH = contentH + frameH_;
+        if (targetW == getWidth() && targetH == getHeight())
+            return;
+        fitting_ = true;
+        if (! isResizable())
+            setResizeLimits(targetW, targetH, targetW, targetH);
+        else if (auto* limits = getConstrainer())
+            setResizeLimits(std::min(limits->getMinimumWidth(), targetW),
+                            std::min(limits->getMinimumHeight(), targetH),
+                            std::max(limits->getMaximumWidth(), targetW),
+                            std::max(limits->getMaximumHeight(), targetH));
+        setSize(targetW, targetH);
+        fitting_ = false;
     }
 
     std::function<void(int, int)> onClose_;
@@ -694,6 +765,9 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow
     juce::String key_;
     int channel_ = -1;
     int slot_ = -1;
+    int frameW_ = 0;
+    int frameH_ = 0;
+    bool fitting_ = false;
 };
 
 struct PluginRack::DeferredPluginRelease
@@ -779,10 +853,15 @@ public:
                     setup.ok = false;
                     if (owner_.settings_ != nullptr)
                         appendHostLog(*owner_.settings_,
-                                      "plugin " + owner_.jobDescription_.name
-                                          + " layout " + juce::String(measured.totalInputs) + "/"
-                                          + juce::String(measured.totalOutputs)
-                                          + " is wider than the process buffer, not activated");
+                                      pluginLogLine("did-not-load",
+                                                    owner_.jobChannel_,
+                                                    owner_.jobSlot_,
+                                                    owner_.jobDescription_.pluginFormatName,
+                                                    owner_.jobDescription_.name,
+                                                    pluginIdentifier(owner_.jobDescription_),
+                                                    "layout " + juce::String(measured.totalInputs) + "/"
+                                                        + juce::String(measured.totalOutputs)
+                                                        + " is wider than the process buffer, not activated"));
                     return;
                 }
                 plugin->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
@@ -810,8 +889,13 @@ public:
                 setup.ok = false;
                 if (owner_.settings_ != nullptr)
                     appendHostLog(*owner_.settings_,
-                                  "plugin " + owner_.jobDescription_.name
-                                      + " prepare did not run on the message thread, not activated");
+                                  pluginLogLine("did-not-load",
+                                                owner_.jobChannel_,
+                                                owner_.jobSlot_,
+                                                owner_.jobDescription_.pluginFormatName,
+                                                owner_.jobDescription_.name,
+                                                pluginIdentifier(owner_.jobDescription_),
+                                                "prepare did not run on the message thread, not activated"));
             }
             else if (setup.ok)
             {
@@ -1823,6 +1907,10 @@ void PluginRack::beginLoad(int channel,
         slotBlocks.push_back(std::move(item));
     }
     const auto incomingId = pluginIdentifier(description).toStdString();
+    const auto formatName = description.pluginFormatName;
+    // The attempt is logged before the crash-slot check. A refused Audio Unit
+    // still names the format, the slot, and why it stayed off.
+    tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description), {}, formatName);
     const auto admit = admitPluginIntoSlot(channel,
                                            slot,
                                            incomingId,
@@ -1851,7 +1939,7 @@ void PluginRack::beginLoad(int channel,
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
-        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason, formatName);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
@@ -1867,8 +1955,6 @@ void PluginRack::beginLoad(int channel,
         rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
-
-    tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description));
 
     // The loader thread creates the instance. The message thread must stay in
     // the runloop: a slow AudioComponentInstanceNew on this thread holds the
@@ -1941,7 +2027,8 @@ void PluginRack::beginLoad(int channel,
                                 return;
                             }
                             if (settings_ != nullptr)
-                                appendHostLog(*settings_, "plugin \"" + description.name + "\" instantiate callback moved onto the message thread");
+                                appendHostLog(*settings_, pluginLogLine("plugin", channel, slot, description.pluginFormatName, description.name, pluginIdentifier(description),
+                                                                        "instantiate callback moved onto the message thread"));
                             finishLoad(channel, slot, ticket, markDirty, bypassed, openWhenReady, stereoFold,
                                        description, state, std::move(held->instance), held->error, restoreGeneration);
                         });
@@ -1968,6 +2055,7 @@ void PluginRack::finishLoad(int channel,
 {
     const auto refusedName = description.name;
     const auto refusedId = pluginIdentifier(description);
+    const auto refusedFormat = description.pluginFormatName;
     // createPluginInstance has returned. Later paints are not part of the load.
     touchMessageBeat();
     StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
@@ -2004,9 +2092,8 @@ void PluginRack::finishLoad(int channel,
         if (ownsGate)
             finishChannelWork(channel, ticket);
         if (settings_ != nullptr)
-            appendHostLog(*settings_, "did-not-load  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1)
-                                          + "  " + refusedName
-                                          + "  reason=the slot changed before the plugin was ready");
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId,
+                                                    "the slot changed before the plugin was ready"));
         return;
     }
 
@@ -2019,8 +2106,8 @@ void PluginRack::finishLoad(int channel,
     juce::String problem = error;
     const int left = channel & ~1;
     const bool unlinkedMono = ! stereoLink(left);
-    // Bus setup and prepare already finished on the message thread. Doing them
-    // again here would run setActive while this thread is also drawing.
+    // Bus setup and prepare already finished. Doing them again here would run
+    // setActive while this thread is also drawing.
     if (instance != nullptr && ! buses.ready)
         problem = "The plugin setup did not finish. See youhost.log.";
     juce::String attemptText;
@@ -2035,11 +2122,10 @@ void PluginRack::finishLoad(int channel,
                                                                    attemptText.toRawUTF8()));
     if (settings_ != nullptr)
     {
-        const auto prefix = "plugin \"" + description.name + "\" ch " + juce::String(channel + 1) + " slot " + juce::String(slot) + " ";
         if (instance == nullptr)
-            appendHostLog(*settings_, prefix + failureReason);
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId, failureReason));
         for (const auto& attempt : buses.attempts)
-            appendHostLog(*settings_, prefix + attempt);
+            appendHostLog(*settings_, pluginLogLine("plugin", channel, slot, refusedFormat, refusedName, refusedId, attempt));
     }
     if (instance != nullptr && (! buses.ready || ! buses.ok))
     {
@@ -2047,8 +2133,7 @@ void PluginRack::finishLoad(int channel,
             problem = pluginLoadMessage(true, unlinkedMono, buses.supportMono, buses.supportStereo, buses.supportSide,
                                         buses.openedStereo, buses.hasExtraBuses, nullptr);
         if (settings_ != nullptr)
-            appendHostLog(*settings_, "plugin \"" + description.name + "\" ch " + juce::String(channel + 1)
-                                          + " slot " + juce::String(slot) + " ui: " + problem);
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId, problem));
         auto retired = std::make_shared<HostedPlugin>();
         retired->instance.reset(instance.release(), InstanceDeleter { this });
         bury(std::move(retired), nullptr);
@@ -2117,9 +2202,8 @@ void PluginRack::finishLoad(int channel,
         // The slot already belongs to a newer load. A journal upsert here would
         // replace that plugin's mark, so the reason goes to the log only.
         if (settings_ != nullptr)
-            appendHostLog(*settings_, "did-not-load  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1)
-                                          + "  " + refusedName
-                                          + "  reason=the slot changed before the plugin was ready");
+            appendHostLog(*settings_, pluginLogLine("did-not-load", channel, slot, refusedFormat, refusedName, refusedId,
+                                                    "the slot changed before the plugin was ready"));
         if (ownsGate)
             finishChannelWork(channel, ticket);
         return;
@@ -2127,11 +2211,11 @@ void PluginRack::finishLoad(int channel,
     bury(std::move(previous), nullptr);
 
     if (! loaded)
-        tracePlugin(channel, slot, "unload", loadedName, loadedId, failureReason);
+        tracePlugin(channel, slot, "unload", loadedName, loadedId, failureReason, refusedFormat);
     else if (! channelFeeds)
-        tracePlugin(channel, slot, "idle", loadedName, loadedId, "no input on this channel");
+        tracePlugin(channel, slot, "idle", loadedName, loadedId, "no input on this channel", refusedFormat);
     else
-        tracePlugin(channel, slot, "active", loadedName, loadedId);
+        tracePlugin(channel, slot, "active", loadedName, loadedId, {}, refusedFormat);
 
     if (notify)
         notifyDirty();
@@ -2560,9 +2644,70 @@ void PluginRack::openEditor(int channel, int slot)
         key);
     window->place(channel, slot);
     window->setContentOwned(editor, true);
+    window->watchContent();
+    const int borderW = std::max(0, window->getWidth() - editor->getWidth());
+    const int borderH = std::max(0, window->getHeight() - editor->getHeight());
+    int minWidth = 0;
+    int minHeight = 0;
+    int maxWidth = 0;
+    int maxHeight = 0;
+    if (auto* constrainer = editor->getConstrainer())
+    {
+        minWidth = constrainer->getMinimumWidth();
+        minHeight = constrainer->getMinimumHeight();
+        maxWidth = constrainer->getMaximumWidth();
+        maxHeight = constrainer->getMaximumHeight();
+    }
+    if (minWidth > 0)
+        minWidth += borderW;
+    if (minHeight > 0)
+        minHeight += borderH;
+    if (maxWidth > 0 && maxWidth < 1000000)
+        maxWidth += borderW;
+    else if (editor->isResizable())
+        maxWidth = 8000 + borderW;
+    else
+        maxWidth = 0;
+    if (maxHeight > 0 && maxHeight < 1000000)
+        maxHeight += borderH;
+    else if (editor->isResizable())
+        maxHeight = 8000 + borderH;
+    else
+        maxHeight = 0;
+    float displayScale = 1.0f;
+    int screenWidth = 0;
+    int screenHeight = 0;
+    if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    {
+        displayScale = static_cast<float>(display->scale);
+        screenWidth = juce::roundToInt(display->userBounds.getWidth());
+        screenHeight = juce::roundToInt(display->userBounds.getHeight());
+    }
     const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
-    if (stored.isEmpty() || ! window->restoreWindowStateFromString(stored))
-        window->centreWithSize(juce::jmax(360, window->getWidth()), juce::jmax(240, window->getHeight()));
+    const auto saved = parseWindowState(stored.toStdString());
+    const int fittedWidth = std::max(editor->getWidth() + borderW, window->getWidth());
+    const int fittedHeight = std::max(editor->getHeight() + borderH, window->getHeight());
+    const auto plan = planEditorWindow(fittedWidth,
+                                       fittedHeight,
+                                       editor->isResizable(),
+                                       minWidth,
+                                       minHeight,
+                                       maxWidth,
+                                       maxHeight,
+                                       displayScale,
+                                       screenWidth,
+                                       screenHeight,
+                                       saved);
+    window->setResizable(plan.resizable, false);
+    if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
+        window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
+    if (plan.width > 0 && plan.height > 0)
+    {
+        if (saved.valid)
+            window->setBounds(saved.x, saved.y, plan.width, plan.height);
+        else
+            window->centreWithSize(plan.width, plan.height);
+    }
     if (commandKeys_ != nullptr)
         window->addKeyListener(commandKeys_);
     window->setVisible(true);
@@ -3120,7 +3265,7 @@ void PluginRack::setBlockedSlots(const std::vector<CrashBlock>& slots)
     blockedSlots_ = slots;
 }
 
-void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
+void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
 }
@@ -3262,10 +3407,10 @@ PluginRack::BlockPluginNote PluginRack::blockPluginNote() const noexcept
     return blockNote_;
 }
 
-void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
+void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)
 {
     if (trace_ != nullptr)
-        trace_(channel, slot, phase, name, identifier, reason);
+        trace_(channel, slot, phase, name, identifier, reason, format);
 }
 
 void PluginRack::removePluginNow(int channel, int slot)

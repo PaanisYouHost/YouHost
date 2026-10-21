@@ -180,7 +180,7 @@ public:
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
     void setBlockedSlots(const std::vector<CrashBlock>& slots);
     BlockPluginNote blockPluginNote() const noexcept;
-    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
+    void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
@@ -281,7 +281,7 @@ private:
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
     bool isSlotBlocked(int channel, int slot) const;
-    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {});
+    void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {}, const juce::String& format = {});
     bool validSlot(int channel, int slot) const noexcept;
 
     PluginCatalogue& catalogue_;
@@ -452,7 +452,7 @@ private:
     std::atomic<int> slowestNs_ { 0 };
     std::atomic<int> slowestChannel_ { -1 };
     std::atomic<int> slowestSlot_ { -1 };
-    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
+    std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 
 } // namespace youhost

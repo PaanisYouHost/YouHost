@@ -170,6 +170,93 @@ inline WindowFit windowOpenSize(int fitWidth,
     return clampWindowToScreen(width, height, screenWidth, screenHeight, 48);
 }
 
+// The plugin applies the display scale itself (VST3 content scale, Audio Unit
+// backing scale). Returning that scale from the host window as well scales
+// the view a second time, so the editor is cropped or stretched.
+inline float editorHostScale(float displayScale) noexcept
+{
+    (void) displayScale;
+    return 1.0f;
+}
+
+struct EditorOpenPlan
+{
+    int width = 0;
+    int height = 0;
+    int minWidth = 0;
+    int maxWidth = 0;
+    int minHeight = 0;
+    int maxHeight = 0;
+    bool resizable = false;
+    bool restoreSaved = false;
+    float hostScale = 1.0f;
+};
+
+// Opens at the plugin's size. A remembered frame smaller than that is not
+// restored. Limits come from the plugin, not from a host minimum.
+inline EditorOpenPlan planEditorWindow(int pluginWidth,
+                                       int pluginHeight,
+                                       bool pluginResizable,
+                                       int minWidth,
+                                       int minHeight,
+                                       int maxWidth,
+                                       int maxHeight,
+                                       float displayScale,
+                                       int screenWidth,
+                                       int screenHeight,
+                                       const SavedWindowSize& saved) noexcept
+{
+    EditorOpenPlan plan;
+    plan.hostScale = editorHostScale(displayScale);
+    plan.resizable = pluginResizable;
+
+    int fitWidth = pluginWidth > 0 ? pluginWidth : 0;
+    int fitHeight = pluginHeight > 0 ? pluginHeight : 0;
+    if (fitWidth < 1 && minWidth > 0)
+        fitWidth = minWidth;
+    if (fitHeight < 1 && minHeight > 0)
+        fitHeight = minHeight;
+
+    int lowWidth = minWidth > 0 ? minWidth : (fitWidth > 0 ? fitWidth : 1);
+    int lowHeight = minHeight > 0 ? minHeight : (fitHeight > 0 ? fitHeight : 1);
+    int highWidth = maxWidth > lowWidth ? maxWidth : std::max(lowWidth, fitWidth > 0 ? fitWidth : lowWidth);
+    int highHeight = maxHeight > lowHeight ? maxHeight : std::max(lowHeight, fitHeight > 0 ? fitHeight : lowHeight);
+    if (! pluginResizable)
+    {
+        if (fitWidth > 0)
+            lowWidth = highWidth = fitWidth;
+        if (fitHeight > 0)
+            lowHeight = highHeight = fitHeight;
+    }
+    if (highWidth < lowWidth)
+        highWidth = lowWidth;
+    if (highHeight < lowHeight)
+        highHeight = lowHeight;
+    if (fitWidth < lowWidth)
+        fitWidth = lowWidth;
+    if (fitHeight < lowHeight)
+        fitHeight = lowHeight;
+    if (fitWidth > highWidth)
+        fitWidth = highWidth;
+    if (fitHeight > highHeight)
+        fitHeight = highHeight;
+
+    plan.minWidth = lowWidth;
+    plan.minHeight = lowHeight;
+    plan.maxWidth = highWidth;
+    plan.maxHeight = highHeight;
+    // A fixed plugin opens at its own size. A larger remembered frame would
+    // stretch it. A resizable plugin may open larger, never smaller.
+    plan.restoreSaved = pluginResizable && fitWidth > 0 && fitHeight > 0 && keepRememberedWindow(saved, fitWidth, fitHeight);
+    if (fitWidth > 0 && fitHeight > 0)
+    {
+        const auto opened = windowOpenSize(fitWidth, fitHeight, screenWidth, screenHeight, plan.restoreSaved ? saved : SavedWindowSize {});
+        plan.width = opened.width;
+        plan.height = opened.height;
+    }
+    return plan;
+}
+
 // Every pixel of a block can be brought into a viewport of the given height.
 inline bool blockReachable(int blockTop, int blockHeight, int contentHeight, int viewportHeight) noexcept
 {

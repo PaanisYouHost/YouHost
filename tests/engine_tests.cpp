@@ -5936,7 +5936,8 @@ void testBeta090()
     const auto traceBody = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                         "void AudioEngine::notePluginTrace",
                                         "juce::String AudioEngine::dspLoadText");
-    CHECK(traceBody.find("reason=") != std::string::npos);
+    CHECK(traceBody.find("formatPluginAttemptLine") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginLoadPace.h").find("reason=") != std::string::npos);
     const auto matched = youhost::planPluginLayout(sideDefaultsIn, 2, sideDefaultsOut, 1, 1, 1, youhost::ExtraBusMode::matchMain);
     CHECK(matched.ok);
     CHECK(matched.inputBuses[0] == 1);
@@ -6241,6 +6242,77 @@ void testStability106()
     CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("plugins stay on the open channels") != std::string::npos);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("not reopening") != std::string::npos);
+
+    const auto vastaus = youhost::formatPluginAttemptLine("loading", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", nullptr);
+    CHECK(vastaus == "loading  ch 1 slot 2  AudioUnit  Vastaus  id=AudioUnit:Effects/aufx,vast,test");
+    const auto vastausFailed = youhost::formatPluginAttemptLine("did-not-load", 0, 1, "AudioUnit", "Vastaus", "AudioUnit:Effects/aufx,vast,test", "instantiate failed: no reason from the host");
+    CHECK(vastausFailed.find(" ch 1 slot 2 ") != std::string::npos);
+    CHECK(vastausFailed.find(" ch 1 slot 1") == std::string::npos);
+    CHECK(vastausFailed.find("AudioUnit") != std::string::npos);
+    CHECK(vastausFailed.find("reason=instantiate failed: no reason from the host") != std::string::npos);
+    const auto guessedFormat = youhost::formatPluginAttemptLine("loading", 0, 1, "", "Vastaus", "AudioUnit:Effects/aufx,vast,test", nullptr);
+    CHECK(guessedFormat.find("  AudioUnit  ") != std::string::npos);
+    CHECK(youhost::audioUnitScanIncludesAsync());
+    const auto scanFailure = youhost::formatScanFailureLine("AudioUnit", "/Library/Audio/Plug-Ins/Components/Vastaus.component", "Plugin crashed the scanner");
+    CHECK(scanFailure.find("AudioUnit") != std::string::npos);
+    CHECK(scanFailure.find("Vastaus.component") != std::string::npos);
+    CHECK(scanFailure.find("reason=Plugin crashed the scanner") != std::string::npos);
+
+    youhost::SavedWindowSize smallFrame;
+    smallFrame.valid = true;
+    smallFrame.x = 40;
+    smallFrame.y = 50;
+    smallFrame.width = 400;
+    smallFrame.height = 300;
+    const auto croppedEditor = youhost::planEditorWindow(800, 600, true, 200, 150, 2000, 1500, 2.0f, 1920, 1080, smallFrame);
+    CHECK(croppedEditor.hostScale == 1.0f);
+    CHECK(youhost::editorHostScale(2.0f) == 1.0f);
+    CHECK(croppedEditor.width >= 800);
+    CHECK(croppedEditor.height >= 600);
+    CHECK(! croppedEditor.restoreSaved);
+    CHECK(croppedEditor.minWidth == 200);
+    CHECK(croppedEditor.minHeight == 150);
+    youhost::SavedWindowSize largeFrame = smallFrame;
+    largeFrame.width = 1000;
+    largeFrame.height = 800;
+    const auto keptEditor = youhost::planEditorWindow(800, 600, true, 200, 150, 2000, 1500, 2.0f, 1920, 1080, largeFrame);
+    CHECK(keptEditor.restoreSaved);
+    CHECK(keptEditor.width >= 1000);
+    CHECK(keptEditor.height >= 800);
+    const auto fixedEditor = youhost::planEditorWindow(800, 600, false, 0, 0, 0, 0, 2.0f, 1920, 1080, largeFrame);
+    CHECK(! fixedEditor.resizable);
+    CHECK(! fixedEditor.restoreSaved);
+    CHECK(fixedEditor.width == 800);
+    CHECK(fixedEditor.height == 600);
+    CHECK(fixedEditor.minWidth == 800 && fixedEditor.maxWidth == 800);
+    CHECK(fixedEditor.minHeight == 600 && fixedEditor.maxHeight == 600);
+    const auto lateSize = youhost::planEditorWindow(0, 0, true, 500, 400, 900, 700, 2.0f, 1920, 1080, {});
+    CHECK(lateSize.width >= 500);
+    CHECK(lateSize.height >= 400);
+    CHECK(lateSize.width != 360);
+    CHECK(lateSize.height != 240);
+
+    const auto rackNow = readWorkspaceFile("src/engine/PluginRack.cpp");
+    CHECK(rackNow.find("setResizeLimits(320, 200") == std::string::npos);
+    CHECK(rackNow.find("jmax(360") == std::string::npos);
+    CHECK(rackNow.find("getDesktopScaleFactor") != std::string::npos);
+    CHECK(rackNow.find("The audio thread does not wait on the message thread") != std::string::npos);
+    const auto finishNow = sliceBetween(rackNow, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
+    CHECK(finishNow.find("juce::String(slot)") == std::string::npos);
+    CHECK(finishNow.find("pluginLogLine") != std::string::npos);
+    const auto openNow = sliceBetween(rackNow, "void PluginRack::openEditor", "void PluginRack::setGlobalKeyListener");
+    CHECK(openNow.find("pauseGate") == std::string::npos);
+    CHECK(openNow.find("createEditorAndMakeActive") != std::string::npos);
+    CHECK(openNow.find("planEditorWindow") != std::string::npos);
+    const auto beginNow = sliceBetween(rackNow, "void PluginRack::beginLoad", "void PluginRack::finishLoad");
+    const auto loadingAt = beginNow.find("\"loading\"");
+    const auto admitAt = beginNow.find("admitPluginIntoSlot");
+    CHECK(loadingAt != std::string::npos && admitAt != std::string::npos && loadingAt < admitAt);
+    const auto catalogueNow = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
+    CHECK(catalogueNow.find("audioUnitScanIncludesAsync") != std::string::npos);
+    CHECK(catalogueNow.find("searchPathsForPlugins(paths, true, false)") == std::string::npos);
+    CHECK(catalogueNow.find("AudioUnit scan listed") != std::string::npos);
+    CHECK(catalogueNow.find("formatScanFailureLine") != std::string::npos);
 
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter

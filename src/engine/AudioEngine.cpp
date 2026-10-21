@@ -302,9 +302,9 @@ AudioEngine::AudioEngine(AppSettings& settings)
     catalogue_ = std::make_unique<PluginCatalogue>(settings_);
     rack_ = std::make_unique<PluginRack>(*catalogue_, compensationSamples_, &settings_);
     rack_->setDirtyHandler([this] { noteSessionEdit(); });
-    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)
+    rack_->setPluginTrace([this](int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)
     {
-        notePluginTrace(channel, slot, phase, name, identifier, reason);
+        notePluginTrace(channel, slot, phase, name, identifier, reason, format);
     });
     recorder_ = std::make_unique<Recorder>();
     recorder_->setDirtyHandler([this] { noteSessionEdit(); });
@@ -2039,7 +2039,8 @@ void AudioEngine::notePluginTrace(int channel,
                                   const juce::String& phase,
                                   const juce::String& name,
                                   const juce::String& identifier,
-                                  const juce::String& reason)
+                                  const juce::String& reason,
+                                  const juce::String& format)
 {
     if (quitPrepared_)
         return;
@@ -2059,10 +2060,14 @@ void AudioEngine::notePluginTrace(int channel,
 
     journal_.clean = false;
     storeCrashJournal(settings_, journal_);
-    juce::String line = phase + "  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1) + "  " + name;
-    if (reason.isNotEmpty())
-        line += "  reason=" + reason;
-    appendHostLog(settings_, line);
+    const auto line = formatPluginAttemptLine(phase.toRawUTF8(),
+                                              channel,
+                                              slot,
+                                              format.toRawUTF8(),
+                                              name.toRawUTF8(),
+                                              identifier.toRawUTF8(),
+                                              reason.toRawUTF8());
+    appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
 }
 
 juce::String AudioEngine::dspLoadText() const
