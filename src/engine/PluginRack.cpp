@@ -2765,6 +2765,7 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         const bool parkedSlot = model.plugin->instance == nullptr && model.plugin->description.name.isNotEmpty();
         destination.occupied = model.plugin->instance != nullptr || parkedSlot;
         destination.bypassed = model.plugin->bypassed || parkedSlot;
+        destination.crashParked = parkedSlot && model.error.isNotEmpty();
         destination.latencySamples = model.plugin->latencySamples;
         destination.inputChannels = model.plugin->inputChannels;
         destination.outputChannels = model.plugin->outputChannels;
@@ -3427,6 +3428,7 @@ void PluginRack::removePluginNow(int channel, int slot)
 
     juce::String name;
     juce::String identifier;
+    const bool held = isSlotBlocked(channel, slot);
     std::shared_ptr<HostedPlugin> plugin;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -3443,8 +3445,11 @@ void PluginRack::removePluginNow(int channel, int slot)
         publishUnlocked();
     }
     bury(std::move(plugin), std::move(window));
+    // Remove frees the crash hold. Leaving it set parked the same plugin
+    // again, so unloading twice still left the slot grey.
+    clearCrashBlock(channel, slot);
     if (identifier.isNotEmpty() || name.isNotEmpty())
-        tracePlugin(channel, slot, "unload", name, identifier);
+        tracePlugin(channel, slot, "unload", name, identifier, held ? juce::String(kSlotFreedReason) : juce::String());
     notifyDirty();
 }
 

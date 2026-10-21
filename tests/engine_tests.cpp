@@ -6314,6 +6314,43 @@ void testStability106()
     CHECK(catalogueNow.find("AudioUnit scan listed") != std::string::npos);
     CHECK(catalogueNow.find("formatScanFailureLine") != std::string::npos);
 
+    CHECK(youhost::crashParkedSlotLabel(0, "Vastaus") == "1 Vastaus left off");
+    CHECK(std::string(youhost::kSlotRetryClick) == "Click to load it again.");
+    CHECK(std::string(youhost::kSlotLoadAgain) == "Load again");
+    youhost::SlotBlock held[1];
+    held[0].channel = 0;
+    held[0].slot = 0;
+    held[0].identifier = "AudioUnit:Effects/aufx,vast,test";
+    std::string releasedId;
+    const int freed = youhost::releaseCrashSlot(held, 1, 0, 0, &releasedId);
+    CHECK(freed == 0);
+    CHECK(releasedId == "AudioUnit:Effects/aufx,vast,test");
+    CHECK(! youhost::identifierHeldBySlot(held, freed, releasedId));
+    const auto loadAgain = youhost::admitPluginIntoSlot(0, 0, releasedId, held, freed, false);
+    CHECK(loadAgain.load);
+    youhost::SlotBlock both[2];
+    both[0].channel = 0;
+    both[0].slot = 0;
+    both[0].identifier = "au.vastaus";
+    both[1].channel = 1;
+    both[1].slot = 0;
+    both[1].identifier = "au.vastaus";
+    std::string stillHeld;
+    const int remain = youhost::releaseCrashSlot(both, 2, 0, 0, &stillHeld);
+    CHECK(remain == 1);
+    CHECK(youhost::identifierHeldBySlot(both, remain, stillHeld));
+    const auto blockedId = youhost::admitPluginIntoSlot(0, 0, stillHeld, both, remain, true);
+    CHECK(! blockedId.load);
+    const auto removeNow = sliceBetween(rackNow, "void PluginRack::removePluginNow", "void PluginRack::enqueueChannel");
+    CHECK(removeNow.find("clearCrashBlock") != std::string::npos);
+    CHECK(removeNow.find("kSlotFreedReason") != std::string::npos);
+    const auto pageNow = readWorkspaceFile("src/ui/PluginPage.cpp");
+    CHECK(pageNow.find("Turn bypass off") != std::string::npos);
+    CHECK(pageNow.find("kSlotLoadAgain") != std::string::npos);
+    CHECK(pageNow.find("kSlotRetryClick") != std::string::npos);
+    CHECK(pageNow.find("crashParked") != std::string::npos);
+    CHECK(pageNow.find("setSlotBypassed(channel_, slot, false)") != std::string::npos);
+
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
               << "%, crash slot accepts a new plugin\n";

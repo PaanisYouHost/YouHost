@@ -29,6 +29,7 @@ struct SlotSnapshot
     bool occupied = false;
     bool bypassed = false;
     bool loading = false;
+    bool crashParked = false;
     int latencySamples = 0;
     int inputChannels = 0;
     int outputChannels = 0;

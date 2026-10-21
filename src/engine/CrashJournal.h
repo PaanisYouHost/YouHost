@@ -259,6 +259,62 @@ struct SlotAdmit
 
 inline constexpr const char* kSlotCrashSamePlugin = "may have crashed YouHost. It is turned off.";
 inline constexpr const char* kSlotCrashKeepOff = "this slot was left off after a crash. Choose another plugin.";
+inline constexpr const char* kSlotLeftOffLabel = "left off";
+inline constexpr const char* kSlotRetryClick = "Click to load it again.";
+inline constexpr const char* kSlotLoadAgain = "Load again";
+inline constexpr const char* kSlotFreedReason = "the slot is free";
+
+// Grey slot text. Slot is stored 0-based and shown 1-based: index 0 is "1 Vastaus left off".
+inline std::string crashParkedSlotLabel(int slot, std::string_view name)
+{
+    std::string text = std::to_string(slot + 1);
+    text += " ";
+    if (name.empty())
+        text += "Plugin";
+    else
+        text.append(name.data(), name.size());
+    text += " ";
+    text += kSlotLeftOffLabel;
+    return text;
+}
+
+// Remove drops this slot's crash hold. The identifier stays blocked only while
+// another slot still names it. After that, the same plugin can be loaded.
+inline int releaseCrashSlot(SlotBlock* blocks,
+                            int count,
+                            int channel,
+                            int slot,
+                            std::string* releasedIdentifier)
+{
+    if (releasedIdentifier != nullptr)
+        releasedIdentifier->clear();
+    if (blocks == nullptr || count <= 0)
+        return count < 0 ? 0 : count;
+    int kept = 0;
+    for (int index = 0; index < count; ++index)
+    {
+        if (blocks[index].channel == channel && blocks[index].slot == slot)
+        {
+            if (releasedIdentifier != nullptr)
+                *releasedIdentifier = blocks[index].identifier;
+            continue;
+        }
+        if (kept != index)
+            blocks[kept] = blocks[index];
+        ++kept;
+    }
+    return kept;
+}
+
+inline bool identifierHeldBySlot(const SlotBlock* blocks, int count, std::string_view identifier) noexcept
+{
+    if (blocks == nullptr || identifier.empty())
+        return false;
+    for (int index = 0; index < count; ++index)
+        if (blocks[index].identifier == identifier)
+            return true;
+    return false;
+}
 
 inline SlotAdmit admitPluginIntoSlot(int channel,
                                      int slot,

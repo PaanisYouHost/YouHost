@@ -16,6 +16,7 @@
 #include "engine/MeterScale.h"
 #include "engine/OutputGain.h"
 #include "engine/Shortcuts.h"
+#include "engine/CrashJournal.h"
 
 namespace youhost
 {
@@ -31,6 +32,8 @@ juce::String slotLabel(int slot, const SlotSnapshot& snap)
     auto name = snap.name;
     if (name.length() > 22)
         name = name.substring(0, 22);
+    if (snap.crashParked)
+        return juce::String::fromUTF8(crashParkedSlotLabel(slot, name.toStdString()).c_str());
     return juce::String(slot + 1) + " " + name;
 }
 
@@ -966,14 +969,21 @@ public:
                 button.setColour(juce::TextButton::textColourOffId, juce::Colour(textArgb));
             }
             juce::String tip = "Drag to move this plugin. Option-drag copies it. A drag is ignored while a plugin on that channel is still loading.";
-            if (source.occupied)
+            if (source.crashParked)
+            {
+                tip = source.error;
+                if (tip.isNotEmpty())
+                    tip << "\n";
+                tip << kSlotRetryClick;
+            }
+            else if (source.occupied)
             {
                 tip << "\n" << source.inputChannels << " in / " << source.outputChannels << " out, latency "
                     << source.latencySamples << " samples";
                 if (source.outputChannels > 1)
                     tip << ", stereo on mono: " << stereoFoldToken(stereoFoldFromInt(source.stereoFold));
             }
-            button.setTooltip(source.error.isNotEmpty() ? source.error : tip);
+            button.setTooltip(source.error.isNotEmpty() && ! source.crashParked ? source.error : tip);
         }
         const bool selected = engine_.isChannelSelected(channel_);
         const int color = engine_.channelColor(channel_);
@@ -1161,6 +1171,11 @@ private:
         const auto snap = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
         if (snap.loading)
             return;
+        if (snap.crashParked)
+        {
+            engine_.setSlotBypassed(channel_, slot, false);
+            return;
+        }
         if (snap.occupied)
         {
             engine_.togglePluginEditor(channel_, slot);
@@ -1178,8 +1193,12 @@ private:
             return;
 
         juce::PopupMenu menu;
-        menu.addItem(1, "Open");
-        menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
+        if (snap.crashParked)
+            menu.addItem(4, kSlotLoadAgain);
+        else
+            menu.addItem(1, "Open");
+        if (! snap.crashParked)
+            menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
         menu.addItem(3, "Remove");
         if (snap.outputChannels > 1 && ! engine_.stereoLinked(channel_))
         {
@@ -1193,7 +1212,9 @@ private:
                            [this, slot](int result)
                            {
                                const auto current = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
-                               if (result == 1)
+                               if (result == 4 || (result == 1 && current.crashParked))
+                                   engine_.setSlotBypassed(channel_, slot, false);
+                               else if (result == 1)
                                    engine_.openPluginEditor(channel_, slot);
                                else if (result == 2)
                                    engine_.setSlotBypassed(channel_, slot, ! current.bypassed);

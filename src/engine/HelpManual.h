@@ -15,7 +15,7 @@ Two basic rules
 
 What's new
 ----------
-- 1.0.6: a channel with no input, and any channel past the card, does not run its plugins. The DSP meter follows the audio callback, and a dropout line names the slowest plugin. After a crash, a different plugin can be loaded in that slot. The crash journal keeps older crashes. A stall on the message thread does not bypass the plugins, and a card that briefly reports fewer channels keeps the plugins on the channels that were open. A plugin window opens at the plugin's own size and scale. Every load, including an Audio Unit that does not open, is written to the log with its format and slot.
+- 1.0.6: a channel with no input, and any channel past the card, does not run its plugins. The DSP meter follows the audio callback, and a dropout line names the slowest plugin. After a crash, a different plugin can be loaded in that slot. The crash journal keeps older crashes. A stall on the message thread does not bypass the plugins, and a card that briefly reports fewer channels keeps the plugins on the channels that were open. A plugin window opens at the plugin's own size and scale. Every load, including an Audio Unit that does not open, is written to the log with its format and slot. A slot left off after a crash says why, a click loads it again, and Remove frees the slot.
 - 1.0.5: VST3 plugins are prepared on the message thread and processed only on the audio thread, the same way as an Audio Unit. A plugin that reports silence during load stays loaded. Opening an editor does not pause the plugin, so audio and recording keep going.
 - 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence.
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
@@ -69,6 +69,7 @@ What's new
 - Waves shells and instruments are off by default ("Scan Waves shells" and "Show instruments in inserts" in the scanner). "Rescan selected" scans the selected plugins again.
 - The plugin list marks each plugin M, ST or M/ST.
 - Right-click a plugin slot: Open, Bypass, Remove, and for a stereo plugin on a mono channel: Use L / Use R / Sum (L+R)/2.
+- A slot left off after a crash is grey and says left off. The tooltip says why. Click it to load the plugin again. Remove frees the slot.
 - If a stereo plugin won't open on a mono channel (some stereo-only AU plugins), use the VST3 or mono version.
 - Stereo link: right-click > Stereo link with ch N+1, or click LINK on the odd channel (1–2, 3–4…). Recording stays one mono WAV per channel.
 - Drag = move a plugin. Option+drag = copy it with its settings.
