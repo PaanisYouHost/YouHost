@@ -124,7 +124,12 @@ public:
                      int slowChannel = -1,
                      int slowSlot = -1,
                      int slowNs = 0,
-                     const char* slowName = nullptr);
+                     const char* slowName = nullptr,
+                     const DropoutAccount* account = nullptr,
+                     bool wake = false);
+    // CoreAudio overload. Raises a flag only. The audio thread writes the ring,
+    // and a miss it already recorded is not written again as an overrun.
+    void noteHalOverload(int events);
     void watchClockSync();
     void noteClockProperty() noexcept;
     void drainDropoutLog();
@@ -515,6 +520,10 @@ private:
     int lastSlowNs_ = 0;
     char lastSlowName_[40] {};
     std::atomic<int> dropoutSawOverrun_ { 0 };
+    std::atomic<int> dropoutSawWake_ { 0 };
+    std::atomic<int> halOverloadPending_ { 0 };
+    DropoutAccount lastAccount_ {};
+    DropoutAccount dropoutCoalesceAccount_ {};
     std::atomic<int> lastCallbackLoad_ { 0 };
     std::atomic<int> callbackShownPeak_ { 0 };
     BlockTimingRing timingRing_;

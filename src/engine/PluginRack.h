@@ -107,6 +107,8 @@ public:
                  std::uint64_t enabledLow,
                  std::uint64_t enabledHigh,
                  int activeChannels);
+    // Join the device workgroup for this whole callback, not only the plugin section.
+    void joinAudioThread();
     void setActiveChannels(int count);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
     DspLoad dspLoad() const;
@@ -180,6 +182,8 @@ public:
         int channel = -1;
         int slot = -1;
         int nanoseconds = 0;
+        // processBlock only. nanoseconds includes the scratch copy and sanitize.
+        int blockNs = 0;
         char name[40] {};
     };
 
@@ -488,6 +492,7 @@ private:
     void clearCrashBlock(int channel, int slot);
     BlockPluginNote blockNote_ {};
     std::atomic<int> slowestNs_ { 0 };
+    std::atomic<int> slowestBlockNs_ { 0 };
     std::atomic<int> slowestChannel_ { -1 };
     std::atomic<int> slowestSlot_ { -1 };
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;

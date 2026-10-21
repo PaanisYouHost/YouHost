@@ -25,6 +25,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include <execinfo.h>
@@ -45,6 +46,23 @@ int64_t steadyNowNs()
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+int64_t threadCpuNowNs() noexcept
+{
+    timespec ts {};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0;
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
+}
+
+int clampTimingNs(int64_t ns) noexcept
+{
+    if (ns <= 0)
+        return 0;
+    if (ns > 2147483647LL)
+        return 2147483647;
+    return static_cast<int>(ns);
 }
 
 // A saved mask is ignored. Missing channel attributes make the device open its default set,
@@ -185,7 +203,7 @@ OSStatus overloadListener(AudioObjectID,
 {
     auto* engine = static_cast<AudioEngine*>(client);
     if (engine != nullptr)
-        engine->noteDropout(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses), true);
+        engine->noteHalOverload(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses));
     return noErr;
 }
 
@@ -773,7 +791,7 @@ void AudioEngine::resetDropouts()
     file.appendText(juce::String(juce::Time::currentTimeMillis()) + ",reset,0,0\n");
 }
 
-void AudioEngine::noteDropout(int events, bool overrun, int slowChannel, int slowSlot, int slowNs, const char* slowName)
+void AudioEngine::noteDropout(int events, bool overrun, int slowChannel, int slowSlot, int slowNs, const char* slowName, const DropoutAccount* account, bool wake)
 {
     if (events <= 0)
         return;
@@ -788,9 +806,17 @@ void AudioEngine::noteDropout(int events, bool overrun, int slowChannel, int slo
     if (overrun)
         dropoutSawOverrun_.store(1, std::memory_order_relaxed);
     const int plugins = StallClock::get().activePlugins.load(std::memory_order_relaxed);
+    if (wake)
+        dropoutSawWake_.store(1, std::memory_order_relaxed);
     const int marks = std::min(events, 8);
     for (int index = 0; index < marks; ++index)
-        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins, slowChannel, slowSlot, slowNs, slowName);
+        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins, slowChannel, slowSlot, slowNs, slowName, account);
+}
+
+void AudioEngine::noteHalOverload(int events)
+{
+    if (events > 0)
+        halOverloadPending_.fetch_add(events, std::memory_order_relaxed);
 }
 
 void AudioEngine::drainDropoutLog()
@@ -854,20 +880,32 @@ void AudioEngine::drainDropoutLog()
                 }
             }
         }
+        if (const auto* full = fullestInDropoutBatch(batch, count))
+        {
+            if (full->account.wallNs > dropoutCoalesceAccount_.wallNs
+                || (dropoutCoalesceAccount_.wallNs <= 0 && full->account.lateNs > dropoutCoalesceAccount_.lateNs))
+                dropoutCoalesceAccount_ = full->account;
+        }
     }
     if (dropoutLogDue(nowSteady, lastDropoutLogNs_, dropoutCoalesceCount_))
     {
+        int dsp = dropoutCoalesceDsp_;
+        if (dropoutCoalesceAccount_.wallNs > 0 && dropoutCoalesceAccount_.periodNs > 0)
+            dsp = periodLoadPercent(dropoutCoalesceAccount_.wallNs, dropoutCoalesceAccount_.periodNs);
         auto line = formatDropoutHostLine(dropoutCoalesceCount_,
                                           dropoutCoalesceTake_,
                                           dropoutCoalesceBuffer_,
-                                          dropoutCoalesceDsp_,
+                                          dsp,
                                           dropoutCoalescePlugins_);
         if (dropoutCoalesceSlowChannel_ >= 0 && dropoutCoalesceSlowSlot_ >= 0 && dropoutCoalesceSlowName_[0] != '\0')
             line += formatDropoutSlowest(dropoutCoalesceSlowChannel_ + 1,
                                          dropoutCoalesceSlowSlot_ + 1,
                                          dropoutCoalesceSlowName_,
                                          dropoutCoalesceSlowNs_ / 1000);
-        line += dropoutSawOverrun_.exchange(0, std::memory_order_relaxed) != 0 ? " overrun" : " gap";
+        line += formatDropoutAccount(dropoutCoalesceAccount_, dropoutCoalesceSlowNs_);
+        const bool sawOverrun = dropoutSawOverrun_.exchange(0, std::memory_order_relaxed) != 0;
+        const bool sawWake = dropoutSawWake_.exchange(0, std::memory_order_relaxed) != 0;
+        line += sawOverrun ? " overrun" : (sawWake ? " wake" : " gap");
         appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         lastDropoutLogNs_ = nowSteady;
         dropoutCoalesceCount_ = 0;
@@ -876,6 +914,7 @@ void AudioEngine::drainDropoutLog()
         dropoutCoalesceSlowSlot_ = -1;
         dropoutCoalesceSlowNs_ = 0;
         dropoutCoalesceSlowName_[0] = '\0';
+        dropoutCoalesceAccount_ = {};
     }
 
     if (lastCpuSampleNs_ == 0 || nowSteady - lastCpuSampleNs_ >= 200000000)
@@ -910,6 +949,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     juce::ignoreUnused(context);
 
     const int64_t startedNs = steadyNowNs();
+    const int64_t startedCpu = threadCpuNowNs();
     {
         auto& clock = StallClock::get();
         clock.noteThread(clock.audioThread);
@@ -917,6 +957,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         clock.audioNs.store(startedNs, std::memory_order_relaxed);
         clock.audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
     }
+    if (rack_ != nullptr)
+        rack_->joinAudioThread();
     const int slot = configIndex_.load(std::memory_order_acquire);
     const AudioThreadConfig& config = configs_[static_cast<std::size_t>(slot)];
 
@@ -924,14 +966,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
     callbackSerial_.fetch_add(1, std::memory_order_relaxed);
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
-    // A gap is this wake-up. The plugin time frozen here is the previous
-    // callback, already finished. This callback has not run its plugins yet.
-    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap),
+    int lateNs = 0;
+    if (! skipGap && previousNs > 0 && config.expectedPeriodNs > 0 && startedNs > previousNs)
+    {
+        const auto interval = startedNs - previousNs;
+        if (interval > config.expectedPeriodNs)
+            lateNs = clampTimingNs(interval - config.expectedPeriodNs);
+    }
+    // A gap is this wake-up. The account is the previous callback, already
+    // finished. lateNs is this start, and it is not inside that callback's wall.
+    DropoutAccount gapAccount = lastAccount_;
+    gapAccount.lateNs = lateNs;
+    const int gapEvents = dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap);
+    noteDropout(gapEvents,
                 false,
                 lastSlowChannel_,
                 lastSlowSlot_,
                 lastSlowNs_,
-                lastSlowName_);
+                lastSlowName_,
+                &gapAccount);
 
     // Record and the host chain are independent while live or recording:
     // the tap copies the device input, and the same input feeds the chain.
@@ -1056,6 +1109,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     }
 
     const auto finishedNs = steadyNowNs();
+    const auto finishedCpu = threadCpuNowNs();
     StallClock::get().audioNs.store(finishedNs, std::memory_order_relaxed);
     const auto elapsedNs = finishedNs - startedNs;
     if (elapsedNs > 0)
@@ -1068,6 +1122,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     while (shown > peak && ! callbackShownPeak_.compare_exchange_weak(peak, shown, std::memory_order_relaxed))
     {
     }
+    // record + pass + plugins + meters is this same span. cpu is the thread's
+    // own run time, so off-cpu is a deschedule, not a hidden host loop.
+    DropoutAccount account;
+    account.wallNs = clampTimingNs(elapsedNs);
+    account.cpuNs = startedCpu > 0 && finishedCpu > startedCpu ? clampTimingNs(finishedCpu - startedCpu) : 0;
+    account.periodNs = clampTimingNs(config.expectedPeriodNs);
+    account.lateNs = lateNs;
+    account.recordNs = clampTimingNs(recordNs > startedNs ? recordNs - startedNs : 0);
+    account.passNs = clampTimingNs(passNs > recordNs ? passNs - recordNs : 0);
+    account.pluginNs = clampTimingNs(pluginNs > passNs ? pluginNs - passNs : 0);
+    account.meterNs = clampTimingNs(finishedNs > pluginNs ? finishedNs - pluginNs : 0);
     if (rack_ != nullptr)
     {
         BlockTimingRecord timing;
@@ -1077,10 +1142,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         timing.reprepare = note.reprepare;
         timing.vst3Inline = note.vst3Inline;
         timing.waitNs = note.waitNs;
-        timing.recordNs = static_cast<int>(recordNs > startedNs ? recordNs - startedNs : 0);
-        timing.passNs = static_cast<int>(passNs > recordNs ? passNs - recordNs : 0);
-        timing.pluginNs = static_cast<int>(pluginNs > passNs ? pluginNs - passNs : 0);
-        timing.meterNs = static_cast<int>(finishedNs > pluginNs ? finishedNs - pluginNs : 0);
+        timing.recordNs = account.recordNs;
+        timing.passNs = account.passNs;
+        timing.pluginNs = account.pluginNs;
+        timing.meterNs = account.meterNs;
+        timing.wallNs = account.wallNs;
+        timing.cpuNs = account.cpuNs;
+        timing.periodNs = account.periodNs;
+        timing.lateNs = account.lateNs;
+        timing.blockNs = note.blockNs;
+        account.blockNs = note.blockNs;
         timing.slowestChannel = note.channel;
         timing.slowestSlot = note.slot;
         timing.slowestNs = note.nanoseconds;
@@ -1097,16 +1168,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             if (timing.slowestName[index] == '\0')
                 break;
         }
-        noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs),
+        lastAccount_ = account;
+        const int overrunEvents = dropoutOverrunCount(elapsedNs, config.expectedPeriodNs);
+        noteDropout(overrunEvents,
                     true,
                     timing.slowestChannel,
                     timing.slowestSlot,
                     timing.slowestNs,
-                    timing.slowestName);
+                    timing.slowestName,
+                    &account);
+        // A driver overload that this callback did not already record is a late
+        // wakeup or time outside this function. It is not a second overrun.
+        const int halEvents = halOverloadPending_.exchange(0, std::memory_order_relaxed);
+        if (halEvents > 0 && gapEvents == 0 && overrunEvents == 0)
+            noteDropout(halEvents, false, timing.slowestChannel, timing.slowestSlot, timing.slowestNs, timing.slowestName, &account, true);
     }
     else
     {
-        noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs), true);
+        lastAccount_ = account;
+        const int overrunEvents = dropoutOverrunCount(elapsedNs, config.expectedPeriodNs);
+        noteDropout(overrunEvents, true, -1, -1, 0, nullptr, &account);
+        const int halEvents = halOverloadPending_.exchange(0, std::memory_order_relaxed);
+        if (halEvents > 0 && gapEvents == 0 && overrunEvents == 0)
+            noteDropout(halEvents, false, -1, -1, 0, nullptr, &account, true);
     }
 }
 
@@ -3357,10 +3441,7 @@ void AudioEngine::maintainSession()
     const int timingCount = timingRing_.drain(timing, BlockTimingRing::kCapacity);
     if (timingCount > 0)
     {
-        int worst = 0;
-        for (int index = 1; index < timingCount; ++index)
-            if (timing[index].pluginNs > timing[worst].pluginNs)
-                worst = index;
+        const int worst = worstCallbackIndex(timing, timingCount);
         auto line = formatBlockTimingLine(timing[worst]);
         if (timingCount > 1)
             line += "  blocks " + std::to_string(timingCount);

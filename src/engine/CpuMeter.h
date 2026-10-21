@@ -62,6 +62,18 @@ inline int callbackLoadPercent(std::uint64_t elapsedNs, int samples, double samp
     return static_cast<int>(percent + 0.5);
 }
 
+// wallNs against the buffer period. Same ratio as callbackLoadPercent when
+// the callback's sample count is the device buffer.
+inline int periodLoadPercent(int wallNs, int periodNs) noexcept
+{
+    if (wallNs <= 0 || periodNs <= 0)
+        return 0;
+    const double percent = static_cast<double>(wallNs) / static_cast<double>(periodNs) * 100.0;
+    if (percent >= 999.0)
+        return 999;
+    return static_cast<int>(percent + 0.5);
+}
+
 // The DSP meter is this callback's own time. A latched plugin sum (four
 // plugins sitting near 13% read as a stuck 52) is not the meter.
 inline int dspReading(int callbackPercent, int latchedPluginSum) noexcept

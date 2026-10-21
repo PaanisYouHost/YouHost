@@ -1180,6 +1180,7 @@ void PluginRack::process(float* const* outputs,
     StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
     pluginPercentScratch_.store(0, std::memory_order_relaxed);
     slowestNs_.store(0, std::memory_order_relaxed);
+    slowestBlockNs_.store(0, std::memory_order_relaxed);
     slowestChannel_.store(-1, std::memory_order_relaxed);
     slowestSlot_.store(-1, std::memory_order_relaxed);
     const auto started = steadyNs();
@@ -1193,11 +1194,7 @@ void PluginRack::process(float* const* outputs,
     const bool bypass = bypassAll_.load(std::memory_order_relaxed) != 0;
     if (graph != nullptr && ! blocked && ! bypass && outputs != nullptr && numSamples > 0)
     {
-        if (! audioJoined_)
-        {
-            workgroup_.join(audioToken_);
-            audioJoined_ = static_cast<bool>(workgroup_);
-        }
+        joinAudioThread();
 
         jobGraph_ = graph;
         jobSamples_ = numSamples;
@@ -1285,6 +1282,7 @@ void PluginRack::process(float* const* outputs,
     blockNote_.channel = slowestChannel_.load(std::memory_order_relaxed);
     blockNote_.slot = slowestSlot_.load(std::memory_order_relaxed);
     blockNote_.nanoseconds = slowestNs_.load(std::memory_order_relaxed);
+    blockNote_.blockNs = slowestBlockNs_.load(std::memory_order_relaxed);
     blockNote_.name[0] = '\0';
     if (graph != nullptr && blockNote_.channel >= 0 && blockNote_.slot >= 0
         && blockNote_.channel < kMaxChannels && blockNote_.slot < kSlotsPerChannel)
@@ -1300,6 +1298,14 @@ void PluginRack::process(float* const* outputs,
     livePluginPercent_.store(clampCpuPercent(pluginPercentScratch_.exchange(0, std::memory_order_relaxed)),
                              std::memory_order_relaxed);
     StallClock::get().audioPhase.store(kPhaseAudio, std::memory_order_relaxed);
+}
+
+void PluginRack::joinAudioThread()
+{
+    if (audioJoined_)
+        return;
+    workgroup_.join(audioToken_);
+    audioJoined_ = static_cast<bool>(workgroup_);
 }
 
 void PluginRack::processJob(int index)
@@ -1460,6 +1466,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             }
 
             ranPlugin = true;
+            int blockOnlyNs = 0;
             const auto began = steadyNs();
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
             const auto fold = stereoFoldFromInt(live.stereoFold);
@@ -1474,7 +1481,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 preparePluginBlock(plugin, inputs, outputsN, mono, count);
                 midi.clear();
                 juce::AudioBuffer<float> view(plugin, viewWidth, count);
+                const auto blockBegan = steadyNs();
                 instance->processBlock(view, midi);
+                blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 if (viewWidth <= 1)
                 {
                     if (scratch[0] != mono)
@@ -1498,7 +1507,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                     feedPluginChannels(scratch, width, fed, count, left, rightFeed);
                     midi.clear();
                     juce::AudioBuffer<float> view(scratch, width, count);
+                    const auto blockBegan = steadyNs();
                     instance->processBlock(view, midi);
+                    blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                     if (partner == nullptr && outputsN >= 2)
                     {
                         takeFoldedChannel(left, scratch, outputsN, count, fold);
@@ -1526,7 +1537,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 float* pair[2] = { buffer, right };
                 midi.clear();
                 juce::AudioBuffer<float> view(pair, 2, count);
+                const auto blockBegan = steadyNs();
                 instance->processBlock(view, midi);
+                blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 leftReport = sanitizeAudioBlock(buffer, count);
                 rightReport = sanitizeAudioBlock(right, count);
             }
@@ -1561,6 +1574,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 {
                     if (! slowestNs_.compare_exchange_weak(prior, ns, std::memory_order_relaxed))
                         continue;
+                    slowestBlockNs_.store(blockOnlyNs, std::memory_order_relaxed);
                     slowestChannel_.store(channel, std::memory_order_relaxed);
                     slowestSlot_.store(slot, std::memory_order_relaxed);
                     break;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BlockTiming.h"
+
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -8,6 +10,21 @@
 
 namespace youhost
 {
+
+// One callback's wall time and the stages that add up to it.
+// lateNs is the start past the buffer period and is not part of wallNs.
+struct DropoutAccount
+{
+    int wallNs = 0;
+    int cpuNs = 0;
+    int periodNs = 0;
+    int recordNs = 0;
+    int passNs = 0;
+    int pluginNs = 0;
+    int meterNs = 0;
+    int blockNs = 0;
+    int lateNs = 0;
+};
 
 struct DropoutMark
 {
@@ -23,6 +40,7 @@ struct DropoutMark
     int slowSlot = -1;
     int slowNs = 0;
     char slowName[40] {};
+    DropoutAccount account {};
 };
 
 struct CpuSample
@@ -47,7 +65,8 @@ public:
               int slowChannel = -1,
               int slowSlot = -1,
               int slowNs = 0,
-              const char* slowName = nullptr) noexcept
+              const char* slowName = nullptr,
+              const DropoutAccount* account = nullptr) noexcept
     {
         const auto index = write_.load(std::memory_order_relaxed);
         auto& slot = slots_[static_cast<std::size_t>(index % kCapacity)];
@@ -68,6 +87,7 @@ public:
                 slot.slowName[name] = slowName[name];
             slot.slowName[name] = '\0';
         }
+        slot.account = account != nullptr ? *account : DropoutAccount {};
         write_.store(index + 1, std::memory_order_release);
     }
 
@@ -93,6 +113,7 @@ public:
             destination[count].slowChannel = slot.slowChannel;
             destination[count].slowSlot = slot.slowSlot;
             destination[count].slowNs = slot.slowNs;
+            destination[count].account = slot.account;
             for (int name = 0; name < static_cast<int>(sizeof(destination[count].slowName)); ++name)
             {
                 destination[count].slowName[name] = slot.slowName[name];
@@ -123,6 +144,7 @@ private:
         int slowSlot = -1;
         int slowNs = 0;
         char slowName[40] {};
+        DropoutAccount account {};
     };
 
     Slot slots_[kCapacity] {};
@@ -176,6 +198,65 @@ inline const DropoutMark* slowestInDropoutBatch(const DropoutMark* marks, int co
             best = &mark;
     }
     return best;
+}
+
+// The mark whose callback wall was longest. A later short plugin must not
+// replace the callback that actually overran.
+inline const DropoutMark* fullestInDropoutBatch(const DropoutMark* marks, int count) noexcept
+{
+    const DropoutMark* best = nullptr;
+    if (marks == nullptr || count <= 0)
+        return nullptr;
+    for (int index = 0; index < count; ++index)
+    {
+        const auto& mark = marks[index];
+        const int score = mark.account.wallNs > 0 ? mark.account.wallNs : mark.account.lateNs;
+        if (score <= 0)
+            continue;
+        if (best == nullptr)
+        {
+            best = &mark;
+            continue;
+        }
+        const int bestScore = best->account.wallNs > 0 ? best->account.wallNs : best->account.lateNs;
+        if (score > bestScore)
+            best = &mark;
+    }
+    return best;
+}
+
+// Stages plus wall, the sum of those stages, thread CPU, off-CPU, period, and
+// a late start. slowNs is the plugin timer so wrap can be split from processBlock.
+inline std::string formatDropoutAccount(const DropoutAccount& account, int slowNs)
+{
+    if (account.wallNs <= 0 && account.lateNs <= 0)
+        return {};
+    if (account.wallNs <= 0)
+        return " late " + std::to_string(account.lateNs / 1000) + "us";
+
+    BlockTimingRecord block;
+    block.wallNs = account.wallNs;
+    block.cpuNs = account.cpuNs;
+    block.periodNs = account.periodNs;
+    block.recordNs = account.recordNs;
+    block.passNs = account.passNs;
+    block.pluginNs = account.pluginNs;
+    block.meterNs = account.meterNs;
+    block.blockNs = account.blockNs;
+    block.lateNs = account.lateNs;
+    block.slowestNs = slowNs > 0 ? slowNs : 0;
+    const auto us = [](int ns)
+    {
+        if (ns < 0)
+            ns = 0;
+        return std::to_string(ns / 1000);
+    };
+    std::string line = " record " + us(account.recordNs) + "us";
+    line += " pass " + us(account.passNs) + "us";
+    line += " plugins " + us(account.pluginNs) + "us";
+    line += " meters " + us(account.meterNs) + "us";
+    line += formatCallbackSplit(block);
+    return line;
 }
 
 inline std::int64_t latestMarkNs(const DropoutMark* marks, int count)
