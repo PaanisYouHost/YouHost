@@ -424,8 +424,10 @@ void AudioEngine::pollDeviceStats()
     const bool open = device != nullptr && device->isOpen();
     if (reopenInProgress_)
     {
-        if (open)
-            applyOpenDevice(*device, device->getName() == wantedName_);
+        if (open && deviceIsChosenCard(*device))
+            applyOpenDevice(*device, true);
+        else if (open)
+            rejectForeignDevice();
         return;
     }
 
@@ -435,37 +437,46 @@ void AudioEngine::pollDeviceStats()
         return;
     }
 
-    juce::AudioDeviceManager::AudioDeviceSetup current;
-    deviceManager_.getAudioDeviceSetup(current);
-    const bool namedBySetup = device->getName() == current.outputDeviceName || device->getName() == current.inputDeviceName;
-    const bool userChoseThis = namedBySetup && wantedName_.isNotEmpty() && device->getName() != wantedName_
-                               && ! awaitingSavedDevice_ && ! setupLocked_;
-    if (userChoseThis)
+    // A card the system opened is not a choice. The menu name stays, and the
+    // chosen halves are opened again. An aggregate does not become the host.
+    if (wantedName_.isNotEmpty() && ! deviceIsChosenCard(*device))
     {
-        noteUserDeviceChange();
-        wantedName_ = device->getName();
-        applyOpenDevice(*device, true);
-        return;
-    }
-
-    // A card that is not the session card is not the host. The built-in
-    // device must not take over when the X32 is unplugged.
-    if (wantedName_.isNotEmpty() && device->getName() != wantedName_
-        && (setupLocked_ || awaitingSavedDevice_ || deviceLostBanner_ || lossFinalized_))
-    {
-        if (! awaitingSavedDevice_)
+        if (! refusedForeignDevice_)
         {
-            if (downSinceMs_ == 0)
-                downSinceMs_ = juce::Time::getMillisecondCounter();
-            noteSyncLost();
+            refusedForeignDevice_ = true;
+            if (! awaitingSavedDevice_)
+            {
+                if (downSinceMs_ == 0)
+                    downSinceMs_ = juce::Time::getMillisecondCounter();
+                noteSyncLost();
+            }
+            appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine(wantedName_.toStdString(),
+                                                                                device->getName().toStdString(),
+                                                                                "system opened another card").c_str()));
+            tryReopenWanted();
         }
-        rejectForeignDevice();
         return;
     }
+    refusedForeignDevice_ = false;
 
     // applyOpenDevice clears the loss flags after it has logged the gap
     // and, when a take was recording, started the next one.
     applyOpenDevice(*device, true);
+}
+
+bool AudioEngine::deviceIsChosenCard(const juce::AudioIODevice& device)
+{
+    if (wantedName_.isEmpty())
+        return false;
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup(setup);
+    const auto openName = device.getName().toStdString();
+    const auto chosen = wantedName_.toStdString();
+    const auto inputName = chosenInputName_.toStdString();
+    const auto outputName = chosenOutputName_.toStdString();
+    const auto setupInput = setup.inputDeviceName.toStdString();
+    const auto setupOutput = setup.outputDeviceName.toStdString();
+    return openDeviceIsChosen(openName, chosen, inputName, outputName, setupInput, setupOutput);
 }
 
 LatencyNumbers AudioEngine::latencyNumbers() const
@@ -1565,7 +1576,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
                               && ! offlineTemplate_
                               && deviceName_.isNotEmpty()
                               && deviceName_ == live->getName();
-    if (deviceName_ != live->getName())
+    // A new HAL name for the card the user already chose is not a card change.
+    if (deviceName_ != live->getName() && ! deviceIsChosenCard(*live))
         revealUnsupported_ = false;
     deviceName_ = live->getName();
 
@@ -1640,9 +1652,8 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 
     lastInputMask_ = inputMask;
     lastOutputMask_ = outputMask;
-    const bool sameCard = wantedName_.isEmpty() || live->getName() == wantedName_;
-    const bool cameBack = remember && sameCard && live->getName() == wantedName_
-                          && (deviceLostBanner_ || lossFinalized_);
+    const bool sameCard = wantedName_.isEmpty() || live->getName() == wantedName_ || deviceIsChosenCard(*live);
+    const bool cameBack = remember && sameCard && (deviceLostBanner_ || lossFinalized_);
     const auto lostMs = downSinceMs_;
     const auto gapMs = lostMs == 0 ? std::int64_t { 0 }
                                    : static_cast<std::int64_t>(juce::Time::getMillisecondCounter() - lostMs);
@@ -1659,7 +1670,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         downSinceMs_ = 0;
         resumeRecordingOnReturn_ = false;
         deviceDown_.store(false, std::memory_order_relaxed);
-        if (live->getName() == wantedName_)
+        if (live->getName() == wantedName_ || deviceIsChosenCard(*live))
             setupLocked_ = true;
     }
     if (cameBack)
@@ -1675,15 +1686,17 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     }
     refreshSampleRateWarning();
 
-    if (remember && (needPrepare || masksChanged || wantedName_ != live->getName()))
+    if (remember && (needPrepare || masksChanged))
     {
-        const bool lockedToOther = setupLocked_ && wantedName_.isNotEmpty() && live->getName() != wantedName_;
-        if (! lockedToOther)
-        {
-            deviceManager_.getAudioDeviceSetup(wantedSetup_);
-            wantedName_ = live->getName();
-            saveSetupIfAllowed();
-        }
+        auto setup = wantedSetup_;
+        deviceManager_.getAudioDeviceSetup(setup);
+        // The menu name stays. The saved setup keeps the two halves, not an aggregate.
+        if (chosenInputName_.isNotEmpty())
+            setup.inputDeviceName = chosenInputName_;
+        if (chosenOutputName_.isNotEmpty())
+            setup.outputDeviceName = chosenOutputName_;
+        wantedSetup_ = setup;
+        saveSetupIfAllowed();
     }
 }
 
@@ -1803,7 +1816,7 @@ void AudioEngine::noteHardwareDeviceList()
         return;
 
     auto* live = deviceManager_.getCurrentAudioDevice();
-    if (live != nullptr && live->isOpen() && live->getName() == wantedName_)
+    if (live != nullptr && live->isOpen() && deviceIsChosenCard(*live))
         return;
 
     const bool waiting = deviceLostBanner_ || awaitingSavedDevice_ || lossFinalized_
@@ -1832,9 +1845,7 @@ void AudioEngine::rejectForeignDevice()
             if (reopenInProgress_ || ! started_)
                 return;
             auto* live = deviceManager_.getCurrentAudioDevice();
-            if (live == nullptr || ! live->isOpen() || live->getName() == wantedName_)
-                return;
-            if (! setupLocked_ && ! awaitingSavedDevice_ && ! deviceLostBanner_ && ! lossFinalized_)
+            if (live == nullptr || ! live->isOpen() || deviceIsChosenCard(*live))
                 return;
             closingDevice_.store(true, std::memory_order_release);
             deviceManager_.closeAudioDevice();
@@ -1877,17 +1888,25 @@ void AudioEngine::tryReopenWanted()
 {
     if (reopenInProgress_ || closingDevice_.load(std::memory_order_acquire) || wantedName_.isEmpty())
         return;
-
-    // The caller already saw this name on the device-list notification.
-    if (! deviceNameListed(wantedName_))
+    if (! deviceChangeCauseAllowed("reopening the chosen card"))
         return;
+
+    const auto outputName = chosenOutputName_.isNotEmpty() ? chosenOutputName_ : wantedName_;
+    const auto inputName = chosenInputName_.isNotEmpty() ? chosenInputName_ : wantedName_;
+    // The menu name is not a HAL device. Either half being listed is enough.
+    if (! deviceNameListed(outputName) && ! deviceNameListed(inputName) && ! deviceNameListed(wantedName_))
+    {
+        rejectForeignDevice();
+        return;
+    }
 
     reopenInProgress_ = true;
     auto setup = wantedSetup_;
-    if (setup.outputDeviceName.isEmpty())
-        setup.outputDeviceName = wantedName_;
-    if (setup.inputDeviceName.isEmpty())
-        setup.inputDeviceName = wantedName_;
+    setup.outputDeviceName = outputName;
+    setup.inputDeviceName = inputName;
+    setup.useDefaultInputChannels = true;
+    setup.useDefaultOutputChannels = true;
+    appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine({}, wantedName_.toStdString(), "reopening the chosen card").c_str()));
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     reopenInProgress_ = false;
     if (error.isNotEmpty())
@@ -1899,13 +1918,20 @@ bool AudioEngine::deviceNameListed(const juce::String& name)
     if (name.isEmpty())
         return false;
 
+    const auto wanted = name.toStdString();
     for (auto* type : deviceManager_.getAvailableDeviceTypes())
     {
         if (type == nullptr)
             continue;
         type->scanForDevices();
-        if (type->getDeviceNames(false).contains(name) || type->getDeviceNames(true).contains(name))
-            return true;
+        const juce::StringArray listedOutputs = type->getDeviceNames(false);
+        const juce::StringArray listedInputs = type->getDeviceNames(true);
+        for (const auto& listed : listedOutputs)
+            if (listed == name || deviceNamesMatch(listed.toStdString(), wanted))
+                return true;
+        for (const auto& listed : listedInputs)
+            if (listed == name || deviceNamesMatch(listed.toStdString(), wanted))
+                return true;
     }
     return false;
 }
@@ -1931,6 +1957,8 @@ void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
     wantedSetup_.sampleRate = saved->getDoubleAttribute("audioDeviceRate", wantedSetup_.sampleRate);
     wantedName_ = wantedSetup_.outputDeviceName.isNotEmpty() ? wantedSetup_.outputDeviceName
                                                              : wantedSetup_.inputDeviceName;
+    chosenInputName_ = wantedSetup_.inputDeviceName;
+    chosenOutputName_ = wantedSetup_.outputDeviceName;
 }
 
 void AudioEngine::saveSetupIfAllowed()
@@ -2758,18 +2786,42 @@ std::vector<ListedDevice> AudioEngine::connectedDevices()
             const auto cached = std::find_if(deviceInventory_.begin(), deviceInventory_.end(),
                                              [&item](const ListedDevice& known)
                                              {
-                                                 return known.name == item.name || known.inputName == item.name
-                                                        || known.outputName == item.name;
+                                                 return deviceNamesMatch(known.name, item.name)
+                                                        || deviceNamesMatch(known.inputName, item.name)
+                                                        || deviceNamesMatch(known.outputName, item.name);
                                              });
             if (cached != deviceInventory_.end() && cached->inputs >= 0 && cached->outputs >= 0
                 && (cached->inputs > 0 || cached->outputs > 0))
             {
-                found.push_back(*cached);
+                // Keep the raw HAL row. Copying the paired card here listed the
+                // mic and the speakers as two entries after the next switch.
+                const bool paired = ! cached->inputName.empty() || ! cached->outputName.empty();
+                if (paired && deviceNamesMatch(cached->inputName, item.name))
+                {
+                    item.inputs = cached->inputs > 0 ? cached->inputs : 0;
+                    item.outputs = 0;
+                }
+                else if (paired && deviceNamesMatch(cached->outputName, item.name))
+                {
+                    item.inputs = 0;
+                    item.outputs = cached->outputs > 0 ? cached->outputs : 0;
+                }
+                else
+                {
+                    item.inputs = cached->inputs;
+                    item.outputs = cached->outputs;
+                    if (paired)
+                    {
+                        item.inputName = cached->inputName;
+                        item.outputName = cached->outputName;
+                    }
+                }
+                found.push_back(std::move(item));
                 continue;
             }
             if (auto* live = deviceManager_.getCurrentAudioDevice())
             {
-                if (live->getName() == name && live->isOpen())
+                if (live->isOpen() && deviceNamesMatch(live->getName().toStdString(), item.name))
                 {
                     item.inputs = live->getInputChannelNames().size();
                     item.outputs = live->getOutputChannelNames().size();
@@ -2840,9 +2892,12 @@ void AudioEngine::sampleLiveCpu()
     }
 }
 
-void AudioEngine::openNamedDevice(const juce::String& name)
+void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
 {
     if (name.isEmpty() || isOfflineDeviceName(name.toStdString()))
+        return;
+    const char* why = cause != nullptr && cause[0] != '\0' ? cause : "user chose the card";
+    if (! deviceChangeCauseAllowed(why))
         return;
     if (! recordActionAllowed(RecordDisrupt::changeDevice, isRecording(), recordLockArmed_))
     {
@@ -2856,10 +2911,14 @@ void AudioEngine::openNamedDevice(const juce::String& name)
     deviceManager_.getAudioDeviceSetup(setup);
     juce::String inputName = name;
     juce::String outputName = name;
+    juce::String menuName = name;
     for (const auto& listed : deviceInventory_)
     {
-        if (listed.name != name.toStdString() && listed.inputName != name.toStdString())
+        if (! listedDeviceCovers(listed, name.toStdString()))
             continue;
+        // "MacBook Pro-mikrofoni" from a session file is still the one menu row.
+        if (! listed.name.empty())
+            menuName = juce::String(listed.name);
         if (! listed.inputName.empty())
             inputName = juce::String(listed.inputName);
         if (! listed.outputName.empty())
@@ -2874,7 +2933,17 @@ void AudioEngine::openNamedDevice(const juce::String& name)
         setup.sampleRate = preferredRate_;
     if (preferredBuffer_ >= 16)
         setup.bufferSize = preferredBuffer_;
-    wantedName_ = name;
+    const auto previous = wantedName_.toStdString();
+    chosenInputName_ = inputName;
+    chosenOutputName_ = outputName;
+    wantedSetup_.inputDeviceName = inputName;
+    wantedSetup_.outputDeviceName = outputName;
+    wantedSetup_.useDefaultInputChannels = true;
+    wantedSetup_.useDefaultOutputChannels = true;
+    wantedName_ = menuName;
+    refusedForeignDevice_ = false;
+    if (previous != menuName.toStdString())
+        appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine(previous, menuName.toStdString(), why).c_str()));
     awaitingSavedDevice_ = false;
     startupDeviceNote_.clear();
     setupLocked_ = false;
@@ -2891,6 +2960,7 @@ void AudioEngine::openNamedDevice(const juce::String& name)
         parkOfflineAfterFailedOpen(name);
         return;
     }
+    setupLocked_ = true;
     deviceInventoryMs_ = 0;
 }
 
@@ -3452,7 +3522,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
         inventoryForce_ = true;
         const auto present = connectedDevices();
         for (const auto& listed : present)
-            if (listed.name == data.inputDevice.toStdString() || listed.inputName == data.inputDevice.toStdString())
+            if (listedDeviceCovers(listed, data.inputDevice.toStdString()))
                 return true;
         return false;
     }();
@@ -3475,7 +3545,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     }
     else if (restored.useSaved)
     {
-        openNamedDevice(juce::String(restored.input));
+        openNamedDevice(juce::String(restored.input), "session open");
     }
     if (data.bufferSamples >= 16)
         setPreferredBuffer(data.bufferSamples);

@@ -94,6 +94,15 @@ public:
     int inputCount() const;
     int outputCount() const;
     juce::String deviceName() const { return deviceName_; }
+    // The menu name the user picked. The HAL output name is not a second card.
+    juce::String cardMenuName() const
+    {
+        if (offlineTemplate_)
+            return juce::String(kOfflineDeviceName);
+        if (wantedName_.isNotEmpty())
+            return wantedName_;
+        return deviceName_;
+    }
     juce::String openError() const { return openError_; }
 
     float rmsFor(int channel) const;
@@ -202,7 +211,7 @@ public:
     juce::String pressTransport(TransportPress press);
     void finishTransport();
     std::vector<ListedDevice> connectedDevices();
-    void openNamedDevice(const juce::String& name);
+    void openNamedDevice(const juce::String& name, const char* cause = "user chose the card");
     void noteUserChoseDevice(const juce::String& name);
     void transportLocate(std::int64_t sample);
     void dropMarker();
@@ -353,6 +362,7 @@ private:
     void noteHardwareDeviceList();
     void tryReopenWanted();
     void rejectForeignDevice();
+    bool deviceIsChosenCard(const juce::AudioIODevice& device);
     void installDeviceListListener();
     void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
@@ -513,6 +523,9 @@ private:
     int preparedBuffer_ = 0;
     juce::AudioDeviceManager::AudioDeviceSetup wantedSetup_;
     juce::String wantedName_;
+    juce::String chosenInputName_;
+    juce::String chosenOutputName_;
+    bool refusedForeignDevice_ = false;
     std::vector<ListedDevice> deviceInventory_;
     juce::uint32 deviceInventoryMs_ = 0;
     juce::String startupFallbackName_;

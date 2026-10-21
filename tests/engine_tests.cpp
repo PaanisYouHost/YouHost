@@ -3291,6 +3291,111 @@ void testDeviceListGrouping()
     CHECK(finnish[0].name == "MacBook Pro");
     CHECK(finnish[0].inputName == "MacBook Pro-mikrofoni");
     CHECK(finnish[0].outputName == "MacBook Pro-kaiuttimet");
+    // Mika 2026-10-21: after a switch the input name gained a space
+    // ("MacBook Pro -mikrofoni") and the speakers stayed "MacBook Pro-kaiuttimet".
+    // Those are one card. The name stays "MacBook Pro" on the next rebuild.
+    // An aggregate ("Koostelaite" / "koontilaite") stays its own row.
+    CHECK(youhost::builtinFamilyKey("MacBook Pro -mikrofoni") == "MacBook Pro");
+    CHECK(youhost::builtinFamilyKey("MacBook Pro-kaiuttimet") == "MacBook Pro");
+    CHECK(youhost::deviceNamesMatch("MacBook Pro -mikrofoni", "MacBook Pro-mikrofoni"));
+    youhost::ListedDevice macRow;
+    macRow.name = "MacBook Pro";
+    macRow.inputName = "MacBook Pro -mikrofoni";
+    macRow.outputName = "MacBook Pro-kaiuttimet";
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro"));
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro-mikrofoni"));
+    CHECK(youhost::listedDeviceCovers(macRow, "MacBook Pro-kaiuttimet"));
+    CHECK(! youhost::listedDeviceCovers(macRow, "koontilaite"));
+    CHECK(! youhost::listedDeviceCovers(macRow, ""));
+    CHECK(youhost::audioCardKind("koontilaite") == youhost::AudioCardKind::virtualDevice);
+    CHECK(youhost::audioCardKind("Koostelaite") == youhost::AudioCardKind::virtualDevice);
+    const std::vector<youhost::ListedDevice> afterSwitch = {
+        { "MacBook Pro -mikrofoni", 1, 0 },
+        { "MacBook Pro-kaiuttimet", 0, 2 },
+        { "Koostelaite", 2, 2 },
+        { "koontilaite", 1, 1 },
+        { "WING 2", 48, 48 },
+    };
+    const auto switched = youhost::buildDeviceList(afterSwitch, "");
+    const auto switchedAgain = youhost::buildDeviceList(afterSwitch, "");
+    int macRowsAfter = 0;
+    int aggregateRows = 0;
+    std::string macLabel;
+    std::string macRaw;
+    for (const auto& row : switched)
+    {
+        if (row.name == "MacBook Pro" || youhost::deviceNamesMatch(row.name, "MacBook Pro"))
+        {
+            ++macRowsAfter;
+            macLabel = row.label;
+            macRaw = row.name;
+            CHECK(row.inputName == "MacBook Pro -mikrofoni");
+            CHECK(row.outputName == "MacBook Pro-kaiuttimet");
+        }
+        if (row.name == "MacBook Pro -mikrofoni" || row.name == "MacBook Pro-kaiuttimet")
+            ++macRowsAfter;
+        if (youhost::audioCardKind(row.name) == youhost::AudioCardKind::virtualDevice)
+            ++aggregateRows;
+    }
+    CHECK(macRowsAfter == 1);
+    CHECK(macRaw == "MacBook Pro");
+    CHECK(macLabel == "MacBook Pro (built-in) - 1 in / 2 out");
+    CHECK(aggregateRows == 2);
+    CHECK(switchedAgain.size() == switched.size());
+    CHECK(youhost::openDeviceIsChosen("MacBook Pro-kaiuttimet",
+                                      "MacBook Pro",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet"));
+    CHECK(youhost::openDeviceIsChosen("koontilaite",
+                                      "MacBook Pro",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet",
+                                      "MacBook Pro -mikrofoni",
+                                      "MacBook Pro-kaiuttimet"));
+    CHECK(! youhost::openDeviceIsChosen("koontilaite",
+                                       "MacBook Pro",
+                                       "MacBook Pro -mikrofoni",
+                                       "MacBook Pro-kaiuttimet",
+                                       "koontilaite",
+                                       "koontilaite"));
+    CHECK(! youhost::openDeviceIsChosen("Koostelaite", "WING 2", "WING 2", "WING 2", "Koostelaite", "Koostelaite"));
+    CHECK(youhost::deviceChangeCauseAllowed("user chose the card"));
+    CHECK(youhost::deviceChangeCauseAllowed("session open"));
+    CHECK(youhost::deviceChangeCauseAllowed("reopening the chosen card"));
+    CHECK(! youhost::deviceChangeCauseAllowed("system opened another card"));
+    CHECK(youhost::deviceChangeLogLine("MacBook Pro", "koontilaite", "system opened another card")
+          == "device change from MacBook Pro to koontilaite cause=system opened another card");
+    CHECK(youhost::deviceChangeLogLine("", "MacBook Pro", "reopening the chosen card")
+          == "device change to MacBook Pro cause=reopening the chosen card");
+    const auto menusAfter = youhost::audioSetupMenus(afterSwitch, "MacBook Pro-kaiuttimet", false, 48000.0, 24, 32);
+    int selectedMac = 0;
+    int selectedAggregate = 0;
+    for (const auto& choice : menusAfter[0].choices)
+    {
+        if (choice.heading || choice.id != menusAfter[0].selectedId)
+            continue;
+        if (choice.raw == "MacBook Pro")
+            ++selectedMac;
+        if (youhost::audioCardKind(choice.raw) == youhost::AudioCardKind::virtualDevice)
+            ++selectedAggregate;
+    }
+    CHECK(selectedMac == 1);
+    CHECK(selectedAggregate == 0);
+    const auto menusUnknown = youhost::audioSetupMenus(afterSwitch, "no such card", false, 48000.0, 24, 32);
+    CHECK(menusUnknown[0].selectedId == 0);
+    const auto engineNow = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    CHECK(engineNow.find("wantedName_ = live->getName()") == std::string::npos);
+    CHECK(engineNow.find("wantedName_ = device->getName()") == std::string::npos);
+    CHECK(engineNow.find("system opened another card") != std::string::npos);
+    CHECK(engineNow.find("reopening the chosen card") != std::string::npos);
+    CHECK(engineNow.find("\"session open\"") != std::string::npos);
+    CHECK(engineNow.find("user chose the card") != std::string::npos);
+    CHECK(engineNow.find("listedDeviceCovers") != std::string::npos);
+    CHECK(engineNow.find("wantedName_ = menuName") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("does not move to another card") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("does not move to another card") != std::string::npos);
     const auto builtIn = youhost::pairBuiltinCards({
         { "Built-in Microphone", 1, 0 },
         { "Built-in Output", 0, 2 },
@@ -4733,7 +4838,7 @@ void testReleaseChecklist()
              && help.find("short crossfade") != std::string::npos);
     const auto syncHeader = readWorkspaceFile("src/engine/SyncLost.h");
     const auto overlayUi = readWorkspaceFile("src/ui/SyncLostOverlay.h");
-    const auto choseOther = sliceBetween(engineSrc, "if (userChoseThis)", "A card that is not the session card");
+    const auto choseOther = sliceBetween(engineSrc, "void AudioEngine::pollDeviceStats()", "LatencyNumbers AudioEngine::latencyNumbers");
     const auto paintBody = sliceBetween(mainUi, "void MainComponent::paint(", "void MainComponent::resized()");
     item("SYNC LOST",
          alarmOn && stillLost && waitingForClick && alarmClear && restamped && dismissed
@@ -4764,8 +4869,11 @@ void testReleaseChecklist()
              && mainUi.find("drawText(\"SYNC LOST\"") == std::string::npos
              && mainUi.find("syncOverlay_.repaint()") == std::string::npos
              && paintBody.find("syncLostBlink") == std::string::npos
-             && choseOther.find("noteUserDeviceChange") != std::string::npos
+             && choseOther.find("noteUserDeviceChange") == std::string::npos
              && choseOther.find("deviceReturned") == std::string::npos
+             && choseOther.find("system opened another card") != std::string::npos
+             && choseOther.find("wantedName_ = device->getName()") == std::string::npos
+             && sliceBetween(engineSrc, "void AudioEngine::openNamedDevice", "void AudioEngine::noteUserChoseDevice").find("noteUserDeviceChange") != std::string::npos
              && engineSrc.find("syncLost_.deviceReturned(gapMs)") != std::string::npos
              && checklistDoc.find("SYNC LOST") != std::string::npos
              && checklistDoc.find("does not appear at startup") != std::string::npos
