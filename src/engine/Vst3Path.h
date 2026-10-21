@@ -8,10 +8,8 @@
 namespace youhost
 {
 
-// VST3 process() takes the wrapper lock. A worker thread would take that lock
-// off the audio thread, and the audio thread would wait in the pool. The
-// plugin's own timer would not include that wait, so the meter could sit
-// still while callbacks arrived late. VST3 runs on the audio thread.
+// One instance stays on one core. The stress count below does not add a
+// pool wait on top of the plugin time.
 inline bool vst3ProcessOnAudioThread() noexcept
 {
     return true;

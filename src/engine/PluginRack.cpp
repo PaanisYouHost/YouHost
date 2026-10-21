@@ -1,5 +1,6 @@
 #include "PluginRack.h"
 #include "AppSettings.h"
+#include "ChannelParallel.h"
 #include "CpuMeter.h"
 #include "HostLog.h"
 #include "PluginBuses.h"
@@ -17,7 +18,9 @@
 #include "ui/Theme.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <tuple>
@@ -521,6 +524,17 @@ int dspWorkerCount()
     return std::clamp(cores - 1, 0, 7);
 }
 
+void waitCorePause() noexcept
+{
+#if defined(__x86_64__) || defined(__i386__)
+    asm volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#else
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+}
+
 } // namespace
 
 struct PluginRack::RealtimePool
@@ -569,8 +583,12 @@ struct PluginRack::RealtimePool
             return;
         stopped_ = true;
         stop_.store(true, std::memory_order_release);
-        for (auto& wake : wakes_)
-            wake.signal();
+        const int n = static_cast<int>(threads_.size());
+        for (int index = 0; index < n; ++index)
+        {
+            epochs_[static_cast<std::size_t>(index)].fetch_add(1, std::memory_order_seq_cst);
+            epochs_[static_cast<std::size_t>(index)].notify_one();
+        }
         for (auto& thread : threads_)
         {
             if (thread != nullptr)
@@ -595,7 +613,8 @@ struct PluginRack::RealtimePool
     {
         if (count <= 0 || rack == nullptr)
             return;
-        if (count == 1 || threads_.empty() || stop_.load(std::memory_order_acquire))
+        const int cores = chainCores(count, static_cast<int>(threads_.size()));
+        if (cores <= 1 || stop_.load(std::memory_order_acquire))
         {
             lastWaitNs_ = 0;
             for (int index = 0; index < count; ++index)
@@ -603,28 +622,31 @@ struct PluginRack::RealtimePool
             return;
         }
 
-        const int helpers = std::min(static_cast<int>(threads_.size()), count - 1);
+        // Each channel chain has a fixed slice. The audio thread does not
+        // steal a worker's chain, and this path does not allocate or lock.
+        const int helpers = cores - 1;
         rack_ = rack;
         count_ = count;
-        cursor_.store(0, std::memory_order_relaxed);
-        done_.reset();
-        left_.store(helpers + 1, std::memory_order_release);
+        cores_ = cores;
+        left_.store(helpers, std::memory_order_relaxed);
+        const auto epoch = epochClock_.fetch_add(1, std::memory_order_relaxed) + 1;
         for (int index = 0; index < helpers; ++index)
-            wakes_[static_cast<std::size_t>(index)].signal();
-
-        const auto began = steadyNs();
-        for (;;)
         {
-            const int index = cursor_.fetch_add(1, std::memory_order_acq_rel);
-            if (index >= count)
-                break;
-            rack->processJob(index);
+            epochs_[static_cast<std::size_t>(index)].store(static_cast<std::uint32_t>(epoch), std::memory_order_seq_cst);
+            epochs_[static_cast<std::size_t>(index)].notify_one();
         }
+
+        int begin = 0;
+        int end = 0;
+        chainSlice(count, cores, 0, begin, end);
+        const auto began = steadyNs();
+        for (int index = begin; index < end; ++index)
+            rack->processJob(index);
         rack->addCoreNs(0, steadyNs() - began);
 
         const auto waitBegan = steadyNs();
-        if (left_.fetch_sub(1, std::memory_order_acq_rel) != 1)
-            done_.wait();
+        while (left_.load(std::memory_order_acquire) != 0)
+            waitCorePause();
         lastWaitNs_ = static_cast<int>(steadyNs() - waitBegan);
     }
 
@@ -636,41 +658,49 @@ struct PluginRack::RealtimePool
     void runWorker(int index)
     {
         juce::WorkgroupToken token;
+        PluginRack* rack = nullptr;
+        std::uint32_t seen = 0;
         while (! stop_.load(std::memory_order_acquire))
         {
-            wakes_[static_cast<std::size_t>(index)].wait();
+            // Joined before the wait, so the kernel wakes this core with the
+            // device thread. Joining after the wake misses the buffer.
+            if (rack != nullptr)
+                rack->workgroup_.join(token);
+            epochs_[static_cast<std::size_t>(index)].wait(seen);
+            const auto now = epochs_[static_cast<std::size_t>(index)].load(std::memory_order_acquire);
+            if (now == seen)
+                continue;
+            seen = now;
             if (stop_.load(std::memory_order_acquire))
                 break;
-            auto* rack = rack_;
+            rack = rack_;
             if (rack == nullptr)
             {
-                if (left_.fetch_sub(1, std::memory_order_acq_rel) == 1)
-                    done_.signal();
+                left_.fetch_sub(1, std::memory_order_acq_rel);
                 continue;
             }
             rack->workgroup_.join(token);
             juce::ScopedNoDenormals noDenormals;
+            const int jobs = count_;
+            const int cores = cores_;
+            int begin = 0;
+            int end = 0;
+            chainSlice(jobs, cores, index + 1, begin, end);
             const auto began = steadyNs();
-            for (;;)
-            {
-                const int job = cursor_.fetch_add(1, std::memory_order_acq_rel);
-                if (job >= count_)
-                    break;
+            for (int job = begin; job < end; ++job)
                 rack->processJob(job);
-            }
             rack->addCoreNs(index + 1, steadyNs() - began);
-            if (left_.fetch_sub(1, std::memory_order_acq_rel) == 1)
-                done_.signal();
+            left_.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
 
     std::vector<std::unique_ptr<Worker>> threads_;
-    std::array<juce::WaitableEvent, 7> wakes_;
-    juce::WaitableEvent done_;
-    std::atomic<int> cursor_ { 0 };
+    std::array<std::atomic<std::uint32_t>, 7> epochs_ {};
+    std::atomic<std::uint32_t> epochClock_ { 0 };
     std::atomic<int> left_ { 0 };
     std::atomic<bool> stop_ { false };
     int count_ = 0;
+    int cores_ = 1;
     int lastWaitNs_ = 0;
     PluginRack* rack_ = nullptr;
     bool stopped_ = false;
@@ -1269,17 +1299,19 @@ void PluginRack::process(float* const* outputs,
             ++count;
         }
 
-        // VST3 process stays on the audio thread. A worker would take the wrapper lock off that thread.
+        // Independent channel chains run together, one core each, and join
+        // before the output. One chain stays on this thread. No lock and no
+        // allocation on this path.
         int waitNs = 0;
-        if (vst3Inline || count <= 1 || pool_ == nullptr || ! vst3ProcessOnAudioThread())
-        {
-            for (int index = 0; index < count; ++index)
-                processJob(index);
-        }
-        else if (count > 0)
+        if (count > 1 && pool_ != nullptr)
         {
             pool_->parallel(count, this);
             waitNs = pool_->lastWaitNs();
+        }
+        else
+        {
+            for (int index = 0; index < count; ++index)
+                processJob(index);
         }
         blockNote_.vst3Inline = vst3Inline ? 1 : 0;
         blockNote_.waitNs = waitNs;
