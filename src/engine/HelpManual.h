@@ -15,6 +15,7 @@ Two basic rules
 
 What's new
 ----------
+- 1.0.6: a channel with no input, and any channel past the card, does not run its plugins. The DSP meter follows the audio callback, and a dropout line names the slowest plugin. After a crash, a different plugin can be loaded in that slot. The crash journal keeps older crashes.
 - 1.0.5: VST3 plugins are prepared on the message thread and processed only on the audio thread, the same way as an Audio Unit. A plugin that reports silence during load stays loaded. Opening an editor does not pause the plugin, so audio and recording keep going.
 - 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence.
 - 1.0.3: after a crash, the next launch offers Open session without this plugin. The plugin that was active or loading stays out. Its slot stays in the session file. Recording is not stopped.
@@ -47,7 +48,7 @@ What's new
 - Real hardware is listed first (USB, Thunderbolt, AVB, Dante, SoundGrid), then Virtual / aggregate devices, then the MacBook built-in, and Offline last.
 - YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline.
 - Switching cards keeps channel names, plugins and groups.
-- A session always has 128 channels. Channels beyond the card's count are hidden.
+- A session always has 128 channels. Channels beyond the card's count are hidden. Plugins on a hidden channel, or a channel with no input, do not run.
 - The channel mode button cycles: REC (plugins + recording) → INPUT (plugins, not recorded) → OFF (channel fully off).
 - ALL REC / ALL INPUT / ALL OFF set every visible channel.
 

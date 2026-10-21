@@ -185,7 +185,7 @@ OSStatus overloadListener(AudioObjectID,
 {
     auto* engine = static_cast<AudioEngine*>(client);
     if (engine != nullptr)
-        engine->noteDropout(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses));
+        engine->noteDropout(numberOfAddresses == 0 ? 1 : static_cast<int>(numberOfAddresses), true);
     return noErr;
 }
 
@@ -762,7 +762,7 @@ void AudioEngine::resetDropouts()
     file.appendText(juce::String(juce::Time::currentTimeMillis()) + ",reset,0,0\n");
 }
 
-void AudioEngine::noteDropout(int events)
+void AudioEngine::noteDropout(int events, bool overrun)
 {
     if (events <= 0)
         return;
@@ -771,7 +771,11 @@ void AudioEngine::noteDropout(int events)
     const auto sample = recording ? recorder_->playhead() : static_cast<std::int64_t>(-1);
     const auto stamp = steadyNowNs();
     const int buffer = bufferSamples_.load(std::memory_order_relaxed);
-    const int dsp = rack_ != nullptr ? rack_->livePluginPercent() : 0;
+    // The callback's own time, not the smoothed plugin sum. That sum could sit
+    // at 52 while this callback had already overrun the buffer.
+    const int dsp = lastCallbackLoad_.load(std::memory_order_relaxed);
+    if (overrun)
+        dropoutSawOverrun_.store(1, std::memory_order_relaxed);
     const int plugins = StallClock::get().activePlugins.load(std::memory_order_relaxed);
     const int marks = std::min(events, 8);
     for (int index = 0; index < marks; ++index)
@@ -824,11 +828,19 @@ void AudioEngine::drainDropoutLog()
     }
     if (dropoutLogDue(nowSteady, lastDropoutLogNs_, dropoutCoalesceCount_))
     {
-        appendHostLog(settings_, juce::String::fromUTF8(formatDropoutHostLine(dropoutCoalesceCount_,
-                                                                              dropoutCoalesceTake_,
-                                                                              dropoutCoalesceBuffer_,
-                                                                              dropoutCoalesceDsp_,
-                                                                              dropoutCoalescePlugins_).c_str()));
+        auto line = formatDropoutHostLine(dropoutCoalesceCount_,
+                                          dropoutCoalesceTake_,
+                                          dropoutCoalesceBuffer_,
+                                          dropoutCoalesceDsp_,
+                                          dropoutCoalescePlugins_);
+        int slowChannel = -1;
+        int slowSlot = -1;
+        int slowNs = 0;
+        char slowName[40] {};
+        if (slowest_.read(slowChannel, slowSlot, slowNs, slowName, static_cast<int>(sizeof(slowName))))
+            line += formatDropoutSlowest(slowChannel + 1, slowSlot + 1, slowName, slowNs / 1000);
+        line += dropoutSawOverrun_.exchange(0, std::memory_order_relaxed) != 0 ? " overrun" : " gap";
+        appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         lastDropoutLogNs_ = nowSteady;
         dropoutCoalesceCount_ = 0;
         dropoutCoalesceTake_ = -1;
@@ -880,7 +892,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
     callbackSerial_.fetch_add(1, std::memory_order_relaxed);
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
-    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap));
+    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap), false);
 
     // Record and the host chain are independent while live or recording:
     // the tap copies the device input, and the same input feeds the chain.
@@ -900,6 +912,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                  kMaxChannels,
                                  numSamples,
                                  kMaxChannels);
+    const auto recordNs = steadyNowNs();
 
     const auto enabledLow = channelOnLo_.load(std::memory_order_relaxed);
     const auto enabledHigh = channelOnHi_.load(std::memory_order_relaxed);
@@ -958,9 +971,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                            enabledHigh);
     }
 
+    const auto passNs = steadyNowNs();
     // Plugins and the alignment delay run on the dry copy. Off channels are skipped.
     if (rack_ != nullptr)
         rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels);
+    const auto pluginNs = steadyNowNs();
 
     if (outputChannelData != nullptr && numSamples > 0)
     {
@@ -1004,7 +1019,36 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const auto elapsedNs = finishedNs - startedNs;
     if (elapsedNs > 0)
         callbackElapsedNs_.store(static_cast<std::uint64_t>(elapsedNs), std::memory_order_relaxed);
-    noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs));
+    const double rate = sampleRate_.load(std::memory_order_relaxed);
+    const int load = callbackLoadPercent(static_cast<std::uint64_t>(elapsedNs > 0 ? elapsedNs : 0), numSamples, rate);
+    lastCallbackLoad_.store(load, std::memory_order_relaxed);
+    const int shown = clampCpuPercent(load);
+    int peak = callbackShownPeak_.load(std::memory_order_relaxed);
+    while (shown > peak && ! callbackShownPeak_.compare_exchange_weak(peak, shown, std::memory_order_relaxed))
+    {
+    }
+    if (rack_ != nullptr)
+    {
+        BlockTimingRecord timing;
+        const auto note = rack_->blockPluginNote();
+        timing.samples = numSamples;
+        timing.prepared = note.prepared;
+        timing.reprepare = note.reprepare;
+        timing.vst3Inline = note.vst3Inline;
+        timing.waitNs = note.waitNs;
+        timing.recordNs = static_cast<int>(recordNs > startedNs ? recordNs - startedNs : 0);
+        timing.passNs = static_cast<int>(passNs > recordNs ? passNs - recordNs : 0);
+        timing.pluginNs = static_cast<int>(pluginNs > passNs ? pluginNs - passNs : 0);
+        timing.meterNs = static_cast<int>(finishedNs > pluginNs ? finishedNs - pluginNs : 0);
+        timing.slowestChannel = note.channel;
+        timing.slowestSlot = note.slot;
+        timing.slowestNs = note.nanoseconds;
+        for (int index = 0; index < static_cast<int>(sizeof(timing.slowestName)) && note.name[index] != '\0'; ++index)
+            timing.slowestName[index] = note.name[index];
+        timingRing_.push(timing);
+        slowest_.publish(note.channel, note.slot, note.nanoseconds, note.name);
+    }
+    noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs), true);
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)
@@ -1897,11 +1941,8 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
     // must not stop a take if it is ever reached while audio is up.
     const auto skip = crashPluginsToSkip(journal_);
     juce::StringArray blocked;
-    std::vector<std::pair<int, int>> slots;
-    slots.reserve(skip.size());
     for (const auto& mark : skip)
     {
-        slots.emplace_back(mark.channel, mark.slot);
         if (mark.identifier.empty())
             continue;
         const auto identifier = juce::String::fromUTF8(mark.identifier.c_str());
@@ -1911,8 +1952,18 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
 
     if (leaveOff && rack_ != nullptr)
     {
+        std::vector<PluginRack::CrashBlock> blocks;
+        blocks.reserve(skip.size());
+        for (const auto& mark : skip)
+        {
+            PluginRack::CrashBlock block;
+            block.channel = mark.channel;
+            block.slot = mark.slot;
+            block.identifier = juce::String::fromUTF8(mark.identifier.c_str());
+            blocks.push_back(std::move(block));
+        }
         rack_->setBlockedIdentifiers(blocked);
-        rack_->setBlockedSlots(slots);
+        rack_->setBlockedSlots(blocks);
     }
 
     journal_.marks.clear();
@@ -2708,10 +2759,11 @@ void AudioEngine::sampleLiveCpu()
     }
 
     const auto nowMs = static_cast<std::int64_t>(juce::Time::getMillisecondCounter());
-    const auto elapsed = callbackElapsedNs_.load(std::memory_order_relaxed);
-    const int samples = bufferSamples_.load(std::memory_order_relaxed);
-    const double rate = sampleRate_.load(std::memory_order_relaxed);
-    const int dsp = dspDisplay_.push(nowMs, blockCpuPercent(elapsed, samples, rate));
+    const int latest = clampCpuPercent(lastCallbackLoad_.load(std::memory_order_relaxed));
+    const int peak = callbackShownPeak_.exchange(latest, std::memory_order_relaxed);
+    const int sample = peak > latest ? peak : latest;
+    // Peak of the callbacks since the last paint. A latched plugin sum is not used.
+    const int dsp = dspDisplay_.push(nowMs, dspReading(sample, rack_->livePluginPercent()));
     callbackCpuPercent_.store(dsp, std::memory_order_relaxed);
     dspPeakPercent_.store(dspDisplay_.peak, std::memory_order_relaxed);
     cpuUsage_.store(static_cast<float>(dsp) / 100.0f, std::memory_order_relaxed);
@@ -3136,6 +3188,19 @@ void AudioEngine::maintainSession()
     if (catalogue_ != nullptr)
         catalogue_->flushSave();
     drainDropoutLog();
+    BlockTimingRecord timing[BlockTimingRing::kCapacity];
+    const int timingCount = timingRing_.drain(timing, BlockTimingRing::kCapacity);
+    if (timingCount > 0)
+    {
+        int worst = 0;
+        for (int index = 1; index < timingCount; ++index)
+            if (timing[index].pluginNs > timing[worst].pluginNs)
+                worst = index;
+        auto line = formatBlockTimingLine(timing[worst]);
+        if (timingCount > 1)
+            line += "  blocks " + std::to_string(timingCount);
+        appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
+    }
 
     if (sessionDirty_ && sessionFolder_ != juce::File()
         && juce::Time::getMillisecondCounter() - sessionDirtyAtMs_ >= 1500u)

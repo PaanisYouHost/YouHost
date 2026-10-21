@@ -44,6 +44,31 @@ inline int blockCpuPercent(std::uint64_t elapsedNs, int samples, double sampleRa
     return static_cast<int>(percent + 0.5);
 }
 
+// Same ratio as blockCpuPercent, but the dropout log can say 180% when the
+// callback took almost two buffers. The on-screen meter still stops at 100.
+inline int callbackLoadPercent(std::uint64_t elapsedNs, int samples, double sampleRate) noexcept
+{
+    if (elapsedNs == 0 || samples <= 0 || sampleRate <= 0.0)
+        return 0;
+    const double period = static_cast<double>(samples) / sampleRate;
+    if (period <= 0.0)
+        return 0;
+    const double percent = (static_cast<double>(elapsedNs) / 1.0e9) / period * 100.0;
+    if (percent <= 0.0)
+        return 0;
+    if (percent >= 999.0)
+        return 999;
+    return static_cast<int>(percent + 0.5);
+}
+
+// The DSP meter is this callback's own time. A latched plugin sum (four
+// plugins sitting near 13% read as a stuck 52) is not the meter.
+inline int dspReading(int callbackPercent, int latchedPluginSum) noexcept
+{
+    (void) latchedPluginSum;
+    return clampCpuPercent(callbackPercent);
+}
+
 // Half the previous reading, half this block. The step rounds toward the new
 // reading, so a steady load reaches that percent instead of sitting one below it.
 // No heap, no lock.

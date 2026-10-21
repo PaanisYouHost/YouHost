@@ -242,6 +242,15 @@ inline bool channelUsesCpu(int channel, const SessionChannelView& view) noexcept
     return channel >= 0 && channel < view.cardInputs;
 }
 
+// A plugin runs only on a channel the open device is feeding.
+// Hidden channels, channels past the card, and channels with no input do not.
+inline bool channelProcessesPlugins(int channel, int activeChannels, int inputPacked) noexcept
+{
+    if (channel < 0 || activeChannels < 1 || channel >= activeChannels)
+        return false;
+    return inputPacked >= 0;
+}
+
 inline bool timelineShowsChannel(int channel, int visible) noexcept
 {
     return channel >= 0 && channel < visible;

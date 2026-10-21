@@ -196,6 +196,116 @@ inline std::vector<CrashMark> crashPluginsToSkip(const CrashJournal& journal)
     return out;
 }
 
+// One generation per save. "---" starts the next one. Startup appends a new
+// generation; it does not erase the ones already in the file.
+inline std::string appendCrashGeneration(std::string_view existing, const CrashJournal& journal)
+{
+    std::string text(existing);
+    if (! text.empty() && text.back() != '\n')
+        text.push_back('\n');
+    if (! text.empty())
+        text += "---\n";
+    text += writeCrashJournal(journal);
+    return text;
+}
+
+inline CrashJournal readLatestCrashJournal(std::string_view text)
+{
+    std::string_view latest = text;
+    std::size_t cursor = 0;
+    while (cursor < text.size())
+    {
+        const auto end = text.find('\n', cursor);
+        auto line = text.substr(cursor, end == std::string_view::npos ? text.size() - cursor : end - cursor);
+        if (! line.empty() && line.back() == '\r')
+            line.remove_suffix(1);
+        if (line == "---")
+            latest = text.substr(end == std::string_view::npos ? text.size() : end + 1);
+        cursor = end == std::string_view::npos ? text.size() : end + 1;
+    }
+    return readCrashJournal(latest);
+}
+
+// Drop whole generations from the front until the file fits. The latest
+// generation stays even if it is the only one left.
+inline std::string rotateCrashHistory(std::string_view text, std::size_t maxBytes)
+{
+    if (text.size() <= maxBytes)
+        return std::string(text);
+    if (maxBytes < 64)
+        maxBytes = 64;
+    std::size_t start = text.size() > maxBytes ? text.size() - maxBytes : 0;
+    const auto mark = text.find("---\n", start);
+    if (mark == std::string_view::npos)
+        return std::string(text.substr(text.size() > maxBytes ? text.size() - maxBytes : 0));
+    return std::string(text.substr(mark + 4));
+}
+
+// A slot left off after a crash. A different plugin in that slot is loaded
+// and the block is cleared. The same plugin stays off.
+struct SlotBlock
+{
+    int channel = -1;
+    int slot = -1;
+    std::string identifier;
+};
+
+struct SlotAdmit
+{
+    bool load = false;
+    bool clearSlot = false;
+    const char* reason = nullptr;
+};
+
+inline constexpr const char* kSlotCrashSamePlugin = "may have crashed YouHost. It is turned off.";
+inline constexpr const char* kSlotCrashKeepOff = "this slot was left off after a crash. Choose another plugin.";
+
+inline SlotAdmit admitPluginIntoSlot(int channel,
+                                     int slot,
+                                     std::string_view identifier,
+                                     const SlotBlock* blocks,
+                                     int blockCount,
+                                     bool identifierBlocked) noexcept
+{
+    const SlotBlock* slotBlock = nullptr;
+    if (blocks != nullptr)
+    {
+        for (int index = 0; index < blockCount; ++index)
+        {
+            if (blocks[index].channel == channel && blocks[index].slot == slot)
+                slotBlock = &blocks[index];
+        }
+    }
+
+    const bool samePlugin = slotBlock != nullptr && ! slotBlock->identifier.empty()
+                            && slotBlock->identifier == identifier;
+    const bool unknownPlugin = slotBlock != nullptr && slotBlock->identifier.empty() && identifier.empty();
+
+    if (identifierBlocked || samePlugin)
+    {
+        SlotAdmit refused;
+        refused.reason = kSlotCrashSamePlugin;
+        return refused;
+    }
+    if (unknownPlugin)
+    {
+        SlotAdmit refused;
+        refused.reason = kSlotCrashKeepOff;
+        return refused;
+    }
+    if (slotBlock != nullptr)
+    {
+        SlotAdmit admitted;
+        admitted.load = true;
+        admitted.clearSlot = true;
+        return admitted;
+    }
+
+    SlotAdmit admitted;
+    admitted.load = true;
+    return admitted;
+}
+
 inline std::string crashDialogMessage(const CrashJournal& journal)
 {
     const auto skip = crashPluginsToSkip(journal);

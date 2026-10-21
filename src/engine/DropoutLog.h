@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace youhost
@@ -154,6 +155,28 @@ inline std::string formatDropoutHostLine(int count, std::int64_t timelineSample,
     line += "  dsp " + std::to_string(dspPercent) + "%";
     line += "  plugins " + std::to_string(pluginCount);
     return line;
+}
+
+// Added after formatDropoutHostLine. Names the plugin that took the longest
+// on the callback that dropped out. channel and slot are 1-based, as in the log.
+inline std::string formatDropoutSlowest(int channel, int slot, std::string_view name, int microseconds)
+{
+    if (name.empty() || channel < 1 || slot < 1 || microseconds < 0)
+        return {};
+    std::string safe;
+    safe.reserve(name.size());
+    for (char raw : name)
+    {
+        const auto character = static_cast<unsigned char>(raw);
+        if (character < 32 || character == '\t')
+            safe.push_back(' ');
+        else
+            safe.push_back(static_cast<char>(character));
+    }
+    if (safe.empty())
+        return {};
+    return "  slowest ch " + std::to_string(channel) + " slot " + std::to_string(slot) + " " + safe
+           + " " + std::to_string(microseconds) + "us";
 }
 
 // First event logs immediately. Later events inside 500 ms stay in one line.

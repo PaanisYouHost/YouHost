@@ -42,7 +42,9 @@
 #include "engine/SessionFiles.h"
 #include "engine/TakeImport.h"
 #include "engine/TakePlan.h"
+#include "engine/BlockTiming.h"
 #include "engine/CrashJournal.h"
+#include "engine/Vst3Path.h"
 #include "engine/DeviceWatch.h"
 #include "engine/HostPath.h"
 #include "engine/HostColumns.h"
@@ -5100,11 +5102,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.5"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.6"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.5"
+             && std::string(youhost::versionNumber()) == "1.0.6"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.5") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.6") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5113,12 +5115,12 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.5") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.5-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.6") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.6-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-20") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-21") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
@@ -5853,6 +5855,8 @@ void testBeta090()
     CHECK(processBody.find("pauseGate") == std::string::npos);
     CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
     CHECK(processBody.find("numSamples > blockSize_") != std::string::npos);
+    CHECK(processBody.find("channelProcessesPlugins") != std::string::npos);
+    CHECK(processBody.find("VST3 process stays on the audio thread") != std::string::npos);
     CHECK(processBody.find("lifeLock_") == std::string::npos);
     CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
     const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
@@ -5888,6 +5892,15 @@ void testBeta090()
     CHECK(busSource.find("backgroundQueue_") != std::string::npos);
     CHECK(busSource.find("Two AudioComponentInstanceNew calls at once deadlock") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("timeout-minutes:") == std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHostVst3Stress") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/HostLog.h").find("appendCrashGeneration") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/HostLog.h").find("rotateCrashHistory") != std::string::npos);
+    const auto loadBody = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                       "void PluginRack::beginLoad",
+                                       "void PluginRack::finishLoad");
+    CHECK(loadBody.find("admitPluginIntoSlot") != std::string::npos);
+    CHECK(loadBody.find("did-not-load") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("dspReading") != std::string::npos);
     const auto audioCallback = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
                                             "void AudioEngine::audioDeviceIOCallbackWithContext",
                                             "void AudioEngine::audioDeviceAboutToStart");
@@ -6085,6 +6098,127 @@ void testBeta090()
 
 } // namespace
 
+void testStability106()
+{
+    CHECK(! youhost::channelProcessesPlugins(5, 1, 0));
+    CHECK(! youhost::channelProcessesPlugins(7, 1, -1));
+    CHECK(! youhost::channelProcessesPlugins(0, 1, -1));
+    CHECK(! youhost::channelProcessesPlugins(0, 0, 0));
+    CHECK(youhost::channelProcessesPlugins(0, 1, 0));
+    CHECK(! youhost::blockAsksReprepare(32, 512));
+    CHECK(! youhost::blockAsksReprepare(32, 32));
+    CHECK(youhost::blockAsksReprepare(96, 32));
+    CHECK(youhost::vst3ProcessOnAudioThread());
+
+    const auto stress = youhost::runHeavyVst3At32(64);
+    CHECK(stress.liveCalls == 64);
+    CHECK(stress.hiddenCalls == 128);
+    CHECK(stress.reprepares == 0);
+    CHECK(stress.waits == 0);
+    CHECK(stress.meter != 52);
+    CHECK(stress.meter == stress.callbackPercent);
+    CHECK(stress.meter < 10);
+    const auto periodNs = youhost::expectedPeriodNs(48000.0, 32);
+    CHECK(youhost::callbackLoadPercent(static_cast<std::uint64_t>(periodNs * 2), 32, 48000.0) >= 180);
+    CHECK(youhost::dspReading(90, 52) == 90);
+    CHECK(youhost::dspReading(52, 90) == 52);
+    CHECK(youhost::blockCpuPercent(static_cast<std::uint64_t>(periodNs * 2), 32, 48000.0) == 100);
+
+    youhost::BlockTimingRecord block;
+    block.samples = 32;
+    block.prepared = 32;
+    block.reprepare = 0;
+    block.vst3Inline = 1;
+    block.waitNs = 0;
+    block.recordNs = 10000;
+    block.passNs = 8000;
+    block.pluginNs = 180000;
+    block.meterNs = 5000;
+    block.slowestChannel = 0;
+    block.slowestSlot = 1;
+    block.slowestNs = 140000;
+    std::strncpy(block.slowestName, "De-Feedback", sizeof(block.slowestName) - 1);
+    const auto timingLine = youhost::formatBlockTimingLine(block);
+    CHECK(timingLine.find("samples 32") != std::string::npos);
+    CHECK(timingLine.find("prepared 32") != std::string::npos);
+    CHECK(timingLine.find("reprepare 0") != std::string::npos);
+    CHECK(timingLine.find("vst3-inline 1") != std::string::npos);
+    CHECK(timingLine.find("record 10us") != std::string::npos);
+    CHECK(timingLine.find("plugins 180us") != std::string::npos);
+    CHECK(timingLine.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
+    const auto dropout = youhost::formatDropoutHostLine(3, 48000, 32, 180, 4);
+    CHECK(dropout == "dropout x3  take 48000  buffer 32  dsp 180%  plugins 4");
+    const auto named = dropout + youhost::formatDropoutSlowest(1, 2, "De-Feedback", 140);
+    CHECK(named.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
+
+    youhost::SlotBlock crashed;
+    crashed.channel = 0;
+    crashed.slot = 1;
+    crashed.identifier = "vst3.proq";
+    const auto again = youhost::admitPluginIntoSlot(0, 1, "vst3.proq", &crashed, 1, true);
+    CHECK(! again.load);
+    CHECK(again.reason != nullptr);
+    CHECK(std::string(again.reason).find("turned off") != std::string::npos);
+    const auto replacement = youhost::admitPluginIntoSlot(0, 1, "vst3.de-feedback", &crashed, 1, false);
+    CHECK(replacement.load);
+    CHECK(replacement.clearSlot);
+    CHECK(replacement.reason == nullptr);
+    const auto after = youhost::admitPluginIntoSlot(0, 1, "au.other", nullptr, 0, false);
+    CHECK(after.load);
+    CHECK(! after.clearSlot);
+
+    youhost::CrashJournal first;
+    youhost::CrashMark proq;
+    proq.phase = "active";
+    proq.channel = 0;
+    proq.slot = 1;
+    proq.name = "Pro-Q 4";
+    proq.identifier = "vst3.proq";
+    youhost::upsertCrashMark(first, proq);
+    const auto saved = youhost::appendCrashGeneration("", first);
+    youhost::CrashJournal armed;
+    armed.clean = false;
+    const auto restarted = youhost::appendCrashGeneration(saved, armed);
+    CHECK(restarted.find("Pro-Q 4") != std::string::npos);
+    CHECK(restarted.find("---") != std::string::npos);
+    const auto latest = youhost::readLatestCrashJournal(restarted);
+    CHECK(latest.marks.empty());
+    CHECK(! latest.clean);
+    const auto history = youhost::readCrashJournal(saved);
+    CHECK(history.marks.size() == 1);
+    CHECK(history.marks[0].name == "Pro-Q 4");
+    // Crash, restart, choose a different plugin in the same slot. The crashed
+    // plugin stays off. The new one is admitted and the slot block clears.
+    const auto crashRead = youhost::readLatestCrashJournal(saved);
+    const auto skip = youhost::crashPluginsToSkip(crashRead);
+    CHECK(skip.size() == 1);
+    CHECK(skip[0].name == "Pro-Q 4");
+    youhost::SlotBlock parked;
+    parked.channel = skip[0].channel;
+    parked.slot = skip[0].slot;
+    parked.identifier = skip[0].identifier;
+    const auto retrySame = youhost::admitPluginIntoSlot(parked.channel, parked.slot, parked.identifier, &parked, 1, true);
+    CHECK(! retrySame.load);
+    CHECK(retrySame.reason != nullptr);
+    const auto chosen = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", &parked, 1, false);
+    CHECK(chosen.load);
+    CHECK(chosen.clearSlot);
+    const auto works = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", nullptr, 0, false);
+    CHECK(works.load);
+    CHECK(! works.clearSlot);
+    std::string bulky = restarted;
+    while (bulky.size() < 400)
+        bulky = youhost::appendCrashGeneration(bulky, first);
+    const auto rotated = youhost::rotateCrashHistory(bulky, 180);
+    CHECK(rotated.size() <= bulky.size());
+    CHECK(rotated.find("clean=") != std::string::npos);
+    CHECK(youhost::readLatestCrashJournal(rotated).marks.size() == 1);
+
+    std::cout << "hidden channels skipped " << stress.hiddenCalls
+              << ", meter " << stress.meter
+              << "%, crash slot accepts a new plugin\n";
+}
+
 int main()
 {
     testTimelineScroll();
@@ -6113,6 +6247,7 @@ int main()
     testTimelineZoom();
     testInsertMenuAndStall();
     testCrashJournal();
+    testStability106();
     testDeviceWatch();
     testDeviceOpensAllChannels();
     testMergePeaks();

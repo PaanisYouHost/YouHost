@@ -5,6 +5,7 @@
 #include "StereoLink.h"
 #include "CrashJournal.h"
 #include "DisplayLayout.h"
+#include "BlockTiming.h"
 #include "DropoutDetect.h"
 #include "DropoutLog.h"
 #include "LatencyMath.h"
@@ -109,7 +110,7 @@ public:
     // would leave the last full-scale reading on screen.
     void silenceLiveState();
     void resetDropouts();
-    void noteDropout(int events);
+    void noteDropout(int events, bool overrun);
     void watchClockSync();
     void noteClockProperty() noexcept;
     void drainDropoutLog();
@@ -490,6 +491,11 @@ private:
     int dropoutCoalesceDsp_ = 0;
     int dropoutCoalescePlugins_ = 0;
     std::int64_t dropoutCoalesceTake_ = -1;
+    std::atomic<int> dropoutSawOverrun_ { 0 };
+    std::atomic<int> lastCallbackLoad_ { 0 };
+    std::atomic<int> callbackShownPeak_ { 0 };
+    BlockTimingRing timingRing_;
+    SlowestPublish slowest_;
     bool reopenInProgress_ = false;
     bool lossFinalized_ = false;
     bool resumeRecordingOnReturn_ = false;

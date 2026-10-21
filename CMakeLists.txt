@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 1.0.5
+    VERSION 1.0.6
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -219,4 +219,27 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework Cocoa")
     add_test(NAME YouHostMonoNullTest COMMAND YouHostMonoNullTest)
+
+    # Real VST3 versus AU when the runner has the same plugin in both formats.
+    # Otherwise four heavy processors at 32 samples. Hidden channels are not called.
+    add_executable(YouHostVst3Stress tests/vst3_au_stress.cpp)
+    target_include_directories(YouHostVst3Stress PRIVATE src)
+    target_compile_features(YouHostVst3Stress PRIVATE cxx_std_20)
+    target_compile_definitions(YouHostVst3Stress PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_AU=1
+        JUCE_PLUGINHOST_VST3=1)
+    target_link_libraries(YouHostVst3Stress PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+        "-framework AudioUnit"
+        "-framework CoreAudioKit"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework Cocoa")
+    add_test(NAME YouHostVst3Stress COMMAND YouHostVst3Stress)
 endif()

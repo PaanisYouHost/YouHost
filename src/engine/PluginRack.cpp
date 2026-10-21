@@ -10,6 +10,9 @@
 #include "PluginMoves.h"
 #include "SignalPath.h"
 #include "StallWatch.h"
+#include "SessionChannels.h"
+#include "Vst3Path.h"
+#include "CrashJournal.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -417,6 +420,8 @@ struct PluginRack::LiveGraph
         int processChannels = 1;
         int stereoFold = 0;
         bool prepared = false;
+        bool vst3 = false;
+        char name[40] {};
     };
 
     // Two channels for a normal insert. Eight leaves room for a sidechain
@@ -454,6 +459,24 @@ std::uint64_t steadyNs() noexcept
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+void copyPluginName(char* dest, int cap, const char* source) noexcept
+{
+    if (dest == nullptr || cap < 2)
+        return;
+    dest[0] = '\0';
+    if (source == nullptr)
+        return;
+    int index = 0;
+    for (; index < cap - 1 && source[index] != '\0'; ++index)
+        dest[index] = source[index];
+    dest[index] = '\0';
+}
+
+void copyPluginName(char* dest, int cap, const juce::String& name) noexcept
+{
+    copyPluginName(dest, cap, name.toRawUTF8());
 }
 
 int dspWorkerCount()
@@ -546,6 +569,7 @@ struct PluginRack::RealtimePool
             return;
         if (count == 1 || threads_.empty() || stop_.load(std::memory_order_acquire))
         {
+            lastWaitNs_ = 0;
             for (int index = 0; index < count; ++index)
                 rack->processJob(index);
             return;
@@ -570,8 +594,15 @@ struct PluginRack::RealtimePool
         }
         rack->addCoreNs(0, steadyNs() - began);
 
+        const auto waitBegan = steadyNs();
         if (left_.fetch_sub(1, std::memory_order_acq_rel) != 1)
             done_.wait();
+        lastWaitNs_ = static_cast<int>(steadyNs() - waitBegan);
+    }
+
+    int lastWaitNs() const noexcept
+    {
+        return lastWaitNs_;
     }
 
     void runWorker(int index)
@@ -612,6 +643,7 @@ struct PluginRack::RealtimePool
     std::atomic<int> left_ { 0 };
     std::atomic<bool> stop_ { false };
     int count_ = 0;
+    int lastWaitNs_ = 0;
     PluginRack* rack_ = nullptr;
     bool stopped_ = false;
 };
@@ -896,8 +928,54 @@ void PluginRack::setActiveChannels(int count)
     const int previous = activeChannels_.exchange(count, std::memory_order_relaxed);
     if (previous == count)
         return;
-    std::lock_guard<std::mutex> lock(lifeLock_);
-    publishUnlocked();
+
+    struct IdleNote
+    {
+        int channel = 0;
+        int slot = 0;
+        juce::String name;
+        juce::String identifier;
+        bool running = false;
+    };
+    std::vector<IdleNote> idle;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        publishUnlocked();
+        for (int channel = 0; channel < kMaxChannels; ++channel)
+        {
+            const int packed = routing_.inputPacked[static_cast<std::size_t>(channel)];
+            const bool runs = channelProcessesPlugins(channel, count, packed);
+            const bool ran = channelProcessesPlugins(channel, previous, packed);
+            for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            {
+                auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+                if (model.plugin == nullptr || model.plugin->description.name.isEmpty())
+                    continue;
+                // A hidden channel can still hold a smoothed percent from when it
+                // was open. That leftover is what kept the meter and the journal
+                // saying the plugin was running after Offline -> 1 channel.
+                int leftover = 0;
+                if (! runs && model.plugin->gate != nullptr)
+                    leftover = model.plugin->gate->shownPercent.exchange(0, std::memory_order_relaxed);
+                if (runs == ran && leftover == 0)
+                    continue;
+                IdleNote note;
+                note.channel = channel;
+                note.slot = slot;
+                note.name = model.plugin->description.name;
+                note.identifier = pluginIdentifier(model.plugin->description);
+                note.running = runs;
+                idle.push_back(std::move(note));
+            }
+        }
+    }
+    for (const auto& note : idle)
+    {
+        if (note.running)
+            tracePlugin(note.channel, note.slot, "active", note.name, note.identifier, "input is open");
+        else
+            tracePlugin(note.channel, note.slot, "idle", note.name, note.identifier, "no input on this channel");
+    }
 }
 
 void PluginRack::process(float* const* outputs,
@@ -911,8 +989,9 @@ void PluginRack::process(float* const* outputs,
     // A shorter callback is legal: the plugin was prepared for the maximum.
     // Re-preparing every time the device jitters (64, then 32, then 64)
     // restarts the plugin and is the dropout burst. Only a callback larger
-    // than the prepared maximum needs a new prepare.
-    if (numSamples > blockSize_ && blockSize_ > 0)
+    // than the prepared maximum needs a new prepare: numSamples > blockSize_.
+    int askedReprepare = 0;
+    if (blockAsksReprepare(numSamples, blockSize_))
     {
         const int previous = seenCallback_.load(std::memory_order_relaxed);
         if (previous == numSamples)
@@ -923,7 +1002,10 @@ void PluginRack::process(float* const* outputs,
             seenStreak_.store(1, std::memory_order_relaxed);
         }
         if (seenStreak_.load(std::memory_order_relaxed) >= 6)
+        {
             reprepareBlock_.store(numSamples, std::memory_order_relaxed);
+            askedReprepare = 1;
+        }
     }
     else if (numSamples > 0 && numSamples <= blockSize_)
     {
@@ -932,6 +1014,9 @@ void PluginRack::process(float* const* outputs,
 
     StallClock::get().audioPhase.store(kPhasePlugins, std::memory_order_relaxed);
     pluginPercentScratch_.store(0, std::memory_order_relaxed);
+    slowestNs_.store(0, std::memory_order_relaxed);
+    slowestChannel_.store(-1, std::memory_order_relaxed);
+    slowestSlot_.store(-1, std::memory_order_relaxed);
     const auto started = steadyNs();
     callbackEpoch_.fetch_add(1, std::memory_order_acq_rel);
     auto* graph = published_.load(std::memory_order_acquire);
@@ -952,11 +1037,16 @@ void PluginRack::process(float* const* outputs,
         jobGraph_ = graph;
         jobSamples_ = numSamples;
         int count = 0;
+        bool vst3Inline = false;
         const int limit = std::clamp(activeChannels, 0, kMaxChannels);
         for (int channel = 0; channel < limit; ++channel)
         {
             if (channelReset_[static_cast<std::size_t>(channel)].exchange(0, std::memory_order_acq_rel) != 0)
                 clearChannelMemory(*graph, channel);
+
+            // No input, hidden, or past the card: the plugin stays loaded and does not run.
+            if (! channelProcessesPlugins(channel, limit, routing.inputPacked[static_cast<std::size_t>(channel)]))
+                continue;
 
             const bool linkedRight = (channel & 1) == 1
                                      && stereoLink_[static_cast<std::size_t>(channel - 1)].load(std::memory_order_relaxed) != 0;
@@ -979,7 +1069,7 @@ void PluginRack::process(float* const* outputs,
             float* partner = nullptr;
             if ((channel & 1) == 0
                 && stereoLink_[static_cast<std::size_t>(channel)].load(std::memory_order_relaxed) != 0
-                && channel + 1 < limit
+                && channelProcessesPlugins(channel + 1, limit, routing.inputPacked[static_cast<std::size_t>(channel + 1)])
                 && channelIsOn(enabledLow, enabledHigh, channel + 1))
             {
                 const int packedRight = routing.outputPacked[static_cast<std::size_t>(channel + 1)];
@@ -989,18 +1079,51 @@ void PluginRack::process(float* const* outputs,
             if (! anyPlugin && ! delayed && partner == nullptr)
                 continue;
 
+            if (! vst3Inline)
+            {
+                for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+                    vst3Inline = vst3Inline || (graph->slots[channel][slot].vst3 && graph->slots[channel][slot].instance != nullptr);
+            }
             jobChannels_[count] = channel;
             jobOutputs_[count] = output;
             jobPartners_[count] = partner;
             ++count;
         }
 
-        if (count > 0 && pool_ != nullptr)
-            pool_->parallel(count, this);
-        else
+        // VST3 process stays on the audio thread. A worker would take the wrapper lock off that thread.
+        int waitNs = 0;
+        if (vst3Inline || count <= 1 || pool_ == nullptr || ! vst3ProcessOnAudioThread())
+        {
             for (int index = 0; index < count; ++index)
                 processJob(index);
+        }
+        else if (count > 0)
+        {
+            pool_->parallel(count, this);
+            waitNs = pool_->lastWaitNs();
+        }
+        blockNote_.vst3Inline = vst3Inline ? 1 : 0;
+        blockNote_.waitNs = waitNs;
     }
+    else
+    {
+        blockNote_.vst3Inline = 0;
+        blockNote_.waitNs = 0;
+    }
+
+    // Name is copied while this graph is still the in-use one. Releasing it
+    // first lets the message thread free the graph under the audio thread.
+    blockNote_.prepared = blockSize_;
+    blockNote_.reprepare = askedReprepare;
+    blockNote_.channel = slowestChannel_.load(std::memory_order_relaxed);
+    blockNote_.slot = slowestSlot_.load(std::memory_order_relaxed);
+    blockNote_.nanoseconds = slowestNs_.load(std::memory_order_relaxed);
+    blockNote_.name[0] = '\0';
+    if (graph != nullptr && blockNote_.channel >= 0 && blockNote_.slot >= 0
+        && blockNote_.channel < kMaxChannels && blockNote_.slot < kSlotsPerChannel)
+        copyPluginName(blockNote_.name,
+                       static_cast<int>(sizeof(blockNote_.name)),
+                       graph->slots[blockNote_.channel][blockNote_.slot].name);
 
     inUse_.store(nullptr, std::memory_order_release);
     callbackEpoch_.fetch_add(1, std::memory_order_release);
@@ -1258,6 +1381,16 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 const int shown = smoothCpuPercent(previous, instant);
                 gate->shownPercent.store(shown, std::memory_order_relaxed);
                 pluginPercentScratch_.fetch_add(shown, std::memory_order_relaxed);
+                const int ns = static_cast<int>(elapsed > static_cast<std::uint64_t>(2147483647) ? 2147483647 : elapsed);
+                int prior = slowestNs_.load(std::memory_order_relaxed);
+                while (ns > prior)
+                {
+                    if (! slowestNs_.compare_exchange_weak(prior, ns, std::memory_order_relaxed))
+                        continue;
+                    slowestChannel_.store(channel, std::memory_order_relaxed);
+                    slowestSlot_.store(slot, std::memory_order_relaxed);
+                    break;
+                }
                 gate->depth.fetch_sub(1, std::memory_order_release);
             }
         }
@@ -1377,8 +1510,11 @@ DspLoad PluginRack::dspLoad() const
 
     std::lock_guard<std::mutex> lock(lifeLock_);
     float pluginSum = 0.0f;
+    const int shown = activeChannels_.load(std::memory_order_relaxed);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
+            continue;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -1530,6 +1666,7 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
             {
                 plugin->instance->prepareToPlay(rate, block);
                 plugin->instance->reset();
+                plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
             }
         }
     });
@@ -1541,8 +1678,6 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
             if (plugin == nullptr)
                 continue;
             plugin->prepared = plugin->instance != nullptr;
-            if (plugin->instance != nullptr)
-                plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
         }
         publishUnlocked();
     }
@@ -1632,11 +1767,29 @@ void PluginRack::beginLoad(int channel,
     }
     channelWork_[static_cast<std::size_t>(channel)].ticket = ticket;
 
-    if (isBlocked(description) || isSlotBlocked(channel, slot))
+    std::vector<SlotBlock> slotBlocks;
+    slotBlocks.reserve(blockedSlots_.size());
+    for (const auto& block : blockedSlots_)
     {
-        // Unload the instance and keep the slot. The session file still has
-        // the plugin description and its state, so the file stays compatible.
+        SlotBlock item;
+        item.channel = block.channel;
+        item.slot = block.slot;
+        item.identifier = block.identifier.toStdString();
+        slotBlocks.push_back(std::move(item));
+    }
+    const auto incomingId = pluginIdentifier(description).toStdString();
+    const auto admit = admitPluginIntoSlot(channel,
+                                           slot,
+                                           incomingId,
+                                           slotBlocks.data(),
+                                           static_cast<int>(slotBlocks.size()),
+                                           isBlocked(description));
+    if (! admit.load)
+    {
+        // The same plugin stays off. The log always says why it did not load.
+        // A different plugin takes the branch below and the slot is freed.
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
+        const auto reason = juce::String(admit.reason != nullptr ? admit.reason : kSlotCrashKeepOff);
         auto parkedSlot = std::make_shared<HostedPlugin>();
         parkedSlot->description = description;
         parkedSlot->state = state;
@@ -1647,17 +1800,20 @@ void PluginRack::beginLoad(int channel,
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             model.loading = false;
-            model.error = name + " may have crashed YouHost. It is turned off.";
+            model.error = name + " " + reason;
             previous = std::move(model.plugin);
             model.plugin = std::move(parkedSlot);
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
         return;
     }
+    if (admit.clearSlot)
+        clearCrashBlock(channel, slot);
 
     double rate = 48000.0;
     int block = 512;
@@ -1765,6 +1921,8 @@ void PluginRack::finishLoad(int channel,
                             const juce::String& error,
                             std::uint64_t restoreGeneration)
 {
+    const auto refusedName = description.name;
+    const auto refusedId = pluginIdentifier(description);
     // createPluginInstance has returned. Later paints are not part of the load.
     touchMessageBeat();
     StallClock::get().messagePhase.store(kPhaseMessage, std::memory_order_relaxed);
@@ -1800,6 +1958,10 @@ void PluginRack::finishLoad(int channel,
         }
         if (ownsGate)
             finishChannelWork(channel, ticket);
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "did-not-load  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1)
+                                          + "  " + refusedName
+                                          + "  reason=the slot changed before the plugin was ready");
         return;
     }
 
@@ -1875,8 +2037,9 @@ void PluginRack::finishLoad(int channel,
     bool openIt = false;
     bool loaded = false;
     bool replaced = false;
-    juce::String loadedName = description.name;
-    juce::String loadedId = pluginIdentifier(description);
+    bool channelFeeds = false;
+    juce::String loadedName = refusedName;
+    juce::String loadedId = refusedId;
     std::shared_ptr<HostedPlugin> previous;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1897,20 +2060,33 @@ void PluginRack::finishLoad(int channel,
             {
                 loadedName = model.plugin->description.name;
                 loadedId = pluginIdentifier(model.plugin->description);
+                channelFeeds = channelProcessesPlugins(channel,
+                                                       activeChannels_.load(std::memory_order_relaxed),
+                                                       routing_.inputPacked[static_cast<std::size_t>(channel)]);
             }
         }
     }
     if (! replaced)
     {
         bury(std::move(hosted), nullptr);
+        // The slot already belongs to a newer load. A journal upsert here would
+        // replace that plugin's mark, so the reason goes to the log only.
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "did-not-load  ch " + juce::String(channel + 1) + " slot " + juce::String(slot + 1)
+                                          + "  " + refusedName
+                                          + "  reason=the slot changed before the plugin was ready");
         if (ownsGate)
             finishChannelWork(channel, ticket);
         return;
     }
     bury(std::move(previous), nullptr);
 
-    tracePlugin(channel, slot, loaded ? "active" : "unload", loadedName, loadedId,
-                loaded ? juce::String() : failureReason);
+    if (! loaded)
+        tracePlugin(channel, slot, "unload", loadedName, loadedId, failureReason);
+    else if (! channelFeeds)
+        tracePlugin(channel, slot, "idle", loadedName, loadedId, "no input on this channel");
+    else
+        tracePlugin(channel, slot, "active", loadedName, loadedId);
 
     if (notify)
         notifyDirty();
@@ -2185,13 +2361,34 @@ void PluginRack::setBypassed(int channel, int slot, bool bypassed)
     if (! validSlot(channel, slot))
         return;
 
+    juce::PluginDescription retry;
+    juce::MemoryBlock state;
+    int fold = 0;
+    bool reload = false;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
         auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
         if (model.plugin == nullptr)
             return;
-        model.plugin->bypassed = bypassed;
-        publishUnlocked();
+        // A crash-parked slot has no instance. "Turn bypass off" frees it and loads.
+        if (! bypassed && model.plugin->instance == nullptr && model.error.isNotEmpty())
+        {
+            retry = model.plugin->description;
+            state = model.plugin->state;
+            fold = model.plugin->stereoFold;
+            reload = true;
+        }
+        else
+        {
+            model.plugin->bypassed = bypassed;
+            publishUnlocked();
+        }
+    }
+    if (reload)
+    {
+        clearCrashBlock(channel, slot);
+        beginLoad(channel, slot, std::move(retry), std::move(state), false, true, false, fold, 0);
+        return;
     }
     notifyDirty();
 }
@@ -2714,8 +2911,11 @@ void PluginRack::rememberActiveNames()
             text[used++] = *chunk++;
     };
 
+    const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
+            continue;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
@@ -2769,7 +2969,7 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
     const int shown = std::clamp(activeChannels_.load(std::memory_order_relaxed), 0, kMaxChannels);
     for (int channel = 0; channel < kMaxChannels; ++channel)
     {
-        if (channel >= shown)
+        if (! channelProcessesPlugins(channel, shown, routing_.inputPacked[static_cast<std::size_t>(channel)]))
         {
             chainSamples_[static_cast<std::size_t>(channel)] = 0;
             inputs[static_cast<std::size_t>(channel)] = ChannelLatencyInput { 0, false, -1 };
@@ -2799,6 +2999,8 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
             live.processChannels = std::max(live.totalInputs, live.totalOutputs);
             live.stereoFold = model.plugin->stereoFold;
             live.prepared = model.plugin->prepared;
+            live.vst3 = model.plugin->description.pluginFormatName == "VST3";
+            copyPluginName(live.name, static_cast<int>(sizeof(live.name)), model.plugin->description.name);
             graph->keepAlive.push_back(model.plugin);
         }
 
@@ -2868,7 +3070,7 @@ void PluginRack::setBlockedIdentifiers(const juce::StringArray& identifiers)
     blocked_ = identifiers;
 }
 
-void PluginRack::setBlockedSlots(const std::vector<std::pair<int, int>>& slots)
+void PluginRack::setBlockedSlots(const std::vector<CrashBlock>& slots)
 {
     blockedSlots_ = slots;
 }
@@ -2982,9 +3184,37 @@ bool PluginRack::isBlocked(const juce::PluginDescription& description) const
 bool PluginRack::isSlotBlocked(int channel, int slot) const
 {
     for (const auto& blocked : blockedSlots_)
-        if (blocked.first == channel && blocked.second == slot)
+        if (blocked.channel == channel && blocked.slot == slot)
             return true;
     return false;
+}
+
+void PluginRack::clearCrashBlock(int channel, int slot)
+{
+    juce::String identifier;
+    std::vector<CrashBlock> kept;
+    kept.reserve(blockedSlots_.size());
+    for (const auto& blocked : blockedSlots_)
+    {
+        if (blocked.channel == channel && blocked.slot == slot)
+        {
+            identifier = blocked.identifier;
+            continue;
+        }
+        kept.push_back(blocked);
+    }
+    blockedSlots_.swap(kept);
+    if (identifier.isEmpty())
+        return;
+    for (const auto& blocked : blockedSlots_)
+        if (blocked.identifier == identifier)
+            return;
+    blocked_.removeString(identifier);
+}
+
+PluginRack::BlockPluginNote PluginRack::blockPluginNote() const noexcept
+{
+    return blockNote_;
 }
 
 void PluginRack::tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)

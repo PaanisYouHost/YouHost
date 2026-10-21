@@ -156,8 +156,30 @@ public:
     void setPluginSlotHandler(std::function<void(int channel)> handler);
     void setDirtyHandler(std::function<void()> handler);
     void setGlobalKeyListener(juce::KeyListener* listener);
+    struct CrashBlock
+    {
+        int channel = -1;
+        int slot = -1;
+        juce::String identifier;
+    };
+
+    // Filled by the audio thread during process(). Read on that same thread
+    // before the callback returns, then copied into the timing ring.
+    struct BlockPluginNote
+    {
+        int prepared = 0;
+        int reprepare = 0;
+        int waitNs = 0;
+        int vst3Inline = 0;
+        int channel = -1;
+        int slot = -1;
+        int nanoseconds = 0;
+        char name[40] {};
+    };
+
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
-    void setBlockedSlots(const std::vector<std::pair<int, int>>& slots);
+    void setBlockedSlots(const std::vector<CrashBlock>& slots);
+    BlockPluginNote blockPluginNote() const noexcept;
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason)> trace);
     void releaseForQuit();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
@@ -424,7 +446,12 @@ private:
     static void completeMessageJob(const std::shared_ptr<MessageThreadJob>& job);
     bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
-    std::vector<std::pair<int, int>> blockedSlots_;
+    std::vector<CrashBlock> blockedSlots_;
+    void clearCrashBlock(int channel, int slot);
+    BlockPluginNote blockNote_ {};
+    std::atomic<int> slowestNs_ { 0 };
+    std::atomic<int> slowestChannel_ { -1 };
+    std::atomic<int> slowestSlot_ { -1 };
     std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace_;
 };
 
