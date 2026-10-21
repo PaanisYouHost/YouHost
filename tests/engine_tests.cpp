@@ -6303,6 +6303,16 @@ void testStability106()
     const auto croppedEditor = youhost::planEditorWindow(800, 600, true, 200, 150, 2000, 1500, 2.0f, 1920, 1080, smallFrame);
     CHECK(croppedEditor.hostScale == 1.0f);
     CHECK(youhost::editorHostScale(2.0f) == 1.0f);
+    CHECK(youhost::editorWaitsForPeerScale("VST3"));
+    CHECK(youhost::editorWaitsForPeerScale("AudioUnit") == false);
+    CHECK(youhost::editorWaitsForPeerScale("AU") == false);
+    CHECK(youhost::editorWaitsForPeerScale(nullptr) == false);
+    // Vastaus VST3 reports one size, then a different size once content scale
+    // is applied. The window keeps the later size. The Audio Unit size is
+    // already in points, so the first size stays.
+    CHECK(youhost::editorFrameAfterScale(true, 1600, 800) == 800);
+    CHECK(youhost::editorFrameAfterScale(false, 800, 400) == 800);
+    CHECK(youhost::editorFrameAfterScale(true, 900, 0) == 900);
     CHECK(croppedEditor.width >= 800);
     CHECK(croppedEditor.height >= 600);
     CHECK(! croppedEditor.restoreSaved);
@@ -6340,6 +6350,12 @@ void testStability106()
     CHECK(openNow.find("pauseGate") == std::string::npos);
     CHECK(openNow.find("createEditorAndMakeActive") != std::string::npos);
     CHECK(openNow.find("planEditorWindow") != std::string::npos);
+    CHECK(openNow.find("editorWaitsForPeerScale") != std::string::npos);
+    CHECK(openNow.find("settleAfterPeerScale") != std::string::npos);
+    CHECK(openNow.find("setResizeLimits") != std::string::npos);
+    const auto listenerNow = sliceBetween(rackNow, "void componentMovedOrResized", "std::function<void(int, int)> onClose_");
+    CHECK(listenerNow.find("waitsForPeerScale_") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("after the plugin's content scale") != std::string::npos);
     const auto beginNow = sliceBetween(rackNow, "void PluginRack::beginLoad", "void PluginRack::finishLoad");
     const auto loadingAt = beginNow.find("\"loading\"");
     const auto admitAt = beginNow.find("admitPluginIntoSlot");

@@ -179,6 +179,26 @@ inline float editorHostScale(float displayScale) noexcept
     return 1.0f;
 }
 
+// An Audio Unit view reports its size in points, so the first size is the
+// one the window keeps. A VST3 view applies content scale after the window
+// has a peer, and the size before that scale is the wrong frame.
+inline bool editorWaitsForPeerScale(const char* formatName) noexcept
+{
+    return formatName != nullptr && formatName[0] == 'V' && formatName[1] == 'S'
+        && formatName[2] == 'T' && formatName[3] == '3' && formatName[4] == '\0';
+}
+
+// VST3 keeps the size from after the peer scale. An Audio Unit keeps the size
+// it reported first.
+inline int editorFrameAfterScale(bool waitsForPeerScale, int sizeBeforePeer, int sizeAfterPeer) noexcept
+{
+    if (sizeAfterPeer < 1)
+        sizeAfterPeer = sizeBeforePeer;
+    if (sizeBeforePeer < 1)
+        sizeBeforePeer = sizeAfterPeer;
+    return waitsForPeerScale ? sizeAfterPeer : sizeBeforePeer;
+}
+
 struct EditorOpenPlan
 {
     int width = 0;

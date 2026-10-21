@@ -222,7 +222,7 @@ jobs:
 
             - A channel with no input, a hidden channel, or a channel past the card does not run its plugins and does not use CPU.
             - A message-thread stall does not bypass plugins or pass the dry input. If the open card briefly reports fewer active channels, those plugins stay in the signal. YouHost does not reopen the card for that dip.
-            - A plugin window opens at the plugin's own size and scale, and only resizes as far as the plugin allows. Every load attempt is logged with the format and the slot, including an Audio Unit that does not open. Audio Units that instantiate asynchronously are included in the scan.
+            - A plugin window opens at the plugin's own size and scale, and only resizes as far as the plugin allows. A VST3 window takes that size after the plugin's content scale, the same way an Audio Unit already fits its view. Every load attempt is logged with the format and the slot, including an Audio Unit that does not open. Audio Units that instantiate asynchronously are included in the scan.
             - Choosing a plugin always loads it, in any slot. If that plugin crashed last time, YouHost shows a small note: this plugin crashed last time. Open session without this plugin leaves that plugin out of this launch. The slot stays empty and can take any plugin. The session file keeps it until the next save.
             - Each audio block records how long the stages and the slowest plugin took. A dropout line names that plugin. The DSP meter follows the callback, so it cannot sit at a latched plugin sum.
             - VST3 process runs on the audio thread. A worker thread is not used for it.

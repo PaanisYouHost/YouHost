@@ -649,6 +649,63 @@ struct PluginRack::RealtimePool
     bool stopped_ = false;
 };
 
+// The VST3 editor's own constrainer speaks the plugin's scaled coordinates.
+// The window adds the native frame and does not replace those limits with a
+// size measured before the content scale existed.
+class Vst3EditorConstrainer : public juce::BorderedComponentBoundsConstrainer
+{
+public:
+    explicit Vst3EditorConstrainer(juce::DocumentWindow& windowIn)
+        : window_(windowIn)
+    {
+    }
+
+    juce::ComponentBoundsConstrainer* getWrappedConstrainer() const override
+    {
+        if (auto* editor = dynamic_cast<juce::AudioProcessorEditor*>(window_.getContentComponent()))
+            return editor->getConstrainer();
+        return nullptr;
+    }
+
+    juce::BorderSize<int> getAdditionalBorder() const override
+    {
+        juce::BorderSize<int> native;
+        if (auto* peer = window_.getPeer())
+            if (const auto frame = peer->getFrameSizeIfPresent())
+                native = *frame;
+        return native.addedTo(window_.getContentComponentBorder());
+    }
+
+    void checkBounds(juce::Rectangle<int>& bounds,
+                     const juce::Rectangle<int>& previousBounds,
+                     const juce::Rectangle<int>& limits,
+                     bool isStretchingTop,
+                     bool isStretchingLeft,
+                     bool isStretchingBottom,
+                     bool isStretchingRight) override
+    {
+        if (auto* editor = dynamic_cast<juce::AudioProcessorEditor*>(window_.getContentComponent()))
+        {
+            if (! editor->isResizable())
+            {
+                bounds = previousBounds.withPosition(bounds.getPosition());
+                return;
+            }
+        }
+
+        juce::BorderedComponentBoundsConstrainer::checkBounds(bounds,
+                                                              previousBounds,
+                                                              limits,
+                                                              isStretchingTop,
+                                                              isStretchingLeft,
+                                                              isStretchingBottom,
+                                                              isStretchingRight);
+    }
+
+private:
+    juce::DocumentWindow& window_;
+};
+
 static juce::String editorWindowKey(const juce::PluginDescription& description)
 {
     auto keep = [](juce::String text)
@@ -736,9 +793,47 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
             onClose_(channel_, slot_);
     }
 
+    void setWaitsForPeerScale(bool waits) noexcept
+    {
+        waitsForPeerScale_ = waits;
+    }
+
+    void rememberSizeBeforePeerScale(int width, int height) noexcept
+    {
+        widthBeforePeer_ = width;
+        heightBeforePeer_ = height;
+    }
+
+    void noteSavedPosition(bool hasPosition) noexcept
+    {
+        hasSavedPosition_ = hasPosition;
+    }
+
+    // Runs after the VST3 content-scale callback. The editor's size is the
+    // scaled one. Audio Units do not use this; their first size is already
+    // in points.
+    void settleAfterPeerScale()
+    {
+        auto* editor = dynamic_cast<juce::AudioProcessorEditor*>(getContentComponent());
+        if (editor == nullptr)
+            return;
+        const int width = editorFrameAfterScale(true, widthBeforePeer_, editor->getWidth());
+        const int height = editorFrameAfterScale(true, heightBeforePeer_, editor->getHeight());
+        if (width > 0 && height > 0 && (getWidth() != width || getHeight() != height))
+            setSize(width, height);
+        if (! hasSavedPosition_)
+            centreWithSize(getWidth(), getHeight());
+        if (vst3Limits_ == nullptr)
+            vst3Limits_ = std::make_unique<Vst3EditorConstrainer>(*this);
+        setConstrainer(vst3Limits_.get());
+    }
+
     void componentMovedOrResized(juce::Component& component, bool, bool wasResized) override
     {
-        if (! wasResized || fitting_ || &component != getContentComponent())
+        // VST3 reports a new size when its content scale arrives. Locking the
+        // frame onto the earlier size leaves the scaled view cropped or stretched.
+        // The window already follows that editor through its content component.
+        if (waitsForPeerScale_ || ! wasResized || fitting_ || &component != getContentComponent())
             return;
         const int contentW = component.getWidth();
         const int contentH = component.getHeight();
@@ -767,7 +862,12 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
     int slot_ = -1;
     int frameW_ = 0;
     int frameH_ = 0;
+    int widthBeforePeer_ = 0;
+    int heightBeforePeer_ = 0;
     bool fitting_ = false;
+    bool waitsForPeerScale_ = false;
+    bool hasSavedPosition_ = false;
+    std::unique_ptr<Vst3EditorConstrainer> vst3Limits_;
 };
 
 struct PluginRack::DeferredPluginRelease
@@ -2647,8 +2747,11 @@ void PluginRack::openEditor(int channel, int slot)
         settings_,
         key);
     window->place(channel, slot);
+    const bool waitForScale = editorWaitsForPeerScale(plugin->description.pluginFormatName.toRawUTF8());
+    window->setWaitsForPeerScale(waitForScale);
     window->setContentOwned(editor, true);
     window->watchContent();
+    window->rememberSizeBeforePeerScale(editor->getWidth(), editor->getHeight());
     const int borderW = std::max(0, window->getWidth() - editor->getWidth());
     const int borderH = std::max(0, window->getHeight() - editor->getHeight());
     int minWidth = 0;
@@ -2703,18 +2806,39 @@ void PluginRack::openEditor(int channel, int slot)
                                        screenHeight,
                                        saved);
     window->setResizable(plan.resizable, false);
-    if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
-        window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
-    if (plan.width > 0 && plan.height > 0)
+    // VST3 content scale arrives on a later turn, after this window has a peer.
+    // The size measured above is the unscaled one. Locking the frame to it
+    // crops the scaled view. An Audio Unit's size is already in points.
+    if (! waitForScale)
     {
+        if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
+            window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
+        if (plan.width > 0 && plan.height > 0)
+        {
+            if (saved.valid)
+                window->setBounds(saved.x, saved.y, plan.width, plan.height);
+            else
+                window->centreWithSize(plan.width, plan.height);
+        }
+    }
+    else
+    {
+        window->noteSavedPosition(saved.valid);
         if (saved.valid)
-            window->setBounds(saved.x, saved.y, plan.width, plan.height);
-        else
-            window->centreWithSize(plan.width, plan.height);
+            window->setTopLeftPosition(saved.x, saved.y);
     }
     if (commandKeys_ != nullptr)
         window->addKeyListener(commandKeys_);
     window->setVisible(true);
+    if (waitForScale)
+    {
+        juce::Component::SafePointer<EditorWindow> safeWindow(window.get());
+        juce::MessageManager::callAsync([safeWindow]
+        {
+            if (safeWindow != nullptr)
+                safeWindow->settleAfterPeerScale();
+        });
+    }
     editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
 }
 
