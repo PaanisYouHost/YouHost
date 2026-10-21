@@ -1976,30 +1976,30 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
     // Recording is not touched. This runs before the session window, and it
     // must not stop a take if it is ever reached while audio is up.
     const auto skip = crashPluginsToSkip(journal_);
-    juce::StringArray blocked;
+    juce::StringArray warned;
+    std::vector<PluginRack::CrashBlock> omit;
+    omit.reserve(skip.size());
     for (const auto& mark : skip)
     {
-        if (mark.identifier.empty())
-            continue;
-        const auto identifier = juce::String::fromUTF8(mark.identifier.c_str());
-        blocked.addIfNotAlreadyThere(identifier);
-        settings_.addSuspiciousPlugin(identifier);
+        PluginRack::CrashBlock block;
+        block.channel = mark.channel;
+        block.slot = mark.slot;
+        if (! mark.identifier.empty())
+        {
+            block.identifier = juce::String::fromUTF8(mark.identifier.c_str());
+            warned.addIfNotAlreadyThere(block.identifier);
+            settings_.addSuspiciousPlugin(block.identifier);
+        }
+        omit.push_back(std::move(block));
     }
 
-    if (leaveOff && rack_ != nullptr)
+    // The warning list is not a load gate. "Open session without this plugin"
+    // only skips the automatic restore. Choosing a plugin still loads it.
+    if (rack_ != nullptr)
     {
-        std::vector<PluginRack::CrashBlock> blocks;
-        blocks.reserve(skip.size());
-        for (const auto& mark : skip)
-        {
-            PluginRack::CrashBlock block;
-            block.channel = mark.channel;
-            block.slot = mark.slot;
-            block.identifier = juce::String::fromUTF8(mark.identifier.c_str());
-            blocks.push_back(std::move(block));
-        }
-        rack_->setBlockedIdentifiers(blocked);
-        rack_->setBlockedSlots(blocks);
+        rack_->rememberCrashedPlugins(warned);
+        if (leaveOff)
+            rack_->omitFromNextRestore(omit);
     }
 
     journal_.marks.clear();

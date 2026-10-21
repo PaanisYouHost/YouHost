@@ -6150,21 +6150,56 @@ void testStability106()
     const auto named = dropout + youhost::formatDropoutSlowest(1, 2, "De-Feedback", 140);
     CHECK(named.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
 
+    CHECK(std::string(youhost::kPluginCrashedLastTime) == "this plugin crashed last time");
+    CHECK(youhost::crashWarningNote(true) == youhost::kPluginCrashedLastTime);
+    CHECK(youhost::crashWarningNote(false) == nullptr);
+    CHECK(youhost::leaveOutOfThisLaunch(false, true) == false);
+    CHECK(youhost::leaveOutOfThisLaunch(true, true));
+    CHECK(youhost::leaveOutOfThisLaunch(true, false) == false);
     youhost::SlotBlock crashed;
     crashed.channel = 0;
     crashed.slot = 1;
     crashed.identifier = "vst3.proq";
+    const char* pluginIds[] = { "vst3.proq", "au.vastaus", "", "vst3.de-feedback" };
+    for (int channel = 0; channel < youhost::kMaxChannels; ++channel)
+    {
+        for (int slot = 0; slot < youhost::kSlotsPerChannel; ++slot)
+        {
+            const auto id = pluginIds[slot];
+            const auto chosen = youhost::admitPluginIntoSlot(channel, slot, id, &crashed, 1, true);
+            CHECK(chosen.load);
+            CHECK(chosen.reason != nullptr);
+            CHECK(std::string(chosen.reason) == youhost::kPluginCrashedLastTime);
+            const auto fresh = youhost::admitPluginIntoSlot(channel, slot, id, nullptr, 0, false);
+            CHECK(fresh.load);
+            CHECK(fresh.reason == nullptr);
+            CHECK(fresh.clearSlot == false);
+        }
+    }
     const auto again = youhost::admitPluginIntoSlot(0, 1, "vst3.proq", &crashed, 1, true);
-    CHECK(! again.load);
-    CHECK(again.reason != nullptr);
-    CHECK(std::string(again.reason).find("turned off") != std::string::npos);
+    CHECK(again.load);
+    CHECK(again.clearSlot);
+    CHECK(std::string(again.reason) == youhost::kPluginCrashedLastTime);
     const auto replacement = youhost::admitPluginIntoSlot(0, 1, "vst3.de-feedback", &crashed, 1, false);
     CHECK(replacement.load);
     CHECK(replacement.clearSlot);
     CHECK(replacement.reason == nullptr);
     const auto after = youhost::admitPluginIntoSlot(0, 1, "au.other", nullptr, 0, false);
     CHECK(after.load);
-    CHECK(! after.clearSlot);
+    CHECK(after.clearSlot == false);
+    youhost::SlotBlock unknown;
+    unknown.channel = 3;
+    unknown.slot = 2;
+    const auto unknownChoice = youhost::admitPluginIntoSlot(3, 2, "", &unknown, 1, false);
+    CHECK(unknownChoice.load);
+    CHECK(std::string(unknownChoice.reason) == youhost::kPluginCrashedLastTime);
+    youhost::SlotBlock listed;
+    listed.channel = 0;
+    listed.slot = 0;
+    listed.identifier = "au.vastaus";
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &listed, 1));
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &listed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(1, 0, "au.vastaus", &listed, 1) == false);
 
     youhost::CrashJournal first;
     youhost::CrashMark proq;
@@ -6186,8 +6221,8 @@ void testStability106()
     const auto history = youhost::readCrashJournal(saved);
     CHECK(history.marks.size() == 1);
     CHECK(history.marks[0].name == "Pro-Q 4");
-    // Crash, restart, choose a different plugin in the same slot. The crashed
-    // plugin stays off. The new one is admitted and the slot block clears.
+    // Crash, restart, choose the same plugin or another one. Both load.
+    // The same plugin only adds the warning note.
     const auto crashRead = youhost::readLatestCrashJournal(saved);
     const auto skip = youhost::crashPluginsToSkip(crashRead);
     CHECK(skip.size() == 1);
@@ -6197,14 +6232,15 @@ void testStability106()
     parked.slot = skip[0].slot;
     parked.identifier = skip[0].identifier;
     const auto retrySame = youhost::admitPluginIntoSlot(parked.channel, parked.slot, parked.identifier, &parked, 1, true);
-    CHECK(! retrySame.load);
-    CHECK(retrySame.reason != nullptr);
+    CHECK(retrySame.load);
+    CHECK(std::string(retrySame.reason) == youhost::kPluginCrashedLastTime);
     const auto chosen = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", &parked, 1, false);
     CHECK(chosen.load);
     CHECK(chosen.clearSlot);
+    CHECK(chosen.reason == nullptr);
     const auto works = youhost::admitPluginIntoSlot(parked.channel, parked.slot, "vst3.pro-mb", nullptr, 0, false);
     CHECK(works.load);
-    CHECK(! works.clearSlot);
+    CHECK(works.clearSlot == false);
     std::string bulky = restarted;
     while (bulky.size() < 400)
         bulky = youhost::appendCrashGeneration(bulky, first);
@@ -6314,9 +6350,19 @@ void testStability106()
     CHECK(catalogueNow.find("AudioUnit scan listed") != std::string::npos);
     CHECK(catalogueNow.find("formatScanFailureLine") != std::string::npos);
 
-    CHECK(youhost::crashParkedSlotLabel(0, "Vastaus") == "1 Vastaus left off");
-    CHECK(std::string(youhost::kSlotRetryClick) == "Click to load it again.");
-    CHECK(std::string(youhost::kSlotLoadAgain) == "Load again");
+    CHECK(beginNow.find("leaveOutOfThisLaunch") != std::string::npos);
+    CHECK(beginNow.find("! admit.load") == std::string::npos);
+    CHECK(beginNow.find("->bypassed = true") == std::string::npos);
+    CHECK(beginNow.find("kPluginCrashedLastTime") != std::string::npos);
+    const auto choiceNow = sliceBetween(readWorkspaceFile("src/engine/AudioEngine.cpp"),
+                                        "void AudioEngine::acceptCrashChoice",
+                                        "void AudioEngine::prepareForQuit");
+    CHECK(choiceNow.find("rememberCrashedPlugins") != std::string::npos);
+    CHECK(choiceNow.find("omitFromNextRestore") != std::string::npos);
+    CHECK(choiceNow.find("setBlockedSlots") == std::string::npos);
+    CHECK(choiceNow.find("setBlockedIdentifiers") == std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("this plugin crashed last time") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("this plugin crashed last time") != std::string::npos);
     youhost::SlotBlock held[1];
     held[0].channel = 0;
     held[0].slot = 0;
@@ -6340,20 +6386,22 @@ void testStability106()
     CHECK(remain == 1);
     CHECK(youhost::identifierHeldBySlot(both, remain, stillHeld));
     const auto blockedId = youhost::admitPluginIntoSlot(0, 0, stillHeld, both, remain, true);
-    CHECK(! blockedId.load);
+    CHECK(blockedId.load);
+    CHECK(std::string(blockedId.reason) == youhost::kPluginCrashedLastTime);
     const auto removeNow = sliceBetween(rackNow, "void PluginRack::removePluginNow", "void PluginRack::enqueueChannel");
     CHECK(removeNow.find("clearCrashBlock") != std::string::npos);
     CHECK(removeNow.find("kSlotFreedReason") != std::string::npos);
     const auto pageNow = readWorkspaceFile("src/ui/PluginPage.cpp");
     CHECK(pageNow.find("Turn bypass off") != std::string::npos);
-    CHECK(pageNow.find("kSlotLoadAgain") != std::string::npos);
-    CHECK(pageNow.find("kSlotRetryClick") != std::string::npos);
-    CHECK(pageNow.find("crashParked") != std::string::npos);
-    CHECK(pageNow.find("setSlotBypassed(channel_, slot, false)") != std::string::npos);
+    CHECK(pageNow.find("kSlotLoadAgain") == std::string::npos);
+    CHECK(pageNow.find("kSlotRetryClick") == std::string::npos);
+    CHECK(pageNow.find("crashParked") == std::string::npos);
+    CHECK(pageNow.find("left off") == std::string::npos);
+    CHECK(pageNow.find("source.note") != std::string::npos);
 
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
-              << "%, crash slot accepts a new plugin\n";
+              << "%, any plugin loads in any slot\n";
 }
 
 } // namespace

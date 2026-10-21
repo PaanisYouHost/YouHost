@@ -1908,45 +1908,47 @@ void PluginRack::beginLoad(int channel,
     }
     const auto incomingId = pluginIdentifier(description).toStdString();
     const auto formatName = description.pluginFormatName;
-    // The attempt is logged before the crash-slot check. A refused Audio Unit
-    // still names the format, the slot, and why it stayed off.
+    // The attempt is logged before anything else. Choosing a plugin always loads it.
     tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description), {}, formatName);
-    const auto admit = admitPluginIntoSlot(channel,
-                                           slot,
-                                           incomingId,
-                                           slotBlocks.data(),
-                                           static_cast<int>(slotBlocks.size()),
-                                           isBlocked(description));
-    if (! admit.load)
+    // The dialog "Open session without this plugin" skips this automatic restore
+    // only. The slot stays empty. A later manual choice uses generation 0 and loads.
+    if (leaveOutOfThisLaunch(restoreGeneration != 0, omittedFromThisLaunch(channel, slot, incomingId)))
     {
-        // The same plugin stays off. The log always says why it did not load.
-        // A different plugin takes the branch below and the slot is freed.
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
-        const auto reason = juce::String(admit.reason != nullptr ? admit.reason : kSlotCrashKeepOff);
-        auto parkedSlot = std::make_shared<HostedPlugin>();
-        parkedSlot->description = description;
-        parkedSlot->state = state;
-        parkedSlot->bypassed = true;
-        parkedSlot->stereoFold = stereoFold;
         std::shared_ptr<HostedPlugin> previous;
         {
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             model.loading = false;
-            model.error = name + " " + reason;
+            model.error.clear();
+            model.note = kPluginCrashedLastTime;
             previous = std::move(model.plugin);
-            model.plugin = std::move(parkedSlot);
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
-        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason, formatName);
+        keepPluginInSessionFile(channel, slot, description, state, bypassed, stereoFold);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), kLeftOutOfThisLaunch, formatName);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
         return;
     }
+    dropKeptPlugin(channel, slot);
+    const auto admit = admitPluginIntoSlot(channel,
+                                           slot,
+                                           incomingId,
+                                           slotBlocks.data(),
+                                           static_cast<int>(slotBlocks.size()),
+                                           crashedBefore(description));
     if (admit.clearSlot)
         clearCrashBlock(channel, slot);
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        model.note = admit.reason != nullptr ? juce::String(admit.reason) : juce::String();
+    }
+    if (admit.reason != nullptr)
+        tracePlugin(channel, slot, "warn", description.name, pluginIdentifier(description), juce::String(admit.reason), formatName);
 
     double rate = 48000.0;
     int block = 512;
@@ -2313,12 +2315,14 @@ void PluginRack::clearAll(bool markDirty)
                 model.ticket = ++ticketSource_;
                 model.loading = false;
                 model.error.clear();
+                model.note.clear();
                 if (model.plugin != nullptr)
                     retiredPlugins.push_back(std::move(model.plugin));
             }
         }
         for (auto& excluded : excluded_)
             excluded = false;
+        keptInSessionFile_.clear();
         bypassAll_.store(0, std::memory_order_relaxed);
         publishUnlocked();
     }
@@ -2760,12 +2764,14 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         auto& destination = snap.slots[static_cast<std::size_t>(slot)];
         destination.loading = model.loading;
         destination.error = model.error;
-        if (model.plugin == nullptr)
+        destination.note = model.note;
+        // A plugin with no instance is not on screen. Crash protection does not
+        // park a bypassed slot, so the button stays empty and can take any plugin.
+        if (model.plugin == nullptr || model.plugin->instance == nullptr)
             continue;
-        const bool parkedSlot = model.plugin->instance == nullptr && model.plugin->description.name.isNotEmpty();
-        destination.occupied = model.plugin->instance != nullptr || parkedSlot;
-        destination.bypassed = model.plugin->bypassed || parkedSlot;
-        destination.crashParked = parkedSlot && model.error.isNotEmpty();
+        destination.occupied = true;
+        destination.bypassed = model.plugin->bypassed;
+        destination.crashParked = false;
         destination.latencySamples = model.plugin->latencySamples;
         destination.inputChannels = model.plugin->inputChannels;
         destination.outputChannels = model.plugin->outputChannels;
@@ -2813,8 +2819,21 @@ void PluginRack::captureSession(SessionData& data)
                 auto& source = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
                 auto& slotOut = destination.slots[static_cast<std::size_t>(slot)];
                 slotOut = {};
-                if (source.plugin == nullptr)
+                if (source.plugin == nullptr || source.plugin->instance == nullptr)
+                {
+                    for (const auto& kept : keptInSessionFile_)
+                    {
+                        if (kept.channel != channel || kept.slot != slot || kept.description.name.isEmpty())
+                            continue;
+                        slotOut.occupied = true;
+                        slotOut.bypassed = kept.bypassed;
+                        slotOut.stereoFold = kept.stereoFold;
+                        slotOut.description = kept.description;
+                        slotOut.state = kept.state;
+                        break;
+                    }
                     continue;
+                }
                 // A parked slot has no instance. It is still written so the
                 // session file keeps the plugin after "Open session without this plugin".
                 const bool parkedSlot = source.plugin->instance == nullptr;
@@ -3266,6 +3285,78 @@ void PluginRack::setBlockedSlots(const std::vector<CrashBlock>& slots)
     blockedSlots_ = slots;
 }
 
+void PluginRack::rememberCrashedPlugins(const juce::StringArray& identifiers)
+{
+    crashedWarned_ = identifiers;
+}
+
+void PluginRack::omitFromNextRestore(const std::vector<CrashBlock>& slots)
+{
+    restoreOmit_ = slots;
+}
+
+bool PluginRack::crashedBefore(const juce::PluginDescription& description) const
+{
+    if (description.fileOrIdentifier.isNotEmpty() && crashedWarned_.contains(description.fileOrIdentifier))
+        return true;
+    const auto created = description.createIdentifierString();
+    return created.isNotEmpty() && crashedWarned_.contains(created);
+}
+
+bool PluginRack::omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const
+{
+    std::vector<SlotBlock> listed;
+    listed.reserve(restoreOmit_.size());
+    for (const auto& block : restoreOmit_)
+    {
+        SlotBlock item;
+        item.channel = block.channel;
+        item.slot = block.slot;
+        item.identifier = block.identifier.toStdString();
+        listed.push_back(std::move(item));
+    }
+    return pluginListedForThisLaunch(channel, slot, identifier, listed.data(), static_cast<int>(listed.size()));
+}
+
+void PluginRack::keepPluginInSessionFile(int channel,
+                                         int slot,
+                                         const juce::PluginDescription& description,
+                                         const juce::MemoryBlock& state,
+                                         bool bypassed,
+                                         int stereoFold)
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    for (auto& kept : keptInSessionFile_)
+    {
+        if (kept.channel != channel || kept.slot != slot)
+            continue;
+        kept.description = description;
+        kept.state = state;
+        kept.bypassed = bypassed;
+        kept.stereoFold = stereoFold;
+        return;
+    }
+    KeptSessionPlugin kept;
+    kept.channel = channel;
+    kept.slot = slot;
+    kept.description = description;
+    kept.state = state;
+    kept.bypassed = bypassed;
+    kept.stereoFold = stereoFold;
+    keptInSessionFile_.push_back(std::move(kept));
+}
+
+void PluginRack::dropKeptPlugin(int channel, int slot)
+{
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    std::vector<KeptSessionPlugin> kept;
+    kept.reserve(keptInSessionFile_.size());
+    for (auto& item : keptInSessionFile_)
+        if (item.channel != channel || item.slot != slot)
+            kept.push_back(std::move(item));
+    keptInSessionFile_.swap(kept);
+}
+
 void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
@@ -3441,12 +3532,19 @@ void PluginRack::removePluginNow(int channel, int slot)
         model.ticket = ++ticketSource_;
         model.loading = false;
         model.error.clear();
+        model.note.clear();
+        for (auto it = keptInSessionFile_.begin(); it != keptInSessionFile_.end();)
+        {
+            if (it->channel == channel && it->slot == slot)
+                it = keptInSessionFile_.erase(it);
+            else
+                ++it;
+        }
         plugin = std::move(model.plugin);
         publishUnlocked();
     }
     bury(std::move(plugin), std::move(window));
-    // Remove frees the crash hold. Leaving it set parked the same plugin
-    // again, so unloading twice still left the slot grey.
+    // Remove drops a remembered hold. The slot stays empty and can take any plugin.
     clearCrashBlock(channel, slot);
     if (identifier.isNotEmpty() || name.isNotEmpty())
         tracePlugin(channel, slot, "unload", name, identifier, held ? juce::String(kSlotFreedReason) : juce::String());

@@ -241,8 +241,7 @@ inline std::string rotateCrashHistory(std::string_view text, std::size_t maxByte
     return std::string(text.substr(mark + 4));
 }
 
-// A slot left off after a crash. A different plugin in that slot is loaded
-// and the block is cleared. The same plugin stays off.
+// Choosing a plugin always loads it. A previous crash is only a warning.
 struct SlotBlock
 {
     int channel = -1;
@@ -257,29 +256,44 @@ struct SlotAdmit
     const char* reason = nullptr;
 };
 
-inline constexpr const char* kSlotCrashSamePlugin = "may have crashed YouHost. It is turned off.";
-inline constexpr const char* kSlotCrashKeepOff = "this slot was left off after a crash. Choose another plugin.";
-inline constexpr const char* kSlotLeftOffLabel = "left off";
-inline constexpr const char* kSlotRetryClick = "Click to load it again.";
-inline constexpr const char* kSlotLoadAgain = "Load again";
+inline constexpr const char* kPluginCrashedLastTime = "this plugin crashed last time";
+inline constexpr const char* kLeftOutOfThisLaunch = "left out of this launch";
 inline constexpr const char* kSlotFreedReason = "the slot is free";
 
-// Grey slot text. Slot is stored 0-based and shown 1-based: index 0 is "1 Vastaus left off".
-inline std::string crashParkedSlotLabel(int slot, std::string_view name)
+// Small non-blocking note. nullptr when this plugin has no crash warning.
+inline const char* crashWarningNote(bool crashedBefore) noexcept
 {
-    std::string text = std::to_string(slot + 1);
-    text += " ";
-    if (name.empty())
-        text += "Plugin";
-    else
-        text.append(name.data(), name.size());
-    text += " ";
-    text += kSlotLeftOffLabel;
-    return text;
+    return crashedBefore ? kPluginCrashedLastTime : nullptr;
 }
 
-// Remove drops this slot's crash hold. The identifier stays blocked only while
-// another slot still names it. After that, the same plugin can be loaded.
+// "Open session without this plugin" skips the automatic restore only.
+// A manual choice (automaticRestore == false) always loads.
+inline bool leaveOutOfThisLaunch(bool automaticRestore, bool listedForThisLaunch) noexcept
+{
+    return automaticRestore && listedForThisLaunch;
+}
+
+// True when this channel and slot were named by the dialog for this launch.
+// A different plugin in that slot is not the one the user left out.
+inline bool pluginListedForThisLaunch(int channel,
+                                      int slot,
+                                      std::string_view identifier,
+                                      const SlotBlock* listed,
+                                      int count) noexcept
+{
+    if (listed == nullptr || count <= 0)
+        return false;
+    for (int index = 0; index < count; ++index)
+    {
+        if (listed[index].channel != channel || listed[index].slot != slot)
+            continue;
+        if (listed[index].identifier.empty() || listed[index].identifier == identifier)
+            return true;
+    }
+    return false;
+}
+
+// Drops one remembered slot. The identifier remains while another slot still names it.
 inline int releaseCrashSlot(SlotBlock* blocks,
                             int count,
                             int channel,
@@ -316,6 +330,8 @@ inline bool identifierHeldBySlot(const SlotBlock* blocks, int count, std::string
     return false;
 }
 
+// Any plugin, any slot. load is always true. A leftover hold is cleared.
+// reason is the warning note when this plugin crashed before, otherwise nullptr.
 inline SlotAdmit admitPluginIntoSlot(int channel,
                                      int slot,
                                      std::string_view identifier,
@@ -337,28 +353,10 @@ inline SlotAdmit admitPluginIntoSlot(int channel,
                             && slotBlock->identifier == identifier;
     const bool unknownPlugin = slotBlock != nullptr && slotBlock->identifier.empty() && identifier.empty();
 
-    if (identifierBlocked || samePlugin)
-    {
-        SlotAdmit refused;
-        refused.reason = kSlotCrashSamePlugin;
-        return refused;
-    }
-    if (unknownPlugin)
-    {
-        SlotAdmit refused;
-        refused.reason = kSlotCrashKeepOff;
-        return refused;
-    }
-    if (slotBlock != nullptr)
-    {
-        SlotAdmit admitted;
-        admitted.load = true;
-        admitted.clearSlot = true;
-        return admitted;
-    }
-
     SlotAdmit admitted;
     admitted.load = true;
+    admitted.clearSlot = slotBlock != nullptr;
+    admitted.reason = crashWarningNote(identifierBlocked || samePlugin || unknownPlugin);
     return admitted;
 }
 

@@ -223,10 +223,10 @@ jobs:
             - A channel with no input, a hidden channel, or a channel past the card does not run its plugins and does not use CPU.
             - A message-thread stall does not bypass plugins or pass the dry input. If the open card briefly reports fewer active channels, those plugins stay in the signal. YouHost does not reopen the card for that dip.
             - A plugin window opens at the plugin's own size and scale, and only resizes as far as the plugin allows. Every load attempt is logged with the format and the slot, including an Audio Unit that does not open. Audio Units that instantiate asynchronously are included in the scan.
-            - A slot left off after a crash is grey and says why. Click it to load the plugin again. Remove frees the slot so another plugin, or the same one, can be loaded.
+            - Choosing a plugin always loads it, in any slot. If that plugin crashed last time, YouHost shows a small note: this plugin crashed last time. Open session without this plugin leaves that plugin out of this launch. The slot stays empty and can take any plugin. The session file keeps it until the next save.
             - Each audio block records how long the stages and the slowest plugin took. A dropout line names that plugin. The DSP meter follows the callback, so it cannot sit at a latched plugin sum.
             - VST3 process runs on the audio thread. A worker thread is not used for it.
-            - After a crash, choosing a different plugin in that slot loads it. The log says why a plugin did not load. The crash journal keeps history across restarts.
+            - After a crash, choosing any plugin in that slot loads it, including the one that crashed. The log says why a plugin did not load. The crash journal keeps history across restarts.
             - VST3 prepare (setupProcessing and setActive) runs on the message thread. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule.
             - A load-time silence reading no longer turns a plugin off. Lookahead plugins and gates are silent until they have had enough audio, and that reading was rejecting working plugins.
             - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence.

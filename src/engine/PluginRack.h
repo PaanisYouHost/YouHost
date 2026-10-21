@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,8 @@ struct SlotSnapshot
     int stereoFold = 0;
     juce::String name;
     juce::String error;
+    // Non-blocking crash note. Empty when this plugin has no warning.
+    juce::String note;
 };
 
 struct ChannelSnapshot
@@ -180,6 +183,10 @@ public:
 
     void setBlockedIdentifiers(const juce::StringArray& identifiers);
     void setBlockedSlots(const std::vector<CrashBlock>& slots);
+    // Warning only. Remembering a crash does not stop a later load.
+    void rememberCrashedPlugins(const juce::StringArray& identifiers);
+    // Skipped on the automatic restore for this launch. A manual choice still loads.
+    void omitFromNextRestore(const std::vector<CrashBlock>& slots);
     BlockPluginNote blockPluginNote() const noexcept;
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)> trace);
     void releaseForQuit();
@@ -213,6 +220,7 @@ private:
         std::uint64_t ticket = 0;
         bool loading = false;
         juce::String error;
+        juce::String note;
     };
 
     void timerCallback() override;
@@ -281,6 +289,15 @@ private:
     void flushDeferred();
     void notifyDirty();
     bool isBlocked(const juce::PluginDescription& description) const;
+    bool crashedBefore(const juce::PluginDescription& description) const;
+    bool omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const;
+    void keepPluginInSessionFile(int channel,
+                                 int slot,
+                                 const juce::PluginDescription& description,
+                                 const juce::MemoryBlock& state,
+                                 bool bypassed,
+                                 int stereoFold);
+    void dropKeptPlugin(int channel, int slot);
     bool isSlotBlocked(int channel, int slot) const;
     void tracePlugin(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason = {}, const juce::String& format = {});
     bool validSlot(int channel, int slot) const noexcept;
@@ -448,6 +465,21 @@ private:
     bool runOnMessageThread(const std::function<void()>& fn);
     juce::StringArray blocked_;
     std::vector<CrashBlock> blockedSlots_;
+    juce::StringArray crashedWarned_;
+    std::vector<CrashBlock> restoreOmit_;
+    // Written into the session file while the slot stays empty on screen.
+    // "Open session without this plugin" keeps the plugin on disk until a save
+    // replaces that slot. It is not a live plugin and it is not bypassed.
+    struct KeptSessionPlugin
+    {
+        int channel = -1;
+        int slot = -1;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        bool bypassed = false;
+        int stereoFold = 0;
+    };
+    std::vector<KeptSessionPlugin> keptInSessionFile_;
     void clearCrashBlock(int channel, int slot);
     BlockPluginNote blockNote_ {};
     std::atomic<int> slowestNs_ { 0 };
