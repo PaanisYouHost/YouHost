@@ -17,6 +17,12 @@ struct DropoutMark
     int bufferSamples = 0;
     int dspPercent = 0;
     int pluginCount = 0;
+    // Slowest plugin on the callback that produced this mark. Frozen here so a
+    // later short callback cannot replace it when the line is formatted.
+    int slowChannel = -1;
+    int slowSlot = -1;
+    int slowNs = 0;
+    char slowName[40] {};
 };
 
 struct CpuSample
@@ -37,7 +43,11 @@ public:
               bool recording,
               int bufferSamples = 0,
               int dspPercent = 0,
-              int pluginCount = 0) noexcept
+              int pluginCount = 0,
+              int slowChannel = -1,
+              int slowSlot = -1,
+              int slowNs = 0,
+              const char* slowName = nullptr) noexcept
     {
         const auto index = write_.load(std::memory_order_relaxed);
         auto& slot = slots_[static_cast<std::size_t>(index % kCapacity)];
@@ -47,6 +57,17 @@ public:
         slot.bufferSamples = bufferSamples;
         slot.dspPercent = dspPercent;
         slot.pluginCount = pluginCount;
+        slot.slowChannel = slowChannel;
+        slot.slowSlot = slowSlot;
+        slot.slowNs = slowNs;
+        slot.slowName[0] = '\0';
+        if (slowName != nullptr)
+        {
+            int name = 0;
+            for (; name < static_cast<int>(sizeof(slot.slowName)) - 1 && slowName[name] != '\0'; ++name)
+                slot.slowName[name] = slowName[name];
+            slot.slowName[name] = '\0';
+        }
         write_.store(index + 1, std::memory_order_release);
     }
 
@@ -69,6 +90,15 @@ public:
             destination[count].bufferSamples = slot.bufferSamples;
             destination[count].dspPercent = slot.dspPercent;
             destination[count].pluginCount = slot.pluginCount;
+            destination[count].slowChannel = slot.slowChannel;
+            destination[count].slowSlot = slot.slowSlot;
+            destination[count].slowNs = slot.slowNs;
+            for (int name = 0; name < static_cast<int>(sizeof(destination[count].slowName)); ++name)
+            {
+                destination[count].slowName[name] = slot.slowName[name];
+                if (slot.slowName[name] == '\0')
+                    break;
+            }
             ++count;
             ++read_;
         }
@@ -89,6 +119,10 @@ private:
         int bufferSamples = 0;
         int dspPercent = 0;
         int pluginCount = 0;
+        int slowChannel = -1;
+        int slowSlot = -1;
+        int slowNs = 0;
+        char slowName[40] {};
     };
 
     Slot slots_[kCapacity] {};
@@ -124,6 +158,24 @@ inline int countMarksInWindow(const DropoutMark* marks, int count, std::int64_t 
         ++inside;
     }
     return inside;
+}
+
+// The dropout line names the slowest plugin in the coalesced batch. A later
+// 16 us callback must not replace a 700 us overrun that is already in the batch.
+inline const DropoutMark* slowestInDropoutBatch(const DropoutMark* marks, int count) noexcept
+{
+    const DropoutMark* best = nullptr;
+    if (marks == nullptr || count <= 0)
+        return nullptr;
+    for (int index = 0; index < count; ++index)
+    {
+        const auto& mark = marks[index];
+        if (mark.slowName[0] == '\0' || mark.slowChannel < 0 || mark.slowSlot < 0)
+            continue;
+        if (best == nullptr || mark.slowNs > best->slowNs)
+            best = &mark;
+    }
+    return best;
 }
 
 inline std::int64_t latestMarkNs(const DropoutMark* marks, int count)

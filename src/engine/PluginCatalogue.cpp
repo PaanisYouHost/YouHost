@@ -654,16 +654,23 @@ bool PluginCatalogue::createInstanceBlocking(const juce::PluginDescription& desc
                                              double sampleRate,
                                              int blockSize,
                                              std::unique_ptr<juce::AudioPluginInstance>& instance,
-                                             juce::String& error) const
+                                             juce::String& error,
+                                             bool allowMessageThread) const
 {
     instance.reset();
     error.clear();
-    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+    // VST3 createPluginInstance calls back before it returns, so waiting here
+    // on the message thread does not pump the run loop and does not deadlock.
+    // Every other format still refuses the message thread.
+    if (! allowMessageThread)
     {
-        if (messages->isThisTheMessageThread())
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
         {
-            error = "This plugin is opened on the message thread.";
-            return false;
+            if (messages->isThisTheMessageThread())
+            {
+                error = "This plugin is opened on the message thread.";
+                return false;
+            }
         }
     }
     if (! prefersBackgroundInstance(description))

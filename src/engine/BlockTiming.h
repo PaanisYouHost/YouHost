@@ -57,6 +57,9 @@ inline std::string formatBlockTimingLine(const BlockTimingRecord& block)
         line.push_back(character < 32 || character == '\t' ? ' ' : static_cast<char>(character));
     }
     line += " " + us(block.slowestNs) + "us";
+    // Host time in the plugin stage that is outside the plugin's own timer.
+    if (block.pluginNs > block.slowestNs)
+        line += " outside " + us(block.pluginNs - block.slowestNs) + "us";
     return line;
 }
 

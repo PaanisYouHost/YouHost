@@ -773,7 +773,7 @@ void AudioEngine::resetDropouts()
     file.appendText(juce::String(juce::Time::currentTimeMillis()) + ",reset,0,0\n");
 }
 
-void AudioEngine::noteDropout(int events, bool overrun)
+void AudioEngine::noteDropout(int events, bool overrun, int slowChannel, int slowSlot, int slowNs, const char* slowName)
 {
     if (events <= 0)
         return;
@@ -790,7 +790,7 @@ void AudioEngine::noteDropout(int events, bool overrun)
     const int plugins = StallClock::get().activePlugins.load(std::memory_order_relaxed);
     const int marks = std::min(events, 8);
     for (int index = 0; index < marks; ++index)
-        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins);
+        dropoutRing_.push(stamp, sample, recording, buffer, dsp, plugins, slowChannel, slowSlot, slowNs, slowName);
 }
 
 void AudioEngine::drainDropoutLog()
@@ -836,6 +836,24 @@ void AudioEngine::drainDropoutLog()
         dropoutCoalescePlugins_ = last.pluginCount;
         if (last.recording)
             dropoutCoalesceTake_ = last.timelineSample;
+        // The name was stored on the mark when the callback dropped out.
+        // Reading the live slowest snapshot here attached a later 16 us block
+        // to a line whose dsp% came from a 700 us overrun.
+        if (const auto* slow = slowestInDropoutBatch(batch, count))
+        {
+            if (slow->slowNs > dropoutCoalesceSlowNs_)
+            {
+                dropoutCoalesceSlowNs_ = slow->slowNs;
+                dropoutCoalesceSlowChannel_ = slow->slowChannel;
+                dropoutCoalesceSlowSlot_ = slow->slowSlot;
+                for (int name = 0; name < static_cast<int>(sizeof(dropoutCoalesceSlowName_)); ++name)
+                {
+                    dropoutCoalesceSlowName_[name] = slow->slowName[name];
+                    if (slow->slowName[name] == '\0')
+                        break;
+                }
+            }
+        }
     }
     if (dropoutLogDue(nowSteady, lastDropoutLogNs_, dropoutCoalesceCount_))
     {
@@ -844,17 +862,20 @@ void AudioEngine::drainDropoutLog()
                                           dropoutCoalesceBuffer_,
                                           dropoutCoalesceDsp_,
                                           dropoutCoalescePlugins_);
-        int slowChannel = -1;
-        int slowSlot = -1;
-        int slowNs = 0;
-        char slowName[40] {};
-        if (slowest_.read(slowChannel, slowSlot, slowNs, slowName, static_cast<int>(sizeof(slowName))))
-            line += formatDropoutSlowest(slowChannel + 1, slowSlot + 1, slowName, slowNs / 1000);
+        if (dropoutCoalesceSlowChannel_ >= 0 && dropoutCoalesceSlowSlot_ >= 0 && dropoutCoalesceSlowName_[0] != '\0')
+            line += formatDropoutSlowest(dropoutCoalesceSlowChannel_ + 1,
+                                         dropoutCoalesceSlowSlot_ + 1,
+                                         dropoutCoalesceSlowName_,
+                                         dropoutCoalesceSlowNs_ / 1000);
         line += dropoutSawOverrun_.exchange(0, std::memory_order_relaxed) != 0 ? " overrun" : " gap";
         appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         lastDropoutLogNs_ = nowSteady;
         dropoutCoalesceCount_ = 0;
         dropoutCoalesceTake_ = -1;
+        dropoutCoalesceSlowChannel_ = -1;
+        dropoutCoalesceSlowSlot_ = -1;
+        dropoutCoalesceSlowNs_ = 0;
+        dropoutCoalesceSlowName_[0] = '\0';
     }
 
     if (lastCpuSampleNs_ == 0 || nowSteady - lastCpuSampleNs_ >= 200000000)
@@ -903,7 +924,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
     callbackSerial_.fetch_add(1, std::memory_order_relaxed);
     const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
-    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap), false);
+    // A gap is this wake-up. The plugin time frozen here is the previous
+    // callback, already finished. This callback has not run its plugins yet.
+    noteDropout(dropoutGapCount(previousNs, startedNs, config.expectedPeriodNs, skipGap),
+                false,
+                lastSlowChannel_,
+                lastSlowSlot_,
+                lastSlowNs_,
+                lastSlowName_);
 
     // Record and the host chain are independent while live or recording:
     // the tap copies the device input, and the same input feeds the chain.
@@ -1060,8 +1088,26 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             timing.slowestName[index] = note.name[index];
         timingRing_.push(timing);
         slowest_.publish(note.channel, note.slot, note.nanoseconds, note.name);
+        lastSlowChannel_ = timing.slowestChannel;
+        lastSlowSlot_ = timing.slowestSlot;
+        lastSlowNs_ = timing.slowestNs;
+        for (int index = 0; index < static_cast<int>(sizeof(lastSlowName_)); ++index)
+        {
+            lastSlowName_[index] = timing.slowestName[index];
+            if (timing.slowestName[index] == '\0')
+                break;
+        }
+        noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs),
+                    true,
+                    timing.slowestChannel,
+                    timing.slowestSlot,
+                    timing.slowestNs,
+                    timing.slowestName);
     }
-    noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs), true);
+    else
+    {
+        noteDropout(dropoutOverrunCount(elapsedNs, config.expectedPeriodNs), true);
+    }
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice*)

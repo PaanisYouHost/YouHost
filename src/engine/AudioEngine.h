@@ -119,7 +119,12 @@ public:
     // would leave the last full-scale reading on screen.
     void silenceLiveState();
     void resetDropouts();
-    void noteDropout(int events, bool overrun);
+    void noteDropout(int events,
+                     bool overrun,
+                     int slowChannel = -1,
+                     int slowSlot = -1,
+                     int slowNs = 0,
+                     const char* slowName = nullptr);
     void watchClockSync();
     void noteClockProperty() noexcept;
     void drainDropoutLog();
@@ -501,6 +506,14 @@ private:
     int dropoutCoalesceDsp_ = 0;
     int dropoutCoalescePlugins_ = 0;
     std::int64_t dropoutCoalesceTake_ = -1;
+    int dropoutCoalesceSlowChannel_ = -1;
+    int dropoutCoalesceSlowSlot_ = -1;
+    int dropoutCoalesceSlowNs_ = 0;
+    char dropoutCoalesceSlowName_[40] {};
+    int lastSlowChannel_ = -1;
+    int lastSlowSlot_ = -1;
+    int lastSlowNs_ = 0;
+    char lastSlowName_[40] {};
     std::atomic<int> dropoutSawOverrun_ { 0 };
     std::atomic<int> lastCallbackLoad_ { 0 };
     std::atomic<int> callbackShownPeak_ { 0 };

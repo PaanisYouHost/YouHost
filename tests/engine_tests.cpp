@@ -6334,6 +6334,34 @@ void testStability106()
     CHECK(timingLine.find("record 10us") != std::string::npos);
     CHECK(timingLine.find("plugins 180us") != std::string::npos);
     CHECK(timingLine.find("slowest ch 1 slot 2 De-Feedback 140us") != std::string::npos);
+    CHECK(timingLine.find("outside 40us") != std::string::npos);
+    youhost::DropoutMark slowBatch[2] {};
+    slowBatch[0].slowChannel = 0;
+    slowBatch[0].slowSlot = 0;
+    slowBatch[0].slowNs = 16000;
+    std::strncpy(slowBatch[0].slowName, "De-Feedback", sizeof(slowBatch[0].slowName) - 1);
+    slowBatch[1].slowChannel = 0;
+    slowBatch[1].slowSlot = 0;
+    slowBatch[1].slowNs = 700000;
+    std::strncpy(slowBatch[1].slowName, "De-Feedback", sizeof(slowBatch[1].slowName) - 1);
+    const auto* slowestMark = youhost::slowestInDropoutBatch(slowBatch, 2);
+    CHECK(slowestMark != nullptr);
+    CHECK(slowestMark->slowNs == 700000);
+    const auto reconciled = youhost::formatDropoutSlowest(slowestMark->slowChannel + 1,
+                                                          slowestMark->slowSlot + 1,
+                                                          slowestMark->slowName,
+                                                          slowestMark->slowNs / 1000);
+    CHECK(reconciled.find("De-Feedback 700us") != std::string::npos);
+    CHECK(reconciled.find("16us") == std::string::npos);
+    youhost::DropoutRing timedRing;
+    timedRing.push(1, -1, false, 32, 143, 1, 0, 0, 16000, "De-Feedback");
+    timedRing.push(2, -1, false, 32, 143, 1, 0, 0, 700000, "De-Feedback");
+    youhost::DropoutMark timedMarks[2];
+    CHECK(timedRing.drain(timedMarks, 2) == 2);
+    const auto* fromRing = youhost::slowestInDropoutBatch(timedMarks, 2);
+    CHECK(fromRing != nullptr);
+    CHECK(fromRing->slowNs == 700000);
+    CHECK(std::string(fromRing->slowName) == "De-Feedback");
     const auto dropout = youhost::formatDropoutHostLine(3, 48000, 32, 180, 4);
     CHECK(dropout == "dropout x3  take 48000  buffer 32  dsp 180%  plugins 4");
     const auto named = dropout + youhost::formatDropoutSlowest(1, 2, "De-Feedback", 140);
@@ -6506,6 +6534,27 @@ void testStability106()
     const auto stateAt = loaderRun.find("stateRestoredDifferentBuses");
     const auto prepareAt = loaderRun.find("prepareToPlay");
     CHECK(stateAt != std::string::npos && prepareAt != std::string::npos && stateAt < prepareAt);
+    const auto messageTurn = sliceBetween(loaderRun, "runOnMessageThread", "An Audio Unit is prepared on the loader thread");
+    CHECK(messageTurn.find("createInstanceBlocking") != std::string::npos);
+    CHECK(messageTurn.find("setupPlugin()") != std::string::npos);
+    CHECK(messageTurn.find("CFRunLoop timer") != std::string::npos);
+    const auto createdAt = messageTurn.find("createInstanceBlocking");
+    const auto setupCallAt = messageTurn.find("setupPlugin()");
+    CHECK(createdAt != std::string::npos && setupCallAt != std::string::npos && createdAt < setupCallAt);
+    const auto catalogue = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
+    CHECK(catalogue.find("allowMessageThread") != std::string::npos);
+    CHECK(catalogue.find("This plugin is opened on the message thread.") != std::string::npos);
+    const auto audioEngine = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    const auto drainLog = sliceBetween(audioEngine, "void AudioEngine::drainDropoutLog", "DropoutSnapshot AudioEngine::dropoutSnapshot");
+    CHECK(drainLog.find("slowest_.read") == std::string::npos);
+    CHECK(drainLog.find("slowestInDropoutBatch") != std::string::npos);
+    CHECK(drainLog.find("dropoutCoalesceSlowNs_") != std::string::npos);
+    const auto audioCallback = sliceBetween(audioEngine,
+                                            "void AudioEngine::audioDeviceIOCallbackWithContext",
+                                            "void AudioEngine::audioDeviceAboutToStart");
+    CHECK(audioCallback.find("lastSlowNs_") != std::string::npos);
+    CHECK(audioCallback.find("timing.slowestNs") != std::string::npos);
+    CHECK(audioCallback.find("slowest_.read") == std::string::npos);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("plugins stay on the open channels") != std::string::npos);
     CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("not reopening") != std::string::npos);
 

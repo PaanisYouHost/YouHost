@@ -908,118 +908,141 @@ public:
     {
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::String error;
-        owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+        const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
+        // An Audio Unit is created on the loader thread. A VST3 is created
+        // on the message thread, in the same turn as setActive.
+        if (! vst3)
+            owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
 
         // VST3 setupProcessing is on the message thread. The loader waits.
         // The audio callback is the first render, with the same channel count
         // and block size. No lock is held across the plugin calls. The message
         // thread publishes the instance only after this returns.
         PluginRack::OffThreadBuses setup;
-        if (instance != nullptr)
+        const int left = owner_.jobChannel_ & ~1;
+        const bool unlinkedMono = ! owner_.stereoLink(left);
+        auto* plugin = instance.get();
+        BusChoice measured;
+        auto setupPlugin = [&, plugin, unlinkedMono]()
         {
-            const int left = owner_.jobChannel_ & ~1;
-            const bool unlinkedMono = ! owner_.stereoLink(left);
-            auto* plugin = instance.get();
-            BusChoice measured;
-            const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
-            auto setupPlugin = [&, plugin, unlinkedMono]()
+            // The captured pointer is the loader-thread instance. A VST3 is
+            // filled in on this same turn, after this lambda was built.
+            auto* live = plugin != nullptr ? plugin : instance.get();
+            if (live == nullptr)
+                return;
+            const auto buses = configureBuses(*live, unlinkedMono);
+            measured = buses;
+            setup.ready = true;
+            setup.ok = buses.ok;
+            setup.inputChannels = buses.inputChannels;
+            setup.outputChannels = buses.outputChannels;
+            setup.totalInputs = buses.totalInputs;
+            setup.totalOutputs = buses.totalOutputs;
+            setup.openInputs = buses.openInputs;
+            setup.openOutputs = buses.openOutputs;
+            setup.supportMono = buses.supportMono;
+            setup.supportSide = buses.supportSide;
+            setup.supportStereo = buses.supportStereo;
+            setup.openedStereo = buses.openedStereo;
+            setup.hasExtraBuses = buses.hasExtraBuses;
+            setup.attempts = buses.attempts;
+            if (! buses.ok)
+                return;
+            if (owner_.jobState_.getSize() > 0)
+                live->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
+            int liveIn = live->getTotalNumInputChannels();
+            int liveOut = live->getTotalNumOutputChannels();
+            // A saved state can reopen the stereo bus after the mono layout
+            // was accepted. Negotiating again keeps that width off the audio callback.
+            if (stateRestoredDifferentBuses(measured.totalInputs, measured.totalOutputs, liveIn, liveOut))
             {
-                const auto buses = configureBuses(*plugin, unlinkedMono);
-                measured = buses;
-                setup.ready = true;
-                setup.ok = buses.ok;
-                setup.inputChannels = buses.inputChannels;
-                setup.outputChannels = buses.outputChannels;
-                setup.totalInputs = buses.totalInputs;
-                setup.totalOutputs = buses.totalOutputs;
-                setup.openInputs = buses.openInputs;
-                setup.openOutputs = buses.openOutputs;
-                setup.supportMono = buses.supportMono;
-                setup.supportSide = buses.supportSide;
-                setup.supportStereo = buses.supportStereo;
-                setup.openedStereo = buses.openedStereo;
-                setup.hasExtraBuses = buses.hasExtraBuses;
-                setup.attempts = buses.attempts;
-                if (! buses.ok)
-                    return;
-                if (owner_.jobState_.getSize() > 0)
-                    plugin->setStateInformation(owner_.jobState_.getData(), static_cast<int>(owner_.jobState_.getSize()));
-                int liveIn = plugin->getTotalNumInputChannels();
-                int liveOut = plugin->getTotalNumOutputChannels();
-                // A saved state can reopen the stereo bus after the mono layout
-                // was accepted. Negotiating again keeps that width off the audio callback.
-                if (stateRestoredDifferentBuses(measured.totalInputs, measured.totalOutputs, liveIn, liveOut))
+                const auto again = configureBuses(*live, unlinkedMono);
+                setup.attempts.add("state changed buses, negotiated again");
+                setup.attempts.addArray(again.attempts);
+                if (again.ok)
                 {
-                    const auto again = configureBuses(*plugin, unlinkedMono);
-                    setup.attempts.add("state changed buses, negotiated again");
-                    setup.attempts.addArray(again.attempts);
-                    if (again.ok)
-                    {
-                        measured = again;
-                        setup.ok = true;
-                        setup.inputChannels = again.inputChannels;
-                        setup.outputChannels = again.outputChannels;
-                        setup.totalInputs = again.totalInputs;
-                        setup.totalOutputs = again.totalOutputs;
-                        setup.supportMono = again.supportMono;
-                        setup.supportSide = again.supportSide;
-                        setup.supportStereo = again.supportStereo;
-                        setup.openedStereo = again.openedStereo;
-                        setup.hasExtraBuses = again.hasExtraBuses;
-                        liveIn = again.totalInputs;
-                        liveOut = again.totalOutputs;
-                    }
+                    measured = again;
+                    setup.ok = true;
+                    setup.inputChannels = again.inputChannels;
+                    setup.outputChannels = again.outputChannels;
+                    setup.totalInputs = again.totalInputs;
+                    setup.totalOutputs = again.totalOutputs;
+                    setup.supportMono = again.supportMono;
+                    setup.supportSide = again.supportSide;
+                    setup.supportStereo = again.supportStereo;
+                    setup.openedStereo = again.openedStereo;
+                    setup.hasExtraBuses = again.hasExtraBuses;
+                    liveIn = again.totalInputs;
+                    liveOut = again.totalOutputs;
                 }
-                const int mainIn = plugin->getMainBusNumInputChannels();
-                const int mainOut = plugin->getMainBusNumOutputChannels();
-                if (liveIn > 0)
-                    measured.totalInputs = liveIn;
-                if (liveOut > 0)
-                    measured.totalOutputs = liveOut;
-                if (mainIn > 0)
-                    measured.inputChannels = mainIn;
-                if (mainOut > 0)
-                    measured.outputChannels = mainOut;
-                setup.inputChannels = measured.inputChannels;
-                setup.outputChannels = measured.outputChannels;
-                setup.totalInputs = measured.totalInputs;
-                setup.totalOutputs = measured.totalOutputs;
-                const int width = pluginProcessWidth(measured.totalInputs, measured.totalOutputs);
-                if (width < 1)
-                {
-                    setup.ok = false;
-                    if (owner_.settings_ != nullptr)
-                        appendHostLog(*owner_.settings_,
-                                      pluginLogLine("did-not-load",
-                                                    owner_.jobChannel_,
-                                                    owner_.jobSlot_,
-                                                    owner_.jobDescription_.pluginFormatName,
-                                                    owner_.jobDescription_.name,
-                                                    pluginIdentifier(owner_.jobDescription_),
-                                                    "layout " + juce::String(measured.totalInputs) + "/"
-                                                        + juce::String(measured.totalOutputs)
-                                                        + " is wider than the process buffer, not activated"));
-                    return;
-                }
-                plugin->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
-                setup.latencySamples = plugin->getLatencySamples();
-            };
-            bool preparedOnMessage = false;
-            if (vst3)
-            {
-                // VST3 setupProcessing is on the message thread.
-                preparedOnMessage = owner_.runOnMessageThread(setupPlugin);
             }
-            else
+            const int mainIn = live->getMainBusNumInputChannels();
+            const int mainOut = live->getMainBusNumOutputChannels();
+            if (liveIn > 0)
+                measured.totalInputs = liveIn;
+            if (liveOut > 0)
+                measured.totalOutputs = liveOut;
+            if (mainIn > 0)
+                measured.inputChannels = mainIn;
+            if (mainOut > 0)
+                measured.outputChannels = mainOut;
+            setup.inputChannels = measured.inputChannels;
+            setup.outputChannels = measured.outputChannels;
+            setup.totalInputs = measured.totalInputs;
+            setup.totalOutputs = measured.totalOutputs;
+            const int width = pluginProcessWidth(measured.totalInputs, measured.totalOutputs);
+            if (width < 1)
             {
-                // An Audio Unit is prepared on the loader thread. Doing it on
-                // the message thread holds that thread, and the audio callback
-                // waits inside the Audio Units already running. The message
-                // thread stays in the runloop. blockProcessing_ stays false,
-                // so the callback does not pass the dry input.
-                setupPlugin();
-                preparedOnMessage = true;
+                setup.ok = false;
+                if (owner_.settings_ != nullptr)
+                    appendHostLog(*owner_.settings_,
+                                  pluginLogLine("did-not-load",
+                                                owner_.jobChannel_,
+                                                owner_.jobSlot_,
+                                                owner_.jobDescription_.pluginFormatName,
+                                                owner_.jobDescription_.name,
+                                                pluginIdentifier(owner_.jobDescription_),
+                                                "layout " + juce::String(measured.totalInputs) + "/"
+                                                    + juce::String(measured.totalOutputs)
+                                                    + " is wider than the process buffer, not activated"));
+                return;
             }
+            live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+            setup.latencySamples = live->getLatencySamples();
+        };
+        bool preparedOnMessage = false;
+        if (vst3)
+        {
+            // VST3 setupProcessing is on the message thread.
+            preparedOnMessage = owner_.runOnMessageThread([&]()
+            {
+                // Factory, initialize, setupProcessing, setActive, and
+                // prepareToPlay are this one turn. A CFRunLoop timer the
+                // plugin arms during initialize cannot run until this
+                // returns, so it cannot fire into a component that is
+                // not active yet.
+                owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_,
+                                                         owner_.jobRate_,
+                                                         owner_.jobBlock_,
+                                                         instance,
+                                                         error,
+                                                         true);
+                if (instance != nullptr)
+                    setupPlugin();
+            });
+        }
+        else if (instance != nullptr)
+        {
+            // An Audio Unit is prepared on the loader thread. Doing it on
+            // the message thread holds that thread, and the audio callback
+            // waits inside the Audio Units already running. The message
+            // thread stays in the runloop. blockProcessing_ stays false,
+            // so the callback does not pass the dry input.
+            setupPlugin();
+            preparedOnMessage = true;
+        }
+        if (vst3 || instance != nullptr)
+        {
             if (! preparedOnMessage)
             {
                 setup.ready = true;
@@ -2109,9 +2132,10 @@ void PluginRack::beginLoad(int channel,
         block = blockSize_ > 0 ? blockSize_ : 512;
     }
 
-    // The loader thread creates the instance. The message thread must stay in
-    // the runloop: a slow AudioComponentInstanceNew on this thread holds the
-    // message lock, and the audio callback can block on that lock.
+    // The loader thread creates the instance for an Audio Unit. The message
+    // thread must stay in the runloop: a slow AudioComponentInstanceNew on
+    // this thread holds the message lock, and the audio callback can block
+    // on that lock.
     // Two AudioComponentInstanceNew calls at once deadlock. The loader waits
     // for the main thread, and the main thread is inside its own instantiate.
     if (catalogue_.prefersBackgroundInstance(description))
