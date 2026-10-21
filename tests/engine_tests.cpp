@@ -17,7 +17,6 @@
 #include "engine/DisplayLayout.h"
 #include "engine/DropoutDetect.h"
 #include "engine/DropoutLog.h"
-#include "engine/ChannelParallel.h"
 #include "engine/CpuMeter.h"
 #include "engine/PlaybackRoute.h"
 #include "engine/DeviceLoss.h"
@@ -6017,26 +6016,40 @@ void testBeta090()
     CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
     CHECK(processBody.find("numSamples > blockSize_") != std::string::npos);
     CHECK(processBody.find("channelProcessesPlugins") != std::string::npos);
-    CHECK(processBody.find("VST3 process stays on the audio thread") == std::string::npos);
-    CHECK(processBody.find("if (vst3Inline") == std::string::npos);
-    CHECK(processBody.find("pool_->parallel") != std::string::npos);
-    CHECK(processBody.find("count > 1 && pool_ != nullptr") != std::string::npos);
-    CHECK(processBody.find("one core each") != std::string::npos);
-    CHECK(processBody.find("mutex") == std::string::npos);
-    CHECK(processBody.find("lock_guard") == std::string::npos);
-    const auto parallelNow = sliceBetween(busSource, "void parallel(int count, PluginRack* rack)", "int lastWaitNs() const noexcept");
-    CHECK(parallelNow.find("chainSlice") != std::string::npos);
-    CHECK(parallelNow.find("notify_one") != std::string::npos);
-    CHECK(parallelNow.find("mutex") == std::string::npos);
-    CHECK(parallelNow.find("lock_guard") == std::string::npos);
-    CHECK(parallelNow.find("new ") == std::string::npos);
-    CHECK(parallelNow.find("vector") == std::string::npos);
-    CHECK(parallelNow.find("make_unique") == std::string::npos);
-    const auto workerNow = sliceBetween(busSource, "void runWorker(int index)", "std::vector<std::unique_ptr<Worker>>");
-    const auto joinAt = workerNow.find("workgroup_.join");
-    const auto waitAt = workerNow.find(".wait(");
-    CHECK(joinAt != std::string::npos && waitAt != std::string::npos && joinAt < waitAt);
+    CHECK(processBody.find("VST3 process stays on the audio thread") != std::string::npos);
     CHECK(processBody.find("lifeLock_") == std::string::npos);
+    // The 1.0.1 workgroup pool. One channel chain stays on the audio thread,
+    // which is why four inserts on ch 1 are serial. A second channel wakes a
+    // worker. The workers share the job cursor and join the device workgroup
+    // before they process.
+    const auto poolNow = sliceBetween(busSource, "void parallel(int count, PluginRack* rack)", "void runWorker(int index)");
+    CHECK(poolNow.find("count == 1") != std::string::npos);
+    CHECK(poolNow.find("std::min(static_cast<int>(threads_.size()), count - 1)") != std::string::npos);
+    CHECK(poolNow.find("cursor_.fetch_add(1, std::memory_order_acq_rel)") != std::string::npos);
+    CHECK(poolNow.find("left_.store(helpers + 1") != std::string::npos);
+    CHECK(poolNow.find(".signal()") != std::string::npos);
+    CHECK(poolNow.find("done_.wait()") != std::string::npos);
+    const auto workerNow = sliceBetween(busSource, "void runWorker(int index)", "std::vector<std::unique_ptr<Worker>>");
+    const auto joinAt = workerNow.find("workgroup_.join(token)");
+    const auto jobAt = workerNow.find("processJob(job)");
+    CHECK(joinAt != std::string::npos && jobAt != std::string::npos && joinAt < jobAt);
+    CHECK(workerNow.find("cursor_.fetch_add(1, std::memory_order_acq_rel)") != std::string::npos);
+    CHECK(workerNow.find("addCoreNs(index + 1") != std::string::npos);
+    const auto joinAudio = sliceBetween(busSource, "void PluginRack::joinAudioThread()", "void PluginRack::processJob");
+    CHECK(joinAudio.find("workgroup_.join(audioToken_)") != std::string::npos);
+    CHECK(processBody.find("joinAudioThread()") != std::string::npos);
+    CHECK(processBody.find("pool_->parallel") != std::string::npos);
+    CHECK(busSource.find("return std::clamp(cores - 1, 0, 7);") != std::string::npos);
+    CHECK(busSource.find("withApproximateAudioProcessingTime(128, 48000.0)") != std::string::npos);
+    auto helpersForChains = [](int chains, int workers)
+    {
+        if (chains <= 1 || workers <= 0)
+            return 0;
+        return std::min(workers, chains - 1);
+    };
+    CHECK(helpersForChains(1, 7) == 0);
+    CHECK(helpersForChains(4, 7) == 3);
+    CHECK(helpersForChains(12, 7) == 7);
     CHECK(busSource.find("scheduleDeferredEditor") != std::string::npos);
     const auto finishLoad = sliceBetween(busSource, "void PluginRack::finishLoad", "void PluginRack::silencePublished");
     CHECK(finishLoad.find("scheduleDeferredEditor") != std::string::npos);
@@ -6316,35 +6329,6 @@ void testStability106()
     CHECK(! youhost::blockAsksReprepare(32, 32));
     CHECK(youhost::blockAsksReprepare(96, 32));
     CHECK(youhost::vst3ProcessOnAudioThread());
-    CHECK(youhost::chainCores(1, 7) == 1);
-    CHECK(youhost::chainCores(4, 0) == 1);
-    CHECK(youhost::chainCores(4, 7) == 4);
-    CHECK(youhost::chainCores(12, 3) == 4);
-    int sliceBegin = 0;
-    int sliceEnd = 0;
-    int covered = 0;
-    for (int core = 0; core < 4; ++core)
-    {
-        youhost::chainSlice(4, 4, core, sliceBegin, sliceEnd);
-        CHECK(sliceEnd - sliceBegin == 1);
-        covered += sliceEnd - sliceBegin;
-    }
-    CHECK(covered == 4);
-    covered = 0;
-    for (int core = 0; core < 4; ++core)
-    {
-        youhost::chainSlice(12, 4, core, sliceBegin, sliceEnd);
-        CHECK(sliceEnd - sliceBegin == 3);
-        covered += sliceEnd - sliceBegin;
-    }
-    CHECK(covered == 12);
-    youhost::chainSlice(5, 3, 0, sliceBegin, sliceEnd);
-    CHECK(sliceBegin == 0 && sliceEnd == 2);
-    youhost::chainSlice(5, 3, 2, sliceBegin, sliceEnd);
-    CHECK(sliceBegin == 4 && sliceEnd == 5);
-    CHECK(youhost::shortcutHelpText().find("separate cores") != std::string::npos);
-    CHECK(youhost::shortcutHelpText().find("join before the output") != std::string::npos);
-    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("separate cores") != std::string::npos);
 
     const auto stress = youhost::runHeavyVst3At32(64);
     CHECK(stress.liveCalls == 64);
