@@ -911,6 +911,7 @@ public:
                                                     + " is wider than the process buffer, not activated"));
                 return;
             }
+            live->setNonRealtime(false);
             live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
             setup.latencySamples = live->getLatencySamples();
         };
@@ -1451,6 +1452,9 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             for (int index = 0; index < LiveGraph::kScratchCap; ++index)
                 scratch[index] = graph.scratchPtrs[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)][static_cast<std::size_t>(index)];
             const bool trueStereo = ! extraBuses && right != nullptr && inputs >= 2 && outputsN >= 2;
+            // A 1-in/1-out plugin writes the channel buffer. Another host does
+            // that in place. The scratch copy is a second pass over this block.
+            const bool monoInPlace = ! extraBuses && ! trueStereo && std::max(inputs, outputsN) <= 1;
             bool scratchMissing = scratch[0] == nullptr;
             if (! scratchMissing)
             {
@@ -1458,7 +1462,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 for (int index = 0; index < need; ++index)
                     scratchMissing = scratchMissing || scratch[index] == nullptr;
             }
-            if (! trueStereo && scratchMissing)
+            if (! trueStereo && ! monoInPlace && scratchMissing)
             {
                 if (gate != nullptr)
                     gate->depth.fetch_sub(1, std::memory_order_release);
@@ -1472,10 +1476,20 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             const auto fold = stereoFoldFromInt(live.stereoFold);
             auto runOne = [&](float* mono)
             {
-                if (mono == nullptr || scratch[0] == nullptr)
+                if (mono == nullptr)
                     return;
                 const int viewWidth = std::max(1, std::min(std::max(inputs, outputsN), 2));
-                if (viewWidth > 1 && scratch[1] == nullptr)
+                if (viewWidth <= 1)
+                {
+                    float* plugin[1] = { mono };
+                    midi.clear();
+                    juce::AudioBuffer<float> view(plugin, 1, count);
+                    const auto blockBegan = steadyNs();
+                    instance->processBlock(view, midi);
+                    blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
+                    return;
+                }
+                if (scratch[0] == nullptr || scratch[1] == nullptr)
                     return;
                 float* plugin[2] = { scratch[0], scratch[1] };
                 preparePluginBlock(plugin, inputs, outputsN, mono, count);
@@ -1484,12 +1498,6 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 const auto blockBegan = steadyNs();
                 instance->processBlock(view, midi);
                 blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
-                if (viewWidth <= 1)
-                {
-                    if (scratch[0] != mono)
-                        std::memcpy(mono, scratch[0], sizeof(float) * static_cast<std::size_t>(count));
-                    return;
-                }
                 takeFoldedChannel(mono, plugin, outputsN, count, fold);
             };
             SanitizeReport leftReport;
@@ -1871,6 +1879,7 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
             {
                 if (instance == nullptr)
                     return;
+                instance->setNonRealtime(false);
                 instance->prepareToPlay(rate, block);
                 instance->reset();
                 plugin->latencySamples = clampLatencySamples(instance->getLatencySamples());

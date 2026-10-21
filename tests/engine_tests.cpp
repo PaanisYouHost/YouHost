@@ -5241,11 +5241,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.6"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.7"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.6"
+             && std::string(youhost::versionNumber()) == "1.0.7"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.6") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.7") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5254,8 +5254,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.6") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.6-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.7") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.7-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -6794,6 +6794,14 @@ void testStability106()
     CHECK(viewPatch.find("NSMakeSize (0.f, 0.f)") != std::string::npos);
     CHECK(viewPatch.find("Added at 1:1") != std::string::npos);
     CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_editor_view.py") != std::string::npos);
+    const auto realtimePatch = readWorkspaceFile("cmake/patch_juce_realtime_callback.py");
+    CHECK(realtimePatch.find("youhostCallbackInFlight") != std::string::npos);
+    CHECK(realtimePatch.find("youhostCopyDeviceChannels") != std::string::npos);
+    CHECK(realtimePatch.find("kAudioDevicePropertyIOCycleUsage") != std::string::npos);
+    CHECK(realtimePatch.find("memcpy") != std::string::npos);
+    CHECK(readWorkspaceFile("CMakeLists.txt").find("patch_juce_realtime_callback.py") != std::string::npos);
+    CHECK(rackNow.find("setNonRealtime(false)") != std::string::npos);
+    CHECK(oneChannel.find("monoInPlace") != std::string::npos);
     CHECK(youhost::shortcutHelpText().find("Clicks land on the control that is drawn.") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("Clicks land on the control that is drawn.") != std::string::npos);
     const auto beginNow = sliceBetween(rackNow, "void PluginRack::beginLoad", "void PluginRack::finishLoad");

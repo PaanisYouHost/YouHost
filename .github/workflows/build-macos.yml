@@ -218,7 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.6 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.7 is a prerelease for testing. It is not the Latest release.
+
+            - The device callback does not hold its lock while plugins run. A mono plugin is processed in place. Core Audio gives the callback the whole buffer period.
 
             - A channel with no input, a hidden channel, or a channel past the card does not run its plugins and does not use CPU.
             - A one-input, two-output device runs plugins only on the channel that has the input. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. Switching to another device changes the clock. That reading is a weak baseline for plugin speed.
