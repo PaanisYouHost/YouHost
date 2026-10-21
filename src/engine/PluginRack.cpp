@@ -41,6 +41,20 @@ struct InstanceDeleter
     }
 };
 
+// Slate's destructor dispatch_syncs the message thread from inside
+// AudioComponentInstanceDispose. Doing that release here never returns.
+// The instance is deleted on another thread. This thread does not wait.
+void releaseInstanceOffMessageThread(juce::AudioPluginInstance* instance)
+{
+    if (instance == nullptr)
+        return;
+    const bool started = juce::Thread::launch([instance]
+    {
+        delete instance;
+    });
+    juce::ignoreUnused(started);
+}
+
 juce::String pluginIdentifier(const juce::PluginDescription& description)
 {
     if (description.fileOrIdentifier.isNotEmpty())
@@ -3882,9 +3896,10 @@ void PluginRack::pumpCondemned()
                 continue;
             }
         }
-        item.instance->removeListener(this);
-        item.instance->releaseResources();
-        delete item.instance;
+        auto* dying = item.instance;
+        item.instance = nullptr;
+        dying->removeListener(this);
+        releaseInstanceOffMessageThread(dying);
     }
     condemned_.swap(keep);
     if (! condemned_.empty())
@@ -3904,10 +3919,10 @@ void PluginRack::flushDeferred()
     {
         if (item.instance == nullptr)
             continue;
-        item.instance->removeListener(this);
-        item.instance->releaseResources();
-        delete item.instance;
+        auto* dying = item.instance;
         item.instance = nullptr;
+        dying->removeListener(this);
+        releaseInstanceOffMessageThread(dying);
     }
     condemned_.clear();
 }
@@ -3933,8 +3948,7 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
     {
         if (rack != nullptr)
             instance->removeListener(rack);
-        instance->releaseResources();
-        delete instance;
+        releaseInstanceOffMessageThread(instance);
         return;
     }
 
