@@ -109,6 +109,23 @@ inline bool deviceInventoryQueryAllowed(bool setupLocked, bool deviceLost, bool 
     return ! setupLocked;
 }
 
+// The "active" count in the device log is the enabled-channel mask, not a
+// plugin. A live card that reports fewer channels than the set already
+// running must not shrink that set: the callback would copy the dry input
+// and skip the plugins. Offline and a different card still follow the new count.
+inline bool keepPluginsOnShrink(bool sameOpenCard,
+                                int runningInputs,
+                                int runningOutputs,
+                                int nextInputs,
+                                int nextOutputs) noexcept
+{
+    if (! sameOpenCard)
+        return false;
+    if (runningInputs <= 0 && runningOutputs <= 0)
+        return false;
+    return nextInputs < runningInputs || nextOutputs < runningOutputs;
+}
+
 inline void openAllReportedChannels(bool* open, int reported) noexcept
 {
     const int count = channelsToOpen(reported);

@@ -6096,8 +6096,6 @@ void testBeta090()
     CHECK(std::string(youhost::helpButtonTip()) == "Open YouHost help.");
 }
 
-} // namespace
-
 void testStability106()
 {
     CHECK(! youhost::channelProcessesPlugins(5, 1, 0));
@@ -6214,10 +6212,42 @@ void testStability106()
     CHECK(rotated.find("clean=") != std::string::npos);
     CHECK(youhost::readLatestCrashJournal(rotated).marks.size() == 1);
 
+    CHECK(youhost::keepPluginsOnShrink(true, 48, 48, 39, 39));
+    CHECK(! youhost::keepPluginsOnShrink(true, 48, 48, 48, 48));
+    CHECK(! youhost::keepPluginsOnShrink(true, 48, 48, 64, 64));
+    CHECK(! youhost::keepPluginsOnShrink(false, 48, 48, 39, 39));
+    CHECK(! youhost::keepPluginsOnShrink(true, 0, 0, 0, 0));
+    CHECK(youhost::signalDuringMessageStall(false) == youhost::StallSignal::plugins);
+    CHECK(youhost::signalDuringMessageStall(true) == youhost::StallSignal::dry);
+    CHECK(youhost::replaceDryWhenPluginPaused(true, false));
+    CHECK(! youhost::replaceDryWhenPluginPaused(false, false));
+    CHECK(! youhost::replaceDryWhenPluginPaused(true, true));
+    const auto sliceBetween = [](const std::string& source, const char* begin, const char* end)
+    {
+        const auto start = source.find(begin);
+        const auto stop = source.find(end, start == std::string::npos ? 0 : start);
+        if (start == std::string::npos || stop == std::string::npos || stop < start)
+            return std::string();
+        return source.substr(start, stop - start);
+    };
+    const auto prepareBody = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                          "void PluginRack::prepare(",
+                                          "void PluginRack::deviceStopped");
+    CHECK(prepareBody.find("blockProcessing_.store(true") == std::string::npos);
+    CHECK(prepareBody.find("signalDuringMessageStall") != std::string::npos);
+    const auto loaderRun = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
+                                        "createInstanceBlocking",
+                                        "deliverOffThreadInstance");
+    CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("plugins stay on the open channels") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("not reopening") != std::string::npos);
+
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
               << "%, crash slot accepts a new plugin\n";
 }
+
+} // namespace
 
 int main()
 {

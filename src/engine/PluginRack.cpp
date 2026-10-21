@@ -734,7 +734,8 @@ public:
             const bool unlinkedMono = ! owner_.stereoLink(left);
             auto* plugin = instance.get();
             BusChoice measured;
-            const bool preparedOnMessage = owner_.runOnMessageThread([&, plugin, unlinkedMono]
+            const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
+            auto setupPlugin = [&, plugin, unlinkedMono]()
             {
                 const auto buses = configureBuses(*plugin, unlinkedMono);
                 measured = buses;
@@ -786,7 +787,23 @@ public:
                 }
                 plugin->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
                 setup.latencySamples = plugin->getLatencySamples();
-            });
+            };
+            bool preparedOnMessage = false;
+            if (vst3)
+            {
+                // VST3 setupProcessing is on the message thread.
+                preparedOnMessage = owner_.runOnMessageThread(setupPlugin);
+            }
+            else
+            {
+                // An Audio Unit is prepared on the loader thread. Doing it on
+                // the message thread holds that thread, and the audio callback
+                // waits inside the Audio Units already running. The message
+                // thread stays in the runloop. blockProcessing_ stays false,
+                // so the callback does not pass the dry input.
+                setupPlugin();
+                preparedOnMessage = true;
+            }
             if (! preparedOnMessage)
             {
                 setup.ready = true;
@@ -1240,6 +1257,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
     {
         if (buffer == nullptr || count <= 0)
             return;
+        bool sawPause = false;
+        bool ranPlugin = false;
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& live = graph.slots[channel][slot];
@@ -1259,12 +1278,16 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
 
             auto* gate = live.gate;
             if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
+            {
+                sawPause = true;
                 continue;
+            }
             if (gate != nullptr)
                 gate->depth.fetch_add(1, std::memory_order_acq_rel);
             if (gate != nullptr && gate->pause.load(std::memory_order_acquire) != 0)
             {
                 gate->depth.fetch_sub(1, std::memory_order_release);
+                sawPause = true;
                 continue;
             }
 
@@ -1286,6 +1309,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 continue;
             }
 
+            ranPlugin = true;
             const auto began = steadyNs();
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
             const auto fold = stereoFoldFromInt(live.stereoFold);
@@ -1393,6 +1417,13 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 }
                 gate->depth.fetch_sub(1, std::memory_order_release);
             }
+        }
+        // A paused plugin must not leave the dry mic on the output.
+        if (replaceDryWhenPluginPaused(sawPause, ranPlugin))
+        {
+            std::memset(buffer, 0, sizeof(float) * static_cast<std::size_t>(count));
+            if (right != nullptr)
+                std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(count));
         }
     };
 
@@ -1636,12 +1667,15 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
     PhaseScope phase(kPhasePrepare);
     const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
     const int block = blockSize > 0 ? blockSize : 512;
-    blockProcessing_.store(true, std::memory_order_release);
+    const double previousRate = sampleRate_;
+    const int previousBlock = blockSize_;
+    const bool sameQuantum = previousBlock > 0 && previousBlock == block
+                             && previousRate > rate - 1.0 && previousRate < rate + 1.0;
+    // Do not set blockProcessing_. That flag makes the callback skip every
+    // plugin after it has copied the dry input. A message-thread stall would
+    // then be the mic with no De-Feedback. signalDuringMessageStall stays plugins.
     if (! waitUntilOutsideCallback())
-    {
-        blockProcessing_.store(false, std::memory_order_release);
         return;
-    }
     workgroup_ = workgroup;
     audioJoined_ = false;
 
@@ -1658,18 +1692,29 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
                     hosted.push_back(slot.plugin);
     }
 
-    runOnMessageThread([&hosted, rate, block]
+    // Same rate and block: the instances are already prepared. Leave them in
+    // the callback. A device-mask dip must not re-prepare the whole rack.
+    if (! sameQuantum)
     {
         for (auto& plugin : hosted)
         {
-            if (plugin != nullptr && plugin->instance != nullptr)
+            if (plugin == nullptr || plugin->instance == nullptr || plugin->gate == nullptr)
+                continue;
+            if (! pauseGate(*plugin->gate))
+                continue;
+            auto* instance = plugin->instance.get();
+            runOnMessageThread([instance, plugin, rate, block]
             {
-                plugin->instance->prepareToPlay(rate, block);
-                plugin->instance->reset();
-                plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
-            }
+                if (instance == nullptr)
+                    return;
+                instance->prepareToPlay(rate, block);
+                instance->reset();
+                plugin->latencySamples = clampLatencySamples(instance->getLatencySamples());
+            });
+            plugin->prepared = true;
+            resumeGate(*plugin->gate);
         }
-    });
+    }
 
     {
         std::lock_guard<std::mutex> lock(lifeLock_);

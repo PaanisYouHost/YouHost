@@ -1489,6 +1489,24 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
         && lastFullOpenOutputs_ == outputNames.size())
         return;
 
+    // A smaller name list on the card that is already open used to call
+    // setAudioDeviceSetup. That stops the callback and then prepare() skips
+    // every plugin, so the dry mic goes out. Leave the open stream alone.
+    if (lastFullOpenName_ == device.getName()
+        && lastFullOpenInputs_ >= 0
+        && (inputNames.size() < lastFullOpenInputs_ || outputNames.size() < lastFullOpenOutputs_))
+    {
+        appendHostLog(settings_, "device " + device.getName()
+                                     + " reported inputs " + juce::String(lastFullOpenInputs_)
+                                     + "->" + juce::String(inputNames.size())
+                                     + " outputs " + juce::String(lastFullOpenOutputs_)
+                                     + "->" + juce::String(outputNames.size())
+                                     + ", not reopening");
+        lastFullOpenInputs_ = inputNames.size();
+        lastFullOpenOutputs_ = outputNames.size();
+        return;
+    }
+
     lastFullOpenName_ = device.getName();
     lastFullOpenInputs_ = inputNames.size();
     lastFullOpenOutputs_ = outputNames.size();
@@ -1537,6 +1555,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (live == nullptr || ! live->isOpen())
         return;
 
+    const bool sameOpenCard = deviceOpen_.load(std::memory_order_relaxed)
+                              && ! offlineTemplate_
+                              && deviceName_.isNotEmpty()
+                              && deviceName_ == live->getName();
     if (deviceName_ != live->getName())
         revealUnsupported_ = false;
     deviceName_ = live->getName();
@@ -1550,8 +1572,22 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const auto outputMask = live->getActiveOutputChannels();
     const bool masksChanged = inputMask != lastInputMask_ || outputMask != lastOutputMask_;
     const bool needPrepare = starting || rateChanged || bufferChanged;
+    const int runningInputs = currentConfig().routing.inputCount;
+    const int runningOutputs = currentConfig().routing.outputCount;
+    const int nextInputs = inputMask.countNumberOfSetBits();
+    const int nextOutputs = outputMask.countNumberOfSetBits();
+    // "active 48" then "active 39" is this mask. Keep the plugins on the
+    // channels that were already open. A different card still follows its count.
+    const bool keep = keepPluginsOnShrink(sameOpenCard, runningInputs, runningOutputs, nextInputs, nextOutputs);
+    if (keep && masksChanged)
+    {
+        appendHostLog(settings_, "device " + live->getName()
+                                     + " active inputs " + juce::String(runningInputs) + "->" + juce::String(nextInputs)
+                                     + " outputs " + juce::String(runningOutputs) + "->" + juce::String(nextOutputs)
+                                     + ", plugins stay on the open channels");
+    }
 
-    if (needPrepare || masksChanged)
+    if (! keep && (needPrepare || masksChanged))
     {
         publishConfig(*live);
     }
@@ -1576,7 +1612,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
         preparedBuffer_ = buffer;
         installOverloadListener(live->getName());
     }
-    else if (masksChanged && rack_ != nullptr)
+    else if (masksChanged && ! keep && rack_ != nullptr)
     {
         rack_->updateRouting(currentConfig().routing);
     }

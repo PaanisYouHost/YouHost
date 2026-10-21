@@ -132,6 +132,27 @@ struct StallClock
     }
 };
 
+// What the callback does while the message thread is busy. blockProcessing_
+// skips every plugin after the dry input has already been copied. That is a
+// howl, not a bypass the musician asked for. A load must leave it false.
+enum class StallSignal
+{
+    plugins,
+    dry
+};
+
+inline StallSignal signalDuringMessageStall(bool blockProcessing) noexcept
+{
+    return blockProcessing ? StallSignal::dry : StallSignal::plugins;
+}
+
+// A plugin paused for prepare is not the dry mic. Silence that channel when
+// no plugin on it ran. A plugin that did run keeps its output.
+inline bool replaceDryWhenPluginPaused(bool gatePaused, bool pluginRan) noexcept
+{
+    return gatePaused && ! pluginRan;
+}
+
 // The watchdog treats a silent message thread as a stall. A session load
 // touches this before each plugin so one slow instantiate is not added to the
 // previous one.
