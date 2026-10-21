@@ -10,6 +10,7 @@
 #include "engine/SignalPath.h"
 #include "engine/DisplayLayout.h"
 #include "engine/HostColumns.h"
+#include "engine/CrashJournal.h"
 #include "engine/InsertMenu.h"
 #include "engine/PluginBuses.h"
 #include "engine/StereoLink.h"
@@ -1162,16 +1163,16 @@ private:
     void slotClicked(int slot)
     {
         const auto snap = engine_.channelSnapshot(channel_).slots[static_cast<std::size_t>(slot)];
-        if (snap.loading)
-            return;
-        if (snap.occupied)
+        // No live instance opens the list. After a crash the slot is empty,
+        // including ch 1 slot 1, and the click must not try to open a missing editor.
+        if (slotClickOpensPluginList(snap.liveInstance, snap.loading))
         {
-            engine_.togglePluginEditor(channel_, slot);
+            if (auto* page = findParentComponentOfClass<PluginPage>())
+                page->showPluginList(channel_, slot);
             return;
         }
-
-        if (auto* page = findParentComponentOfClass<PluginPage>())
-            page->showPluginList(channel_, slot);
+        if (snap.liveInstance)
+            engine_.togglePluginEditor(channel_, slot);
     }
 
     void showMenu(int slot)

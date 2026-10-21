@@ -273,8 +273,23 @@ inline bool leaveOutOfThisLaunch(bool automaticRestore, bool listedForThisLaunch
     return automaticRestore && listedForThisLaunch;
 }
 
+// The user already chose a plugin for this slot. The automatic restore must
+// not clear it. Channel 1 slot 1 is the same rule as every other slot.
+inline bool restoreSkipsClaimedSlot(bool automaticRestore, bool userClaimedSlot) noexcept
+{
+    return automaticRestore && userClaimedSlot;
+}
+
+// An empty slot opens the plugin list. A live plugin toggles its editor.
+// A slot left off after a crash has no live instance, so the click opens the list.
+inline bool slotClickOpensPluginList(bool liveInstance, bool loading) noexcept
+{
+    return ! loading && ! liveInstance;
+}
+
 // True when this channel and slot were named by the dialog for this launch.
-// A different plugin in that slot is not the one the user left out.
+// The identifier must be the same plugin. An empty crash id does not match
+// every plugin, so it cannot lock the slot.
 inline bool pluginListedForThisLaunch(int channel,
                                       int slot,
                                       std::string_view identifier,
@@ -287,7 +302,7 @@ inline bool pluginListedForThisLaunch(int channel,
     {
         if (listed[index].channel != channel || listed[index].slot != slot)
             continue;
-        if (listed[index].identifier.empty() || listed[index].identifier == identifier)
+        if (listed[index].identifier == identifier)
             return true;
     }
     return false;

@@ -31,6 +31,8 @@ struct SlotSnapshot
     bool bypassed = false;
     bool loading = false;
     bool crashParked = false;
+    // True only while this slot has a plugin instance. A crash leave-off does not.
+    bool liveInstance = false;
     int latencySamples = 0;
     int inputChannels = 0;
     int outputChannels = 0;
@@ -291,6 +293,7 @@ private:
     bool isBlocked(const juce::PluginDescription& description) const;
     bool crashedBefore(const juce::PluginDescription& description) const;
     bool omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const;
+    void claimSlotForManualLoad(int channel, int slot);
     void keepPluginInSessionFile(int channel,
                                  int slot,
                                  const juce::PluginDescription& description,
@@ -467,6 +470,8 @@ private:
     std::vector<CrashBlock> blockedSlots_;
     juce::StringArray crashedWarned_;
     std::vector<CrashBlock> restoreOmit_;
+    // A manual choice owns the slot for this launch. Automatic restore skips it.
+    std::array<std::array<bool, kSlotsPerChannel>, kMaxChannels> userClaimedSlot_ {};
     // Written into the session file while the slot stays empty on screen.
     // "Open session without this plugin" keeps the plugin on disk until a save
     // replaces that slot. It is not a live plugin and it is not bypassed.

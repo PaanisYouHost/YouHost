@@ -1981,6 +1981,18 @@ void PluginRack::beginLoad(int channel,
         return;
     }
 
+    // A click that chooses a plugin owns this slot, including ch 1 slot 1 after
+    // "left crashed plugins off". A restore still waiting in the queue must not
+    // clear that plugin. The check is before the editor is detached.
+    if (restoreGeneration == 0)
+        claimSlotForManualLoad(channel, slot);
+    else if (restoreSkipsClaimedSlot(true, userClaimedSlot_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]))
+    {
+        finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
+        completeRestoreStep(restoreGeneration);
+        return;
+    }
+
     // Hide the old editor now. It stays allocated until the deferred AU view
     // callbacks have had a few turns on the message loop.
     detachEditor(channel, slot);
@@ -2384,6 +2396,8 @@ void PluginRack::clearAll(bool markDirty)
         gate.inFlight = false;
         gate.ticket = 0;
     }
+    for (auto& row : userClaimedSlot_)
+        row.fill(false);
 
     std::vector<std::tuple<int, int, juce::String, juce::String>> unloaded;
     std::vector<std::shared_ptr<HostedPlugin>> retiredPlugins;
@@ -2891,7 +2905,9 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         destination.note = model.note;
         // A plugin with no instance is not on screen. Crash protection does not
         // park a bypassed slot, so the button stays empty and can take any plugin.
-        if (model.plugin == nullptr || model.plugin->instance == nullptr)
+        // Channel 1 slot 1 after "left crashed plugins off" is this case.
+        destination.liveInstance = model.plugin != nullptr && model.plugin->instance != nullptr;
+        if (! destination.liveInstance)
             continue;
         destination.occupied = true;
         destination.bypassed = model.plugin->bypassed;
@@ -3417,6 +3433,41 @@ void PluginRack::rememberCrashedPlugins(const juce::StringArray& identifiers)
 void PluginRack::omitFromNextRestore(const std::vector<CrashBlock>& slots)
 {
     restoreOmit_ = slots;
+}
+
+void PluginRack::claimSlotForManualLoad(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+    userClaimedSlot_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = true;
+    std::vector<CrashBlock> keptOmit;
+    keptOmit.reserve(restoreOmit_.size());
+    for (const auto& block : restoreOmit_)
+        if (block.channel != channel || block.slot != slot)
+            keptOmit.push_back(block);
+    restoreOmit_.swap(keptOmit);
+
+    int dropped = 0;
+    std::vector<RestorePlugin> keptQueue;
+    keptQueue.reserve(restoreQueue_.size());
+    for (auto& item : restoreQueue_)
+    {
+        if (item.channel == channel && item.slot == slot)
+        {
+            ++dropped;
+            continue;
+        }
+        keptQueue.push_back(std::move(item));
+    }
+    restoreQueue_.swap(keptQueue);
+    if (dropped > 0)
+    {
+        loadCursor_.total -= dropped;
+        if (loadCursor_.total < loadCursor_.finished)
+            loadCursor_.total = loadCursor_.finished;
+        if (loadCursor_.total < 0)
+            loadCursor_.total = 0;
+    }
 }
 
 bool PluginRack::crashedBefore(const juce::PluginDescription& description) const

@@ -6200,6 +6200,42 @@ void testStability106()
     CHECK(youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &listed, 1));
     CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &listed, 1) == false);
     CHECK(youhost::pluginListedForThisLaunch(1, 0, "au.vastaus", &listed, 1) == false);
+    // Mika: after crash protection left ch 1 slot 1 off, no plugin would open.
+    // The log line is 1-based. The slot is channel index 0, slot index 0.
+    // The same plugin, a different plugin, and an empty crash id all load.
+    // A click with no live instance opens the plugin list.
+    youhost::SlotBlock channelOneSlotOne;
+    channelOneSlotOne.channel = 0;
+    channelOneSlotOne.slot = 0;
+    channelOneSlotOne.identifier = "au.vastaus";
+    CHECK(youhost::leaveOutOfThisLaunch(true, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &channelOneSlotOne, 1)));
+    CHECK(youhost::leaveOutOfThisLaunch(false, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &channelOneSlotOne, 1)) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &channelOneSlotOne, 1) == false);
+    CHECK(youhost::leaveOutOfThisLaunch(false, youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &channelOneSlotOne, 1)) == false);
+    const auto ch1Same = youhost::admitPluginIntoSlot(0, 0, "au.vastaus", &channelOneSlotOne, 1, true);
+    CHECK(ch1Same.load);
+    CHECK(ch1Same.clearSlot);
+    CHECK(std::string(ch1Same.reason) == youhost::kPluginCrashedLastTime);
+    const auto ch1Other = youhost::admitPluginIntoSlot(0, 0, "vst3.pro-q", &channelOneSlotOne, 1, false);
+    CHECK(ch1Other.load);
+    CHECK(ch1Other.clearSlot);
+    CHECK(ch1Other.reason == nullptr);
+    youhost::SlotBlock emptyListed;
+    emptyListed.channel = 0;
+    emptyListed.slot = 0;
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &emptyListed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "vst3.other", &emptyListed, 1) == false);
+    CHECK(youhost::pluginListedForThisLaunch(0, 0, "", &emptyListed, 1));
+    CHECK(youhost::leaveOutOfThisLaunch(true, youhost::pluginListedForThisLaunch(0, 0, "au.vastaus", &emptyListed, 1)) == false);
+    const auto emptyBlockChoice = youhost::admitPluginIntoSlot(0, 0, "vst3.pro-q", &emptyListed, 1, false);
+    CHECK(emptyBlockChoice.load);
+    CHECK(emptyBlockChoice.reason == nullptr);
+    CHECK(youhost::slotClickOpensPluginList(false, false));
+    CHECK(youhost::slotClickOpensPluginList(false, true) == false);
+    CHECK(youhost::slotClickOpensPluginList(true, false) == false);
+    CHECK(youhost::restoreSkipsClaimedSlot(true, true));
+    CHECK(youhost::restoreSkipsClaimedSlot(false, true) == false);
+    CHECK(youhost::restoreSkipsClaimedSlot(true, false) == false);
 
     youhost::CrashJournal first;
     youhost::CrashMark proq;
@@ -6367,6 +6403,11 @@ void testStability106()
     CHECK(catalogueNow.find("formatScanFailureLine") != std::string::npos);
 
     CHECK(beginNow.find("leaveOutOfThisLaunch") != std::string::npos);
+    CHECK(beginNow.find("claimSlotForManualLoad") != std::string::npos);
+    CHECK(beginNow.find("restoreSkipsClaimedSlot") != std::string::npos);
+    const auto claimAt = beginNow.find("claimSlotForManualLoad");
+    const auto detachAt = beginNow.find("detachEditor");
+    CHECK(claimAt != std::string::npos && detachAt != std::string::npos && claimAt < detachAt);
     CHECK(beginNow.find("! admit.load") == std::string::npos);
     CHECK(beginNow.find("->bypassed = true") == std::string::npos);
     CHECK(beginNow.find("kPluginCrashedLastTime") != std::string::npos);
@@ -6378,7 +6419,9 @@ void testStability106()
     CHECK(choiceNow.find("setBlockedSlots") == std::string::npos);
     CHECK(choiceNow.find("setBlockedIdentifiers") == std::string::npos);
     CHECK(youhost::shortcutHelpText().find("this plugin crashed last time") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("including channel 1 slot 1") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("this plugin crashed last time") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("including channel 1 slot 1") != std::string::npos);
     youhost::SlotBlock held[1];
     held[0].channel = 0;
     held[0].slot = 0;
@@ -6409,6 +6452,8 @@ void testStability106()
     CHECK(removeNow.find("kSlotFreedReason") != std::string::npos);
     const auto pageNow = readWorkspaceFile("src/ui/PluginPage.cpp");
     CHECK(pageNow.find("Turn bypass off") != std::string::npos);
+    CHECK(pageNow.find("slotClickOpensPluginList") != std::string::npos);
+    CHECK(pageNow.find("snap.liveInstance") != std::string::npos);
     CHECK(pageNow.find("kSlotLoadAgain") == std::string::npos);
     CHECK(pageNow.find("kSlotRetryClick") == std::string::npos);
     CHECK(pageNow.find("crashParked") == std::string::npos);
@@ -6417,7 +6462,7 @@ void testStability106()
 
     std::cout << "hidden channels skipped " << stress.hiddenCalls
               << ", meter " << stress.meter
-              << "%, any plugin loads in any slot\n";
+              << "%, any plugin loads in any slot, ch 1 slot 1 stays open\n";
 }
 
 } // namespace
