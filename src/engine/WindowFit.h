@@ -179,24 +179,33 @@ inline float editorHostScale(float displayScale) noexcept
     return 1.0f;
 }
 
-// An Audio Unit view reports its size in points, so the first size is the
-// one the window keeps. A VST3 view applies content scale after the window
-// has a peer, and the size before that scale is the wrong frame.
-inline bool editorWaitsForPeerScale(const char* formatName) noexcept
+// IPlugView::getSize on macOS is logical points, the same unit as the Audio
+// Unit NSView. Vastaus reports that point size. JUCE was dividing it by the
+// Retina backing scale, so the VST3 window became half the Audio Unit window.
+// Windows and Linux report physical pixels, and the backing scale converts them.
+inline int vst3ViewPoints(int reportedSize, float backingScale, bool macOS) noexcept
 {
-    return formatName != nullptr && formatName[0] == 'V' && formatName[1] == 'S'
-        && formatName[2] == 'T' && formatName[3] == '3' && formatName[4] == '\0';
+    if (reportedSize < 1)
+        return 0;
+    if (macOS || !(backingScale > 1.0f))
+        return reportedSize;
+    const auto points = static_cast<float>(reportedSize) / backingScale;
+    const auto rounded = points >= 0.0f ? points + 0.5f : points - 0.5f;
+    return static_cast<int>(rounded);
 }
 
-// VST3 keeps the size from after the peer scale. An Audio Unit keeps the size
-// it reported first.
-inline int editorFrameAfterScale(bool waitsForPeerScale, int sizeBeforePeer, int sizeAfterPeer) noexcept
+// IPlugViewContentScaleSupport is for systems that cannot see the scale,
+// which on this host means Windows. macOS AppKit already applies the backing
+// scale to the view. Passing that scale, or passing 1 on a Retina display,
+// is what makes Vastaus redraw at the wrong size. The Audio Unit never
+// receives this call.
+inline float vst3ContentScale(float backingScale, bool macOS) noexcept
 {
-    if (sizeAfterPeer < 1)
-        sizeAfterPeer = sizeBeforePeer;
-    if (sizeBeforePeer < 1)
-        sizeBeforePeer = sizeAfterPeer;
-    return waitsForPeerScale ? sizeAfterPeer : sizeBeforePeer;
+    if (macOS)
+        return 1.0f;
+    if (!(backingScale > 0.0f))
+        return 1.0f;
+    return backingScale;
 }
 
 struct EditorOpenPlan
