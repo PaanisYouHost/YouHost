@@ -3269,10 +3269,10 @@ void testDeviceListGrouping()
     bool sawHeadphones = false;
     for (const auto& row : pairedRows)
     {
-        if (row.name == "MacBook Pro")
+        if (row.name == "MacBook Pro (mic + speakers)")
         {
             ++macRows;
-            sawBuiltIn = row.label == "MacBook Pro (built-in) - 1 in / 2 out";
+            sawBuiltIn = row.label == "MacBook Pro (mic + speakers) - 1 in / 2 out";
             CHECK(row.kind == youhost::DeviceRowKind::builtin);
         }
         if (row.name == "MacBook Pro Microphone" || row.name == "MacBook Pro Speakers")
@@ -3288,12 +3288,13 @@ void testDeviceListGrouping()
         { "MacBook Pro-kaiuttimet", 0, 2 },
     });
     CHECK(finnish.size() == 1);
-    CHECK(finnish[0].name == "MacBook Pro");
+    CHECK(youhost::combinedBuiltinName("MacBook Pro") == "MacBook Pro (mic + speakers)");
+    CHECK(finnish[0].name == "MacBook Pro (mic + speakers)");
     CHECK(finnish[0].inputName == "MacBook Pro-mikrofoni");
     CHECK(finnish[0].outputName == "MacBook Pro-kaiuttimet");
     // Mika 2026-10-21: after a switch the input name gained a space
     // ("MacBook Pro -mikrofoni") and the speakers stayed "MacBook Pro-kaiuttimet".
-    // Those are one card. The name stays "MacBook Pro" on the next rebuild.
+    // Those are one card. The name stays "MacBook Pro (mic + speakers)" on the next rebuild.
     // An aggregate ("Koostelaite" / "koontilaite") stays its own row.
     CHECK(youhost::builtinFamilyKey("MacBook Pro -mikrofoni") == "MacBook Pro");
     CHECK(youhost::builtinFamilyKey("MacBook Pro-kaiuttimet") == "MacBook Pro");
@@ -3324,7 +3325,7 @@ void testDeviceListGrouping()
     std::string macRaw;
     for (const auto& row : switched)
     {
-        if (row.name == "MacBook Pro" || youhost::deviceNamesMatch(row.name, "MacBook Pro"))
+        if (row.name == "MacBook Pro (mic + speakers)")
         {
             ++macRowsAfter;
             macLabel = row.label;
@@ -3338,24 +3339,24 @@ void testDeviceListGrouping()
             ++aggregateRows;
     }
     CHECK(macRowsAfter == 1);
-    CHECK(macRaw == "MacBook Pro");
-    CHECK(macLabel == "MacBook Pro (built-in) - 1 in / 2 out");
+    CHECK(macRaw == "MacBook Pro (mic + speakers)");
+    CHECK(macLabel == "MacBook Pro (mic + speakers) - 1 in / 2 out");
     CHECK(aggregateRows == 2);
     CHECK(switchedAgain.size() == switched.size());
     CHECK(youhost::openDeviceIsChosen("MacBook Pro-kaiuttimet",
-                                      "MacBook Pro",
+                                      "MacBook Pro (mic + speakers)",
                                       "MacBook Pro -mikrofoni",
                                       "MacBook Pro-kaiuttimet",
                                       "MacBook Pro -mikrofoni",
                                       "MacBook Pro-kaiuttimet"));
     CHECK(youhost::openDeviceIsChosen("koontilaite",
-                                      "MacBook Pro",
+                                      "MacBook Pro (mic + speakers)",
                                       "MacBook Pro -mikrofoni",
                                       "MacBook Pro-kaiuttimet",
                                       "MacBook Pro -mikrofoni",
                                       "MacBook Pro-kaiuttimet"));
     CHECK(! youhost::openDeviceIsChosen("koontilaite",
-                                       "MacBook Pro",
+                                       "MacBook Pro (mic + speakers)",
                                        "MacBook Pro -mikrofoni",
                                        "MacBook Pro-kaiuttimet",
                                        "koontilaite",
@@ -3365,10 +3366,10 @@ void testDeviceListGrouping()
     CHECK(youhost::deviceChangeCauseAllowed("session open"));
     CHECK(youhost::deviceChangeCauseAllowed("reopening the chosen card"));
     CHECK(! youhost::deviceChangeCauseAllowed("system opened another card"));
-    CHECK(youhost::deviceChangeLogLine("MacBook Pro", "koontilaite", "system opened another card")
-          == "device change from MacBook Pro to koontilaite cause=system opened another card");
-    CHECK(youhost::deviceChangeLogLine("", "MacBook Pro", "reopening the chosen card")
-          == "device change to MacBook Pro cause=reopening the chosen card");
+    CHECK(youhost::deviceChangeLogLine("MacBook Pro (mic + speakers)", "koontilaite", "system opened another card")
+          == "device change from MacBook Pro (mic + speakers) to koontilaite cause=system opened another card");
+    CHECK(youhost::deviceChangeLogLine("", "MacBook Pro (mic + speakers)", "reopening the chosen card")
+          == "device change to MacBook Pro (mic + speakers) cause=reopening the chosen card");
     const auto menusAfter = youhost::audioSetupMenus(afterSwitch, "MacBook Pro-kaiuttimet", false, 48000.0, 24, 32);
     int selectedMac = 0;
     int selectedAggregate = 0;
@@ -3376,7 +3377,7 @@ void testDeviceListGrouping()
     {
         if (choice.heading || choice.id != menusAfter[0].selectedId)
             continue;
-        if (choice.raw == "MacBook Pro")
+        if (choice.raw == "MacBook Pro (mic + speakers)")
             ++selectedMac;
         if (youhost::audioCardKind(choice.raw) == youhost::AudioCardKind::virtualDevice)
             ++selectedAggregate;
@@ -3394,13 +3395,21 @@ void testDeviceListGrouping()
     CHECK(engineNow.find("user chose the card") != std::string::npos);
     CHECK(engineNow.find("listedDeviceCovers") != std::string::npos);
     CHECK(engineNow.find("wantedName_ = menuName") != std::string::npos);
+    int sameName = 0;
+    for (const auto& row : switchedAgain)
+        if (row.name == "MacBook Pro (mic + speakers)")
+            ++sameName;
+    CHECK(sameName == 1);
     CHECK(youhost::shortcutHelpText().find("does not move to another card") != std::string::npos);
+    CHECK(youhost::shortcutHelpText().find("MacBook Pro (mic + speakers)") != std::string::npos);
     CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("does not move to another card") != std::string::npos);
+    CHECK(readWorkspaceFile(".github/workflows/build-macos.yml").find("MacBook Pro (mic + speakers)") != std::string::npos);
     const auto builtIn = youhost::pairBuiltinCards({
         { "Built-in Microphone", 1, 0 },
         { "Built-in Output", 0, 2 },
     });
     CHECK(builtIn.size() == 1);
+    CHECK(builtIn[0].name == "Built-in (mic + speakers)");
     CHECK(builtIn[0].inputName == "Built-in Microphone");
     CHECK(builtIn[0].outputName == "Built-in Output");
 
@@ -4101,7 +4110,7 @@ void testReleaseChecklist()
     });
     bool macbookOne = macbookPair.size() == 2;
     for (const auto& device : macbookPair)
-        if (device.name == "MacBook Pro")
+        if (device.name == "MacBook Pro (mic + speakers)")
             macbookOne = macbookOne && device.inputs == 1 && device.outputs == 2
                          && device.inputName == "MacBook Pro Microphone"
                          && device.outputName == "MacBook Pro Speakers";

@@ -46,7 +46,7 @@ What's new
 --------------------------
 - The device menu is in the startup window and in Audio setup (next to sample rate and buffer).
 - Real hardware is listed first (USB, Thunderbolt, AVB, Dante, SoundGrid), then Virtual / aggregate devices, then the MacBook built-in, and Offline last.
-- YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline. A later switch happens only when you pick a card, or when a session file names one. YouHost does not move to another card on its own. The MacBook microphone and speakers stay one entry.
+- YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline. A later switch happens only when you pick a card, or when a session file names one. YouHost does not move to another card on its own. The MacBook microphone and speakers stay one entry, MacBook Pro (mic + speakers).
 - Switching cards keeps channel names, plugins and groups.
 - A session always has 128 channels. Channels beyond the card's count are hidden. Plugins on a hidden channel, or a channel with no input, do not run. A one-input, two-output device runs plugins only on the channel that has the input.
 - The channel mode button cycles: REC (plugins + recording) → INPUT (plugins, not recorded) → OFF (channel fully off).

@@ -432,6 +432,18 @@ inline std::string builtinFamilyKey(std::string_view name)
     return text;
 }
 
+// The menu name for one physical Mac: "MacBook Pro (mic + speakers)".
+inline constexpr const char* kCombinedMicSpeakers = " (mic + speakers)";
+
+inline std::string combinedBuiltinName(std::string_view family)
+{
+    auto name = trimDeviceText(std::string(family));
+    if (name.empty())
+        return {};
+    name += kCombinedMicSpeakers;
+    return name;
+}
+
 // MacBook mic + speakers become one card. Headphones stay on their own row.
 inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice>& devices)
 {
@@ -472,7 +484,7 @@ inline std::vector<ListedDevice> pairBuiltinCards(const std::vector<ListedDevice
         speakerUsed[static_cast<std::size_t>(match)] = true;
         const auto& speaker = speakers[static_cast<std::size_t>(match)];
         ListedDevice paired;
-        const auto shown = trimDeviceText(family);
+        const auto shown = combinedBuiltinName(family);
         paired.name = shown.empty() ? mic.name : shown;
         paired.inputName = mic.name;
         paired.outputName = speaker.name;
@@ -621,11 +633,6 @@ inline std::string deviceEntryLabel(std::string_view name, int inputs, int outpu
     if (inputs < 0 || outputs < 0)
         return std::string(name);
     std::string label(name);
-    if (audioCardKind(name) == AudioCardKind::builtin && inputs > 0 && outputs > 0
-        && ! containsFolded(name, "built-in") && ! containsFolded(name, "microphone")
-        && ! containsFolded(name, "speaker") && ! containsFolded(name, "mikrofoni")
-        && ! containsFolded(name, "kaiutin"))
-        label += " (built-in)";
     label += " - ";
     label += std::to_string(inputs);
     label += " in / ";
