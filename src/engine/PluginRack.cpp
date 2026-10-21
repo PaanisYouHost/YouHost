@@ -1317,10 +1317,14 @@ void PluginRack::process(float* const* outputs,
 
 void PluginRack::joinAudioThread()
 {
-    if (audioJoined_)
+    // Every callback, the way an Audio Unit render is told the device
+    // workgroup. A VST3 reads that workgroup from this thread and joins its
+    // workers before it waits. One failed join must not stick. Joining again
+    // when this thread is already in this workgroup does not leave it.
+    if (! static_cast<bool>(workgroup_))
         return;
     workgroup_.join(audioToken_);
-    audioJoined_ = static_cast<bool>(workgroup_);
+    audioJoined_ = static_cast<bool>(audioToken_);
 }
 
 void PluginRack::processJob(int index)

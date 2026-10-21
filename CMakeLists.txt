@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 1.0.7
+    VERSION 1.0.8
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -18,7 +18,7 @@ FetchContent_Declare(JUCE
     URL https://github.com/juce-framework/JUCE/archive/refs/tags/9.0.3.tar.gz
     URL_HASH SHA256=a81e5508b8a0efa483917794ebeaff56aed3075730c405a947734413f40c1aba
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    PATCH_COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_bit_depth.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_vst3_mac_scale.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_editor_view.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_realtime_callback.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_au_release.py)
+    PATCH_COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_bit_depth.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_vst3_mac_scale.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_editor_view.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_realtime_callback.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_au_release.py && python3 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_juce_vst3_process.py)
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_gui_app(YouHost
