@@ -544,14 +544,25 @@ struct PluginRack::RealtimePool
         int index_ = 0;
     };
 
-    explicit RealtimePool(int workersIn)
+    explicit RealtimePool(int workersIn, double sampleRateIn, int blockSize)
+        : rate_(sampleRateIn),
+          block_(blockSize)
     {
         const int workers = std::clamp(workersIn, 0, 7);
         threads_.reserve(static_cast<std::size_t>(workers));
         for (int index = 0; index < workers; ++index)
         {
             auto worker = std::make_unique<Worker>(*this, index);
-            const auto options = juce::Thread::RealtimeOptions {}.withApproximateAudioProcessingTime(128, 48000.0);
+            // The period is one device buffer, the same deadline Ardour gives
+            // its process thread. A fixed 128-sample budget leaves the period
+            // at 0, and macOS then rejects the time-constraint policy.
+            const int samplesPerFrame = block_ > 0 ? block_ : 32;
+            const double sampleRate = rate_ > 0.0 ? rate_ : 48000.0;
+            const double periodMs = (static_cast<double>(samplesPerFrame) / sampleRate) * 1000.0;
+            const auto options = juce::Thread::RealtimeOptions {}
+                                     .withPeriodMs(periodMs)
+                                     .withProcessingTimeMs(periodMs)
+                                     .withApproximateAudioProcessingTime(samplesPerFrame, sampleRate);
             if (! worker->startRealtimeThread(options))
                 worker->startThread();
             threads_.push_back(std::move(worker));
@@ -633,6 +644,11 @@ struct PluginRack::RealtimePool
         return lastWaitNs_;
     }
 
+    bool sameQuantum(double sampleRate, int blockSize) const noexcept
+    {
+        return block_ == blockSize && rate_ > sampleRate - 1.0 && rate_ < sampleRate + 1.0;
+    }
+
     void runWorker(int index)
     {
         juce::WorkgroupToken token;
@@ -674,6 +690,8 @@ struct PluginRack::RealtimePool
     int lastWaitNs_ = 0;
     PluginRack* rack_ = nullptr;
     bool stopped_ = false;
+    double rate_ = 48000.0;
+    int block_ = 32;
 };
 
 static juce::String editorWindowKey(const juce::PluginDescription& description)
@@ -926,6 +944,10 @@ public:
                 return;
             }
             live->setNonRealtime(false);
+            // The device workgroup is part of prepare, then again on the
+            // audio thread before process. AudioPluginHost does the same.
+            if (static_cast<bool>(owner_.workgroup_))
+                live->audioWorkgroupContextChanged(owner_.workgroup_);
             live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
             setup.latencySamples = live->getLatencySamples();
         };
@@ -1012,7 +1034,7 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
     audible_.fill(true);
     groups_.fill(-1);
     deferred_ = std::make_unique<DeferredPluginRelease>();
-    pool_ = std::make_unique<RealtimePool>(dspWorkerCount());
+    pool_ = std::make_unique<RealtimePool>(dspWorkerCount(), 48000.0, 32);
     startTimerHz(5);
 }
 
@@ -1158,13 +1180,47 @@ void PluginRack::setActiveChannels(int count)
     }
 }
 
+namespace
+{
+// AudioPluginHost publishes the device host time on the playhead for the
+// duration of the callback. An Audio Unit copies that into AudioTimeStamp.
+// VST3 copies it into ProcessContext::systemTime.
+class DevicePlayHead final : public juce::AudioPlayHead
+{
+public:
+    DevicePlayHead(std::int64_t hostTimeNs, std::int64_t samplePosition, double sampleRate) noexcept
+        : hostTimeNs_(hostTimeNs),
+          samplePosition_(samplePosition),
+          sampleRate_(sampleRate)
+    {
+    }
+
+    juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override
+    {
+        juce::AudioPlayHead::PositionInfo info;
+        info.setTimeInSamples(samplePosition_);
+        if (sampleRate_ > 0.0)
+            info.setTimeInSeconds(static_cast<double>(samplePosition_) / sampleRate_);
+        if (hostTimeNs_ > 0)
+            info.setHostTimeNs(static_cast<std::uint64_t>(hostTimeNs_));
+        return info;
+    }
+
+private:
+    std::int64_t hostTimeNs_ = -1;
+    std::int64_t samplePosition_ = 0;
+    double sampleRate_ = 0.0;
+};
+} // namespace
+
 void PluginRack::process(float* const* outputs,
                          int numOutputs,
                          int numSamples,
                          const Routing& routing,
                          std::uint64_t enabledLow,
                          std::uint64_t enabledHigh,
-                         int activeChannels)
+                         int activeChannels,
+                         std::int64_t hostTimeNs)
 {
     // A shorter callback is legal: the plugin was prepared for the maximum.
     // Re-preparing every time the device jitters (64, then 32, then 64)
@@ -1210,6 +1266,19 @@ void PluginRack::process(float* const* outputs,
     if (graph != nullptr && ! blocked && ! bypass && outputs != nullptr && numSamples > 0)
     {
         joinAudioThread();
+        DevicePlayHead devicePlayHead(hostTimeNs, hostSamplePosition_, sampleRate_);
+        blockPlayHead_ = &devicePlayHead;
+        if (announceWorkgroup_.exchange(false, std::memory_order_acq_rel) && static_cast<bool>(workgroup_))
+        {
+            for (int channel = 0; channel < kMaxChannels; ++channel)
+            {
+                for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+                {
+                    if (auto* instance = graph->slots[channel][slot].instance)
+                        instance->audioWorkgroupContextChanged(workgroup_);
+                }
+            }
+        }
 
         jobGraph_ = graph;
         jobSamples_ = numSamples;
@@ -1279,12 +1348,16 @@ void PluginRack::process(float* const* outputs,
         }
         blockNote_.vst3Inline = 0;
         blockNote_.waitNs = waitNs;
+        blockPlayHead_ = nullptr;
     }
     else
     {
         blockNote_.vst3Inline = 0;
         blockNote_.waitNs = 0;
+        blockPlayHead_ = nullptr;
     }
+    if (numSamples > 0)
+        hostSamplePosition_ += numSamples;
 
     // Name is copied while this graph is still the in-use one. Releasing it
     // first lets the message thread free the graph under the audio thread.
@@ -1313,14 +1386,17 @@ void PluginRack::process(float* const* outputs,
 
 void PluginRack::joinAudioThread()
 {
-    // Every callback, the way an Audio Unit render is told the device
-    // workgroup. A VST3 reads that workgroup from this thread and joins its
-    // workers before it waits. One failed join must not stick. Joining again
-    // when this thread is already in this workgroup does not leave it.
+    // Join once. Core Audio's IO thread is already in this workgroup, and so
+    // is a worker after its first job. os_workgroup_join then returns
+    // EALREADY. Joining on every buffer must not leave the workgroup. Ardour
+    // joins its process thread once.
     if (! static_cast<bool>(workgroup_))
         return;
+    if (audioJoined_ && joinedWorkgroup_ == workgroup_)
+        return;
     workgroup_.join(audioToken_);
-    audioJoined_ = static_cast<bool>(audioToken_);
+    joinedWorkgroup_ = workgroup_;
+    audioJoined_ = true;
 }
 
 void PluginRack::processJob(int index)
@@ -1487,6 +1563,13 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
             int blockOnlyNs = 0;
             const auto began = steadyNs();
             auto& midi = graph.midi[static_cast<std::size_t>(channel)];
+            auto render = [&](juce::AudioBuffer<float>& view)
+            {
+                if (blockPlayHead_ != nullptr)
+                    instance->setPlayHead(blockPlayHead_);
+                instance->processBlock(view, midi);
+                instance->setPlayHead(nullptr);
+            };
             const auto fold = stereoFoldFromInt(live.stereoFold);
             auto runOne = [&](float* mono)
             {
@@ -1499,7 +1582,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                     midi.clear();
                     juce::AudioBuffer<float> view(plugin, 1, count);
                     const auto blockBegan = steadyNs();
-                    instance->processBlock(view, midi);
+                    render(view);
                     blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                     return;
                 }
@@ -1510,7 +1593,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 midi.clear();
                 juce::AudioBuffer<float> view(plugin, viewWidth, count);
                 const auto blockBegan = steadyNs();
-                instance->processBlock(view, midi);
+                render(view);
                 blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 takeFoldedChannel(mono, plugin, outputsN, count, fold);
             };
@@ -1530,7 +1613,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                     midi.clear();
                     juce::AudioBuffer<float> view(scratch, width, count);
                     const auto blockBegan = steadyNs();
-                    instance->processBlock(view, midi);
+                    render(view);
                     blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                     if (partner == nullptr && outputsN >= 2)
                     {
@@ -1560,7 +1643,7 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 midi.clear();
                 juce::AudioBuffer<float> view(pair, 2, count);
                 const auto blockBegan = steadyNs();
-                instance->processBlock(view, midi);
+                render(view);
                 blockOnlyNs += static_cast<int>(steadyNs() - blockBegan);
                 leftReport = sanitizeAudioBlock(buffer, count);
                 rightReport = sanitizeAudioBlock(right, count);
@@ -1864,6 +1947,12 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
         return;
     workgroup_ = workgroup;
     audioJoined_ = false;
+    announceWorkgroup_.store(true, std::memory_order_release);
+    // Replace workers only before the device is running. The period has to be
+    // this buffer. Tearing the pool down from a live callback is a use after free.
+    if (pool_ == nullptr
+        || (! callbacksRunning_.load(std::memory_order_acquire) && ! pool_->sameQuantum(rate, block)))
+        pool_ = std::make_unique<RealtimePool>(dspWorkerCount(), rate, block);
 
     std::vector<std::shared_ptr<HostedPlugin>> hosted;
     {
@@ -1889,11 +1978,14 @@ void PluginRack::prepare(double sampleRate, int blockSize, const Routing& routin
             if (! pauseGate(*plugin->gate))
                 continue;
             auto* instance = plugin->instance.get();
-            runOnMessageThread([instance, plugin, rate, block]
+            const auto deviceWorkgroup = workgroup_;
+            runOnMessageThread([instance, plugin, rate, block, deviceWorkgroup]
             {
                 if (instance == nullptr)
                     return;
                 instance->setNonRealtime(false);
+                if (static_cast<bool>(deviceWorkgroup))
+                    instance->audioWorkgroupContextChanged(deviceWorkgroup);
                 instance->prepareToPlay(rate, block);
                 instance->reset();
                 plugin->latencySamples = clampLatencySamples(instance->getLatencySamples());
@@ -2299,6 +2391,8 @@ void PluginRack::finishLoad(int channel,
             model.error = hosted == nullptr ? problem : juce::String();
             previous = std::move(model.plugin);
             model.plugin = std::move(hosted);
+            if (model.plugin != nullptr)
+                announceWorkgroup_.store(true, std::memory_order_release);
             publishUnlocked();
             notify = markDirty;
             openIt = openWhenReady && model.plugin != nullptr;

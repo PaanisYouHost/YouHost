@@ -106,8 +106,9 @@ public:
                  const Routing& routing,
                  std::uint64_t enabledLow,
                  std::uint64_t enabledHigh,
-                 int activeChannels);
-    // Join the device workgroup for this whole callback, not only the plugin section.
+                 int activeChannels,
+                 std::int64_t hostTimeNs);
+    // Join the device workgroup once, for this callback thread.
     void joinAudioThread();
     void setActiveChannels(int count);
     void prepare(double sampleRate, int blockSize, const Routing& routing, const juce::AudioWorkgroup& workgroup);
@@ -436,8 +437,12 @@ private:
 
     std::unique_ptr<RealtimePool> pool_;
     juce::AudioWorkgroup workgroup_;
+    juce::AudioWorkgroup joinedWorkgroup_;
     juce::WorkgroupToken audioToken_;
     bool audioJoined_ = false;
+    std::atomic<bool> announceWorkgroup_ { true };
+    juce::AudioPlayHead* blockPlayHead_ = nullptr;
+    std::int64_t hostSamplePosition_ = 0;
     int jobChannels_[kMaxChannels] {};
     float* jobOutputs_[kMaxChannels] {};
     float* jobPartners_[kMaxChannels] {};

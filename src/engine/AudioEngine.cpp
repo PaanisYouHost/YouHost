@@ -946,7 +946,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                                    const juce::AudioIODeviceCallbackContext& context)
 {
     juce::ScopedNoDenormals noDenormals;
-    juce::ignoreUnused(context);
+    const std::int64_t hostTimeNs = context.hostTimeNs != nullptr
+                                        ? static_cast<std::int64_t>(*context.hostTimeNs)
+                                        : static_cast<std::int64_t>(-1);
 
     const int64_t startedNs = steadyNowNs();
     const int64_t startedCpu = threadCpuNowNs();
@@ -1068,7 +1070,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     // Playback remaps playConfig only. The rack keeps config.routing, so a channel
     // with no device input does not run, including one that has an output.
     if (rack_ != nullptr)
-        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels);
+        rack_->process(outputChannelData, numOutputChannels, numSamples, config.routing, enabledLow, enabledHigh, sessionChannels, hostTimeNs);
     const auto pluginNs = steadyNowNs();
 
     if (outputChannelData != nullptr && numSamples > 0)
