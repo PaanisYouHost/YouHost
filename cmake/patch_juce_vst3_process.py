@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Make VST3 process wait the way an Audio Unit render does: not at all.
 
-The audio thread was off-CPU for more than half of each VST3 process. Two
-host calls did that, and the Audio Unit path has neither.
+The audio thread was off-CPU for more than half of each VST3 process.
 
 performEdit and the output-parameter listener ran on the audio thread. They
 take the parameter lock and call the edit controller, which waits on the
@@ -12,12 +11,18 @@ message thread applies it.
 ProcessContext was only the sample rate. An Audio Unit render is already
 inside the device interval and has the HAL clock. A VST3 that needs that
 clock waits. Fill system time, the running sample count, and playing.
+
+processBlock also took SpinLock processMutex around IAudioProcessor::process.
+SpinLock::enter yields the audio thread after a few failed tries. A normal
+host does not take that lock. Prepare and release still take it on the
+message thread. The audio thread does not.
 """
 
 from pathlib import Path
 import sys
 
 MARKER = "youhostContinuousSamples"
+LOCK_MARKER = "youhostProcessUnlocked"
 
 OLD_DISPATCHER = """    void start (Vst::IEditController& controllerIn)
     {
@@ -271,6 +276,89 @@ NEW_TIMING = """    void updateTimingInformation (Vst::ProcessData& destination,
     }
 """
 
+OLD_PROCESS_FLOAT = """    void processBlock (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (! isUsingDoublePrecision());
+
+        const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (isActive && processor != nullptr)
+            processAudio (buffer, midiMessages, Vst::kSample32, false);
+    }
+"""
+
+NEW_PROCESS_FLOAT = """    void processBlock (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (! isUsingDoublePrecision());
+
+        // youhostProcessUnlocked: call IAudioProcessor::process with no lock.
+        // SpinLock::enter yields this thread. A normal host does not wait.
+        if (isActive && processor != nullptr)
+            processAudio (buffer, midiMessages, Vst::kSample32, false);
+    }
+"""
+
+OLD_PROCESS_DOUBLE = """    void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (isUsingDoublePrecision());
+
+        const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (isActive && processor != nullptr)
+            processAudio (buffer, midiMessages, Vst::kSample64, false);
+    }
+"""
+
+NEW_PROCESS_DOUBLE = """    void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (isUsingDoublePrecision());
+
+        if (isActive && processor != nullptr)
+            processAudio (buffer, midiMessages, Vst::kSample64, false);
+    }
+"""
+
+OLD_BYPASS_FLOAT = """    void processBlockBypassed (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (! isUsingDoublePrecision());
+
+        const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (bypassParam != nullptr)
+"""
+
+NEW_BYPASS_FLOAT = """    void processBlockBypassed (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (! isUsingDoublePrecision());
+
+        if (bypassParam != nullptr)
+"""
+
+OLD_BYPASS_DOUBLE = """    void processBlockBypassed (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (isUsingDoublePrecision());
+
+        const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (bypassParam != nullptr)
+"""
+
+NEW_BYPASS_DOUBLE = """    void processBlockBypassed (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
+    {
+        jassert (isUsingDoublePrecision());
+
+        if (bypassParam != nullptr)
+"""
+
+
+def apply_replacements(text, replacements):
+    for old, new, name in replacements:
+        if old not in text:
+            print(f"Could not find the VST3 {name}", file=sys.stderr)
+            return None
+        text = text.replace(old, new, 1)
+    return text
+
 
 def main() -> int:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
@@ -279,24 +367,31 @@ def main() -> int:
         print(f"Could not find {path}", file=sys.stderr)
         return 1
     text = path.read_text(encoding="utf-8")
-    if MARKER in text:
-        return 0
-    replacements = [
-        (OLD_DISPATCHER, NEW_DISPATCHER, "parameter dispatcher"),
-        (OLD_CACHE, NEW_CACHE, "parameter cache"),
-        (OLD_START, NEW_START, "dispatcher start"),
-        (OLD_BEGIN, NEW_BEGIN, "beginEdit"),
-        (OLD_PERFORM, NEW_PERFORM, "performEdit"),
-        (OLD_END, NEW_END, "endEdit"),
-        (OLD_TIMING_MEMBER, NEW_TIMING_MEMBER, "timing member"),
-        (OLD_TIMING, NEW_TIMING, "process context"),
-    ]
-    for old, new, name in replacements:
-        if old not in text:
-            print(f"Could not find the VST3 {name}", file=sys.stderr)
+    original = text
+    if MARKER not in text:
+        text = apply_replacements(text, [
+            (OLD_DISPATCHER, NEW_DISPATCHER, "parameter dispatcher"),
+            (OLD_CACHE, NEW_CACHE, "parameter cache"),
+            (OLD_START, NEW_START, "dispatcher start"),
+            (OLD_BEGIN, NEW_BEGIN, "beginEdit"),
+            (OLD_PERFORM, NEW_PERFORM, "performEdit"),
+            (OLD_END, NEW_END, "endEdit"),
+            (OLD_TIMING_MEMBER, NEW_TIMING_MEMBER, "timing member"),
+            (OLD_TIMING, NEW_TIMING, "process context"),
+        ])
+        if text is None:
             return 1
-        text = text.replace(old, new, 1)
-    path.write_text(text, encoding="utf-8")
+    if LOCK_MARKER not in text:
+        text = apply_replacements(text, [
+            (OLD_PROCESS_FLOAT, NEW_PROCESS_FLOAT, "processBlock float"),
+            (OLD_PROCESS_DOUBLE, NEW_PROCESS_DOUBLE, "processBlock double"),
+            (OLD_BYPASS_FLOAT, NEW_BYPASS_FLOAT, "processBlockBypassed float"),
+            (OLD_BYPASS_DOUBLE, NEW_BYPASS_DOUBLE, "processBlockBypassed double"),
+        ])
+        if text is None:
+            return 1
+    if text != original:
+        path.write_text(text, encoding="utf-8")
     return 0
 
 
