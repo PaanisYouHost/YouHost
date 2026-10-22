@@ -209,6 +209,7 @@ public:
     std::vector<StripItem> displayStrips(int channelCount) const;
 
     void selectChannel(int channel, bool extend, bool toggle = false);
+    void clearChannelSelection();
     void selectAllVisibleChannels();
     void setSelectionHandler(std::function<void(int)> handler);
     bool isChannelSelected(int channel) const;

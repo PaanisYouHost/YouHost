@@ -756,6 +756,8 @@ void MeterGrid::mouseDown(const juce::MouseEvent& event)
         onClearClip_(hit.channel);
     else if (hit.channel >= 0 && onSelect_ != nullptr)
         onSelect_(hit.channel, false, false);
+    else if (! hit.header && onSelect_ != nullptr)
+        onSelect_(-1, false, false);
 }
 
 } // namespace youhost

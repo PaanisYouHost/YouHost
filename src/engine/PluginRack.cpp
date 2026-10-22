@@ -18,7 +18,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <tuple>
 
@@ -53,6 +55,24 @@ void releaseInstanceOffMessageThread(juce::AudioPluginInstance* instance)
         delete instance;
     });
     juce::ignoreUnused(started);
+}
+
+// Quit deletes on the message thread, before NSApplication terminate.
+// A plugin destructor that throws is swallowed here. One that calls
+// std::terminate exits without aborting inside _deallocHardCore.
+void releasePluginOnMessageThread(juce::AudioPluginInstance* instance)
+{
+    if (instance == nullptr)
+        return;
+    const auto previous = std::set_terminate([] { std::_Exit(0); });
+    try
+    {
+        delete instance;
+    }
+    catch (...)
+    {
+    }
+    std::set_terminate(previous);
 }
 
 juce::String pluginIdentifier(const juce::PluginDescription& description)
@@ -2906,8 +2926,13 @@ void PluginRack::openEditor(int channel, int slot)
     }
     const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
     const auto saved = parseWindowState(stored.toStdString());
-    const int fittedWidth = std::max(editor->getWidth() + borderW, window->getWidth());
-    const int fittedHeight = std::max(editor->getHeight() + borderH, window->getHeight());
+    const bool vst3 = plugin->description.pluginFormatName == "VST3";
+    // A VST3 host window is the plugin view, not a larger remembered frame.
+    // Audio Unit sizing is unchanged.
+    const int fittedWidth = vst3 ? editor->getWidth() + borderW
+                                 : std::max(editor->getWidth() + borderW, window->getWidth());
+    const int fittedHeight = vst3 ? editor->getHeight() + borderH
+                                  : std::max(editor->getHeight() + borderH, window->getHeight());
     const auto plan = planEditorWindow(fittedWidth,
                                        fittedHeight,
                                        editor->isResizable(),
@@ -2918,7 +2943,7 @@ void PluginRack::openEditor(int channel, int slot)
                                        displayScale,
                                        screenWidth,
                                        screenHeight,
-                                       saved);
+                                       vst3 ? SavedWindowSize {} : saved);
     window->setResizable(plan.resizable, false);
     if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
         window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
@@ -3649,8 +3674,12 @@ void PluginRack::releaseForQuit()
         if (backgroundInstantiate_->stopThread(200))
         {
             backgroundInstantiate_.reset();
-            std::lock_guard<std::mutex> lock(offThreadMutex_);
-            offThreadInstance_.reset();
+            std::unique_ptr<juce::AudioPluginInstance> orphan;
+            {
+                std::lock_guard<std::mutex> lock(offThreadMutex_);
+                orphan = std::move(offThreadInstance_);
+            }
+            releasePluginOnMessageThread(orphan.release());
         }
         else
         {
@@ -3658,9 +3687,18 @@ void PluginRack::releaseForQuit()
         }
     }
     blockProcessing_.store(true, std::memory_order_release);
-    const bool idle = waitUntilOutsideCallback();
-    if (idle)
+    waitUntilOutsideCallback();
+    // Audio is already stopped. Editors and plugins are released here, on
+    // this message thread, before the process terminates. A throw from a
+    // plugin destructor must not abort the app.
+    const auto previousTerminate = std::set_terminate([] { std::_Exit(0); });
+    try
+    {
         closeAllEditors();
+    }
+    catch (...)
+    {
+    }
     flushDeferred();
     if (pool_ != nullptr)
     {
@@ -3678,23 +3716,25 @@ void PluginRack::releaseForQuit()
         {
             slot.ticket = ++ticketSource_;
             slot.loading = false;
-            if (idle)
+            try
+            {
                 slot.plugin.reset();
+            }
+            catch (...)
+            {
+            }
         }
     }
     published_.store(nullptr, std::memory_order_release);
-    if (idle)
+    try
     {
         current_.reset();
         retired_.clear();
     }
-    else
+    catch (...)
     {
-        current_.release();
-        for (auto& graph : retired_)
-            graph.release();
-        retired_.clear();
     }
+    std::set_terminate(previousTerminate);
 }
 
 bool PluginRack::waitUntilOutsideCallback()
@@ -4016,7 +4056,9 @@ void PluginRack::flushDeferred()
         auto* dying = item.instance;
         item.instance = nullptr;
         dying->removeListener(this);
-        releaseInstanceOffMessageThread(dying);
+        // Session unload uses releaseInstanceOffMessageThread. Quit deletes
+        // here, on the message thread, before the process terminates.
+        releasePluginOnMessageThread(dying);
     }
     condemned_.clear();
 }
@@ -4038,10 +4080,18 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
         }
     }
 
-    if (rack == nullptr || rack->quitting_)
+    if (rack != nullptr && rack->quitting_)
     {
-        if (rack != nullptr)
-            instance->removeListener(rack);
+        instance->removeListener(rack);
+        // Quit stays on this message thread. A session unload still goes
+        // through releaseInstanceOffMessageThread, because an Audio Unit
+        // destructor can dispatch_sync back here and must not run here.
+        releasePluginOnMessageThread(instance);
+        return;
+    }
+
+    if (rack == nullptr)
+    {
         releaseInstanceOffMessageThread(instance);
         return;
     }

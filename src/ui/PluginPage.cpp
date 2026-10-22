@@ -1118,7 +1118,12 @@ public:
         if (event.eventComponent == this && meterArea_.contains(event.getPosition()) && engine_.clipFor(channel_))
             engine_.requestClipClear(channel_);
         else if (event.eventComponent == this)
-            engine_.selectChannel(channel_, false, false);
+        {
+            if (engine_.selectedChannels().size() == 1 && engine_.isChannelSelected(channel_))
+                engine_.clearChannelSelection();
+            else
+                engine_.selectChannel(channel_, false, false);
+        }
     }
 
 private:
@@ -1325,6 +1330,7 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
     empty_.setJustificationType(juce::Justification::centred);
     empty_.setColour(juce::Label::textColourId, theme::dim);
     content_.addAndMakeVisible(empty_);
+    content_.addMouseListener(this, false);
     viewport_.setViewedComponent(&content_, false);
     viewport_.setScrollBarsShown(true, false);
 }
@@ -1467,6 +1473,12 @@ void PluginPage::refresh()
         row->refresh();
     for (auto& header : headers_)
         header->refresh();
+}
+
+void PluginPage::mouseDown(const juce::MouseEvent& event)
+{
+    if (event.eventComponent == &content_)
+        engine_.clearChannelSelection();
 }
 
 void PluginPage::resized()

@@ -1501,7 +1501,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     meterGrid_.setGroupToggleHandler([this](int group) { engine_.toggleGroupCollapsed(group); });
     meterGrid_.setSelectHandler([this](int channel, bool extend, bool toggle)
     {
-        engine_.selectChannel(channel, extend, toggle);
+        if (channel < 0)
+            engine_.clearChannelSelection();
+        else
+            engine_.selectChannel(channel, extend, toggle);
     });
     engine_.setSelectionHandler([this](int channel)
     {
@@ -1636,6 +1639,12 @@ bool MainComponent::handleKey(const juce::KeyPress& key, juce::Component* origin
 {
     if (shortcutBlocked(originating))
         return false;
+
+    if (key == juce::KeyPress::escapeKey)
+    {
+        engine_.clearChannelSelection();
+        return true;
+    }
 
     const auto matched = dispatchRawKey(rawKeyFromPress(key), page_, false);
     if (! matched.has_value())
