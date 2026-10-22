@@ -218,9 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.8 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.9 is a prerelease for testing. It is not the Latest release.
 
-            - VST3 process stays on the audio thread and does not call the edit controller or parameter listeners from that thread. The device clock is written into the VST3 process context. The audio thread joins the device workgroup on every callback.
+            - VST3 process does not take a lock or wait on the audio thread, for every VST3. Channels share the workgroup pool. One channel stays on the audio thread. The audio thread still does not call the edit controller or parameter listeners, and it still joins the device workgroup.
 
             - The device callback does not hold its lock while plugins run. A mono plugin is processed in place. Core Audio gives the callback the whole buffer period.
 

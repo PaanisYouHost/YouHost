@@ -5241,11 +5241,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.8"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.9"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.8"
+             && std::string(youhost::versionNumber()) == "1.0.9"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.8") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.9") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5254,8 +5254,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.8") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.8-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.9") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.9-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -6016,7 +6016,8 @@ void testBeta090()
     CHECK(processBody.find("waitUntilOutsideCallback") == std::string::npos);
     CHECK(processBody.find("numSamples > blockSize_") != std::string::npos);
     CHECK(processBody.find("channelProcessesPlugins") != std::string::npos);
-    CHECK(processBody.find("VST3 process stays on the audio thread") != std::string::npos);
+    CHECK(processBody.find("VST3 process does not take") != std::string::npos);
+    CHECK(processBody.find("the wrapper lock") != std::string::npos);
     CHECK(processBody.find("lifeLock_") == std::string::npos);
     // The 1.0.1 workgroup pool. One channel chain stays on the audio thread,
     // which is why four inserts on ch 1 are serial. A second channel wakes a

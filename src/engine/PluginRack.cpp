@@ -1214,7 +1214,6 @@ void PluginRack::process(float* const* outputs,
         jobGraph_ = graph;
         jobSamples_ = numSamples;
         int count = 0;
-        bool vst3Inline = false;
         const int limit = std::clamp(activeChannels, 0, kMaxChannels);
         for (int channel = 0; channel < limit; ++channel)
         {
@@ -1258,20 +1257,17 @@ void PluginRack::process(float* const* outputs,
             if (! anyPlugin && ! delayed && partner == nullptr)
                 continue;
 
-            if (! vst3Inline)
-            {
-                for (int slot = 0; slot < kSlotsPerChannel; ++slot)
-                    vst3Inline = vst3Inline || (graph->slots[channel][slot].vst3 && graph->slots[channel][slot].instance != nullptr);
-            }
             jobChannels_[count] = channel;
             jobOutputs_[count] = output;
             jobPartners_[count] = partner;
             ++count;
         }
 
-        // VST3 process stays on the audio thread. A worker would take the wrapper lock off that thread.
+        // One channel stays on this thread. Further channels use the workgroup
+        // pool, VST3 and Audio Unit the same way. VST3 process does not take
+        // the wrapper lock, so a worker can call it.
         int waitNs = 0;
-        if (vst3Inline || count <= 1 || pool_ == nullptr || ! vst3ProcessOnAudioThread())
+        if (count <= 1 || pool_ == nullptr || ! vst3ProcessOnAudioThread())
         {
             for (int index = 0; index < count; ++index)
                 processJob(index);
@@ -1281,7 +1277,7 @@ void PluginRack::process(float* const* outputs,
             pool_->parallel(count, this);
             waitNs = pool_->lastWaitNs();
         }
-        blockNote_.vst3Inline = vst3Inline ? 1 : 0;
+        blockNote_.vst3Inline = 0;
         blockNote_.waitNs = waitNs;
     }
     else
