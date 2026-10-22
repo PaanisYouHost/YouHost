@@ -48,7 +48,7 @@ public:
         addAndMakeVisible(hiddenNote_);
         addAndMakeVisible(tree_);
         addAndMakeVisible(empty_);
-        allButton_.setButtonText("Any");
+        allButton_.setButtonText("All");
         auButton_.setButtonText("AU");
         vstButton_.setButtonText("VST3");
         for (auto* button : { &allButton_, &auButton_, &vstButton_ })
@@ -77,7 +77,7 @@ public:
             if (vstButton_.getToggleState())
                 setFormat(InsertFormatFilter::vst3);
         };
-        search_.setTextToShowWhenEmpty("Find plugin or maker", theme::fainter);
+        search_.setTextToShowWhenEmpty("Search name or maker", theme::fainter);
         search_.onTextChange = [this] { rebuild(); };
         search_.onReturnKey = [this] { chooseSource(firstMatch_); };
         hiddenNote_.setText(juce::String(kInstrumentsHiddenNote.data(), kInstrumentsHiddenNote.size()),
@@ -107,11 +107,11 @@ public:
     {
         auto area = getLocalBounds().reduced(8);
         auto formats = area.removeFromTop(26);
-        vstButton_.setBounds(formats.removeFromLeft(72));
+        allButton_.setBounds(formats.removeFromLeft(64));
         formats.removeFromLeft(6);
         auButton_.setBounds(formats.removeFromLeft(64));
         formats.removeFromLeft(6);
-        allButton_.setBounds(formats.removeFromLeft(64));
+        vstButton_.setBounds(formats.removeFromLeft(72));
         area.removeFromTop(6);
         search_.setBounds(area.removeFromTop(28));
         if (hiddenNote_.isVisible())
@@ -1314,7 +1314,7 @@ PluginPage::PluginPage(AudioEngine& engine, AppSettings& settings)
     addAndMakeVisible(*columnHeader_);
     addAndMakeVisible(nullButton_);
     nullButton_.setMouseClickGrabsKeyboardFocus(false);
-    nullButton_.setTooltip("Bypass rack. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
+    nullButton_.setTooltip("ALL PLUGIN BYPASS. Bypasses every plugin and the compensation delay, so the USB output is the clean input. Click again to bring the plugins back. Loaded slots blink while this is on. The recorded WAV is always the raw input.");
     nullButton_.onClick = [this]
     {
         engine_.setBypassAll(! engine_.bypassAll());
@@ -1459,7 +1459,7 @@ void PluginPage::refresh()
 
     empty_.setVisible(channels_ == 0);
     const bool bypass = engine_.bypassAll();
-    nullButton_.setButtonText("Bypass rack");
+    nullButton_.setButtonText("ALL PLUGIN BYPASS");
     nullButton_.setToggleState(bypass, juce::dontSendNotification);
     nullButton_.setColour(juce::TextButton::buttonColourId, bypass ? juce::Colour(0xffd48a20) : theme::button);
     nullButton_.setColour(juce::TextButton::textColourOffId, bypass ? juce::Colours::white : theme::text);

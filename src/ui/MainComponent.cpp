@@ -515,8 +515,8 @@ private:
             addAndMakeVisible(browse_);
             addAndMakeVisible(create_);
             addAndMakeVisible(cancel_);
-            nameLabel_.setText("Tape name", juce::dontSendNotification);
-            locationLabel_.setText("Folder", juce::dontSendNotification);
+            nameLabel_.setText("Session name", juce::dontSendNotification);
+            locationLabel_.setText("Location", juce::dontSendNotification);
             name_.setText(suggestedNewSessionName(parent_), juce::dontSendNotification);
             name_.setSelectAllWhenFocused(true);
             location_.setJustificationType(juce::Justification::centredLeft);
@@ -617,7 +617,7 @@ private:
         juce::Label location_;
         juce::Label note_;
         juce::TextButton browse_ { "Browse..." };
-        juce::TextButton create_ { "Make the folder" };
+        juce::TextButton create_ { "Create session" };
         juce::TextButton cancel_ { "Cancel" };
     };
 
@@ -690,9 +690,9 @@ private:
             addAndMakeVisible(open_);
             addAndMakeVisible(recentLabel_);
             addAndMakeVisible(recentViewport_);
-            nameLabel_.setText("Tape name", juce::dontSendNotification);
-            locationLabel_.setText("Folder", juce::dontSendNotification);
-            recentLabel_.setText("Earlier sessions", juce::dontSendNotification);
+            nameLabel_.setText("Session name", juce::dontSendNotification);
+            locationLabel_.setText("Location", juce::dontSendNotification);
+            recentLabel_.setText("Open recent", juce::dontSendNotification);
             name_.setText(suggestedNewSessionName(parent_), juce::dontSendNotification);
             location_.setJustificationType(juce::Justification::centredLeft);
             note_.setColour(juce::Label::textColourId, theme::amber);
@@ -1009,8 +1009,8 @@ private:
         juce::Label location_;
         juce::Label note_;
         juce::TextButton browse_ { "Browse..." };
-        juce::TextButton create_ { "Make the folder" };
-        juce::TextButton open_ { "Pick a folder..." };
+        juce::TextButton create_ { "Create session" };
+        juce::TextButton open_ { "Open existing..." };
         juce::Label recentLabel_;
         juce::Viewport recentViewport_;
         juce::Component recent_;
@@ -1149,8 +1149,8 @@ public:
         const bool armed = owner.engine_.recordLockArmed();
         const bool fileOk = recordActionAllowed(RecordDisrupt::newSession, recording, armed);
         juce::PopupMenu menu;
-        menu.addItem(1, "Blank session", fileOk);
-        menu.addItem(2, "Load session...", fileOk);
+        menu.addItem(1, "New", fileOk);
+        menu.addItem(2, "Open...", fileOk);
 
         juce::PopupMenu recent;
         const auto sessions = owner.engine_.recentSessions();
@@ -1158,7 +1158,7 @@ public:
         {
             recent.addItem(100 + index, juce::File(sessions[index]).getFileName(), fileOk);
         }
-        menu.addSubMenu("Earlier sessions", recent, fileOk && ! sessions.isEmpty());
+        menu.addSubMenu("Open Recent", recent, fileOk && ! sessions.isEmpty());
         menu.addItem(5, "Import Recording Folder...", recordActionAllowed(RecordDisrupt::importRecordings, recording, armed));
         menu.addSeparator();
         menu.addCommandItem(&owner.commandManager_, MainComponent::saveCommand);
@@ -1354,10 +1354,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     recorderButton_.onClick = [this] { showPage(1); };
     pluginsButton_.onClick = [this] { showPage(2); };
     scannerButton_.onClick = [this] { toggleScanner(); };
-    scannerButton_.setTooltip("Scan (" + juce::String(shortcutChord(ShortcutId::scanner))
+    scannerButton_.setTooltip("SCAN (" + juce::String(shortcutChord(ShortcutId::scanner))
                               + "). Used when new plugins are installed.");
     cpuButton_.onClick = [this] { toggleCpu(); };
-    cpuButton_.setTooltip("Cpu (" + juce::String(shortcutChord(ShortcutId::cpu))
+    cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu))
                           + "). DSP is the buffer. 100% fills it.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
     nextButton_.onClick = [this] { engine_.transportJump(1); };
@@ -1378,12 +1378,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     helpButton_.onClick = [this] { showHelp(); };
     newButton_.onClick = [this] { newSession(); };
     openButton_.onClick = [this] { showOpenMenu(); };
-    openButton_.setTooltip("Load a recent session, or browse for one.");
+    openButton_.setTooltip("Open a recent session, or browse for one.");
     saveButton_.onClick = [this] { saveSession(); };
     saveAsButton_.onClick = [this] { saveSessionAs(); };
     dropoutsButton_.onClick = [this] { toggleDropouts(); };
-    recorderButton_.setTooltip("Rec page (" + juce::String(shortcutChord(ShortcutId::recPage)) + ").");
-    pluginsButton_.setTooltip("Host page (" + juce::String(shortcutChord(ShortcutId::hostPage)) + ").");
+    recorderButton_.setTooltip("Recorder page (" + juce::String(shortcutChord(ShortcutId::recPage)) + ").");
+    pluginsButton_.setTooltip("Plugins page (" + juce::String(shortcutChord(ShortcutId::hostPage)) + ").");
     dropoutsButton_.setTooltip("Open or close the dropout timeline (" + juce::String(shortcutChord(ShortcutId::dropouts)) + ").");
     latencyButton_.setTooltip("Open or close the latency card (" + juce::String(shortcutChord(ShortcutId::latency)) + ").");
     groupButton_.setTooltip("New group from the selected channels ("
@@ -1396,14 +1396,14 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     };
     allButton_.setTooltip("Show every channel. Opens every group.");
     hideButton_.setTooltip("Fold every channel that belongs to a group. Channels with no group stay visible.");
-    saveButton_.setTooltip("Keep session.youhost (" + juce::String(shortcutChord(ShortcutId::save)) + ").");
+    saveButton_.setTooltip("Save session.youhost (" + juce::String(shortcutChord(ShortcutId::save)) + ").");
     saveAsButton_.setTooltip("Copy the WAV files on a background thread, write session.youhost once, skip Backups, then continue in the new folder ("
                              + juce::String(shortcutChord(ShortcutId::saveAs)) + "). Not while recording.");
     latencyButton_.onClick = [this] { toggleLatency(); };
     markersButton_.onClick = [this] { toggleMarkers(); };
-    markersButton_.setTooltip("Open or close Markers (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
+    markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
     markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
-    markerButton_.setTooltip("Drop a cue at the playhead (M). Recording keeps going.");
+    markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
     syncOverlay_.onOpenDetails = [this] { showSyncRestoredDialog(); };
     syncDialog_.onOk = [this]
     {
@@ -1415,9 +1415,9 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
 
     prevButton_.setTooltip("Previous take (Left).");
     nextButton_.setTooltip("Next take (Right).");
-    stopButton_.setTooltip("Halt (Space).");
-    playButton_.setTooltip("Roll the recorded takes (Space). If Arm is lit, Roll starts the take.");
-    recButton_.setTooltip("Arm recording. The button blinks red. Press Roll to start, or Cmd+Space to record immediately.");
+    stopButton_.setTooltip("Stop (Space).");
+    playButton_.setTooltip("Play the recorded takes (Space). If Record is armed, Play starts the take.");
+    recButton_.setTooltip("Arm recording. The button blinks red. Press Play to start, or Cmd+Space to record immediately.");
     helpButton_.setTooltip(juce::String::fromUTF8(helpButtonTip()));
     allButton_.onClick = [this] { engine_.expandAllGroups(); refresh(); };
     hideButton_.onClick = [this] { engine_.hideGroupedChannels(); refresh(); };
@@ -1470,7 +1470,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
     clearClipsButton_.setTooltip("Clear every latched clip mark");
     setupButton_.onClick = [this] { toggleSetup(); };
-    setupButton_.setTooltip("Card, sample rate, and buffer size. The interface opens with all channels. REC, INPUT, and OFF choose what each channel does.");
+    setupButton_.setTooltip("Device, sample rate, and buffer size. The interface opens with all channels. REC, INPUT, and OFF choose what each channel does.");
 
     meterGrid_.setClearHandler([this](int channel)
     {
@@ -3102,7 +3102,7 @@ void MainComponent::refresh()
     const bool playing = transport.mode == TransportMode::playing;
     timeLabel_.setColour(juce::Label::textColourId, showingRecord ? juce::Colours::white : theme::text);
     timeLabel_.setColour(juce::Label::backgroundColourId, showingRecord ? juce::Colour(0xff8d2430) : theme::panel);
-    modeLabel_.setText(playing ? "FROM TAPE" : showingRecord ? "TO TAPE" : juce::String(), juce::dontSendNotification);
+    modeLabel_.setText(playing ? "PLAYBACK" : showingRecord ? "RECORD" : juce::String(), juce::dontSendNotification);
     modeLabel_.setColour(juce::Label::textColourId, playing ? theme::amber : theme::red);
     const bool blink = engine_.isRecordReady() && ! showingRecord && ((juce::Time::getMillisecondCounter() / 450u) % 2u) == 0u;
     recButton_.setToggleState(showingRecord || blink, juce::dontSendNotification);
@@ -3346,25 +3346,21 @@ void MainComponent::resized()
     area.removeFromTop(6);
 
     auto views = area.removeFromTop(34);
+    newButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
+    views.removeFromLeft(4);
+    openButton_.setBounds(views.removeFromLeft(50).reduced(0, 2));
+    views.removeFromLeft(4);
+    saveButton_.setBounds(views.removeFromLeft(46).reduced(0, 2));
+    views.removeFromLeft(4);
+    saveAsButton_.setBounds(views.removeFromLeft(72).reduced(0, 2));
+    views.removeFromLeft(8);
+    setupButton_.setBounds(views.removeFromLeft(96).reduced(0, 2));
+    views.removeFromLeft(8);
     groupButton_.setBounds(views.removeFromLeft(56).reduced(0, 2));
     views.removeFromLeft(4);
-    allButton_.setBounds(views.removeFromLeft(52).reduced(0, 2));
+    allButton_.setBounds(views.removeFromLeft(40).reduced(0, 2));
     views.removeFromLeft(4);
     hideButton_.setBounds(views.removeFromLeft(48).reduced(0, 2));
-    views.removeFromLeft(8);
-    setupButton_.setBounds(views.removeFromLeft(64).reduced(0, 2));
-    views.removeFromLeft(8);
-    saveButton_.setBounds(views.removeFromLeft(52).reduced(0, 2));
-    views.removeFromLeft(4);
-    saveAsButton_.setBounds(views.removeFromLeft(84).reduced(0, 2));
-    views.removeFromLeft(4);
-    newButton_.setBounds(views.removeFromLeft(64).reduced(0, 2));
-    views.removeFromLeft(4);
-    openButton_.setBounds(views.removeFromLeft(56).reduced(0, 2));
-    auto scanGap = views.removeFromRight(28);
-    scanTick_ = juce::Rectangle<int>(scanGap.getCentreX(), scanGap.getY() + 6, 1, std::max(8, scanGap.getHeight() - 12));
-    scannerButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
-    views.removeFromRight(4);
     markersButton_.setBounds(views.removeFromRight(118).reduced(0, 2));
     views.removeFromRight(4);
     latencyButton_.setBounds(views.removeFromRight(108).reduced(0, 2));
@@ -3376,20 +3372,23 @@ void MainComponent::resized()
     pluginsButton_.setBounds(views.removeFromRight(88).reduced(0, 2));
     views.removeFromRight(4);
     recorderButton_.setBounds(views.removeFromRight(76).reduced(0, 2));
+    auto scanGap = views.removeFromRight(28);
+    scanTick_ = juce::Rectangle<int>(scanGap.getCentreX(), scanGap.getY() + 6, 1, std::max(8, scanGap.getHeight() - 12));
+    scannerButton_.setBounds(views.removeFromRight(68).reduced(0, 2));
 
     auto fileGap = area.removeFromTop(4);
     fileRule_ = fileGap.withSizeKeepingCentre(fileGap.getWidth(), 1);
     auto transport = area.removeFromTop(kRecordLockRowHeight);
     markerButton_.setBounds(transport.removeFromRight(96).reduced(2, kTransportControlInsetY));
-    constexpr int transportWidth = 64 + 72 + 84 + 72 + 72 + kRecordLockButtonWidth + 8 + 148;
+    constexpr int transportWidth = 72 + 64 + 64 + 72 + 84 + kRecordLockButtonWidth + 8 + 148;
     auto cluster = transport.withSizeKeepingCentre(transportWidth, transport.getHeight());
+    prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
+    nextButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
     stopButton_.setBounds(cluster.removeFromLeft(64).reduced(2, kTransportControlInsetY));
     playButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
     recButton_.setBounds(cluster.removeFromLeft(84).reduced(2, kTransportControlInsetY));
     if (recordLock_ != nullptr)
         recordLock_->setBounds(cluster.removeFromLeft(kRecordLockButtonWidth).reduced(2, 0));
-    prevButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
-    nextButton_.setBounds(cluster.removeFromLeft(72).reduced(2, kTransportControlInsetY));
     cluster.removeFromLeft(8);
     timeLabel_.setBounds(cluster.removeFromLeft(148).reduced(0, 2));
     modeLabel_.setBounds(cluster.reduced(4, 8));
@@ -3461,11 +3460,11 @@ void MainComponent::resized()
     timeline_.setBounds(area.removeFromTop(timelineHeight));
     area.removeFromTop(6);
     auto listenRow = area.removeFromTop(32);
-    globalOffButton_.setBounds(listenRow.removeFromLeft(84).reduced(0, 2));
+    globalRecButton_.setBounds(listenRow.removeFromLeft(88).reduced(0, 2));
     listenRow.removeFromLeft(4);
     globalInputButton_.setBounds(listenRow.removeFromLeft(100).reduced(0, 2));
     listenRow.removeFromLeft(4);
-    globalRecButton_.setBounds(listenRow.removeFromLeft(88).reduced(0, 2));
+    globalOffButton_.setBounds(listenRow.removeFromLeft(84).reduced(0, 2));
     area.removeFromTop(6);
     if (recorder)
     {
