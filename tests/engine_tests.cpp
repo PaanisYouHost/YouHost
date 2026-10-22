@@ -5241,11 +5241,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.9"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.10"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.9"
+             && std::string(youhost::versionNumber()) == "1.0.10"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.9") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.10") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5254,8 +5254,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.9") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.9-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.10") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.10-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -6041,7 +6041,8 @@ void testBeta090()
     CHECK(processBody.find("joinAudioThread()") != std::string::npos);
     CHECK(processBody.find("pool_->parallel") != std::string::npos);
     CHECK(busSource.find("return std::clamp(cores - 1, 0, 7);") != std::string::npos);
-    CHECK(busSource.find("withApproximateAudioProcessingTime(128, 48000.0)") != std::string::npos);
+    CHECK(busSource.find("withPeriodMs(periodMs)") != std::string::npos);
+    CHECK(busSource.find("withApproximateAudioProcessingTime(samplesPerFrame, sampleRate)") != std::string::npos);
     auto helpersForChains = [](int chains, int workers)
     {
         if (chains <= 1 || workers <= 0)
