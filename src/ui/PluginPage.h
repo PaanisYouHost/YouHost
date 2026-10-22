@@ -27,6 +27,7 @@ public:
     void refresh();
     void refreshChannel(int channel);
     void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
 
 private:
     class Row;

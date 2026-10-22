@@ -4343,8 +4343,23 @@ std::vector<StripItem> AudioEngine::displayStrips(int channelCount) const
     return items;
 }
 
+void AudioEngine::clearChannelSelection()
+{
+    if (selection_.empty())
+        return;
+    selection_.clear();
+    if (selectionHandler_ != nullptr)
+        selectionHandler_(-1);
+}
+
 void AudioEngine::selectChannel(int channel, bool extend, bool toggle)
 {
+    if (! extend && ! toggle && selection_.size() == 1 && selection_.front() == channel)
+    {
+        clearChannelSelection();
+        return;
+    }
+
     ChannelSelection current;
     current.channels = selection_;
     current.anchor = selectionAnchor_;

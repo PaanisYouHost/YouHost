@@ -218,7 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.12 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.13 is a prerelease for testing. It is not the Latest release.
+
+            - A VST3 editor window matches the plugin view, including a later resize, and keeps the Retina point size. Audio Unit windows are unchanged. Clicking the selected track again, clicking empty mixer space, or pressing Esc clears the green ring. Quitting stops audio, closes editors, and releases every plugin on the message thread before the process ends.
 
             - Buffer choices include 24, 32, 48, 64, 96, 128, 256, 512, and 1024 samples. Header labels match 1.0.10. Audio, routing, the session format, and shortcuts are unchanged.
 
