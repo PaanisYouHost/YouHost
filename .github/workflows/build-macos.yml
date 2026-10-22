@@ -218,7 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.10 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.11 is a prerelease for testing. It is not the Latest release.
+
+            - Buffer choices include 24, 32, 48, 64, 96, 128, 256, 512, and 1024 samples. Header labels use different words and a different order. Audio, routing, the session format, and shortcuts are unchanged.
 
             - Plugins run on the Core Audio device workgroup. The audio thread joins it once. Channel workers use the device buffer as their realtime period. Each plugin receives that workgroup before prepare, and the device host time on the playhead for every buffer, for every Audio Unit and VST3.
 

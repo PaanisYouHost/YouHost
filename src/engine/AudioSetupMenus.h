@@ -109,7 +109,7 @@ inline std::vector<AudioSetupMenu> audioSetupMenus(const std::vector<ListedDevic
 
     AudioSetupMenu buffer;
     buffer.label = kBufferMenuLabel;
-    for (const int value : { 32, 64, 128, 256, 512, 1024 })
+    for (const int value : { 24, 32, 48, 64, 96, 128, 256, 512, 1024 })
     {
         AudioSetupChoice choice;
         choice.text = std::to_string(value) + " samples";
