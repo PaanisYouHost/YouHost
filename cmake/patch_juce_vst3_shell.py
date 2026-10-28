@@ -34,7 +34,7 @@ NEW_FIND = """void VST3PluginFormatHeadless::findAllTypesForFile (OwnedArray<Plu
     const auto shellFile = fileOrIdentifier.containsIgnoreCase ("WaveShell")
                            || fileOrIdentifier.containsIgnoreCase ("Shell");
     const auto fast = DescriptionLister::findDescriptionsFast (File (fileOrIdentifier));
-    int shellNamed = 0;
+    size_t shellNamed = 0;
 
     for (const auto& d : fast)
         if (d.name.containsIgnoreCase ("WaveShell") || d.name.containsIgnoreCase ("Shell"))

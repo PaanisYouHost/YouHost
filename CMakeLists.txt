@@ -175,6 +175,7 @@ if(APPLE)
         tests/group_stress.cpp
         src/engine/AudioEngine.cpp
         src/engine/PluginCatalogue.cpp
+        src/engine/PluginFault.cpp
         src/engine/PluginRack.cpp
         src/engine/Recorder.cpp
         src/engine/SessionDisk.cpp
