@@ -54,6 +54,7 @@ class SyncLostOverlay : public juce::Component
 {
 public:
     std::function<void()> onOpenDetails;
+    std::function<void()> onShrink;
 
     SyncLostOverlay()
     {
@@ -120,7 +121,13 @@ public:
 
     void mouseDown(const juce::MouseEvent&) override
     {
-        // The centered window stays up while the card is gone.
+        // A click shrinks the centered alarm to the corner. It does not touch the device.
+        if (place_ == SyncLostChrome::center)
+        {
+            if (onShrink != nullptr)
+                onShrink();
+            return;
+        }
         // The corner box only asks for the dialog. It does not touch the device.
         if (place_ != SyncLostChrome::corner || onOpenDetails == nullptr)
             return;

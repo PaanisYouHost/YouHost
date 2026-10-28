@@ -1404,10 +1404,19 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
     markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
     markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
+    syncOverlay_.onShrink = [this]
+    {
+        engine_.tuckSyncLost();
+        syncOverlay_.sync(engine_.syncLostState());
+        if (syncOverlay_.isVisible())
+            placeSyncOverlay();
+    };
     syncOverlay_.onOpenDetails = [this] { showSyncRestoredDialog(); };
     syncDialog_.onOk = [this]
     {
-        engine_.acknowledgeSyncLost();
+        if (! engine_.syncLostState().isMissing())
+            engine_.acknowledgeSyncLost();
+        syncDialog_.setVisible(false);
         refresh();
     };
     addChildComponent(syncOverlay_);
@@ -3184,7 +3193,7 @@ void MainComponent::refresh()
     }
     if (syncOverlay_.place() == SyncLostChrome::corner && ! syncDialog_.isVisible())
         syncOverlay_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
-    if (syncDialog_.isVisible() && ! syncState.showRestored())
+    if (syncDialog_.isVisible() && syncOverlay_.place() == SyncLostChrome::hidden)
         syncDialog_.setVisible(false);
     if (loading)
         heavyPaintHeld_ = true;
@@ -3513,7 +3522,10 @@ void MainComponent::showSyncRestoredDialog()
 {
     if (syncOverlay_.place() != SyncLostChrome::corner)
         return;
-    syncDialog_.setMessage(syncOverlay_.restoredLine());
+    if (engine_.syncLostState().isMissing())
+        syncDialog_.setMessage("Sync lost. Recording can be stopped and the session saved.");
+    else
+        syncDialog_.setMessage(syncOverlay_.restoredLine());
     placeSyncDialog();
     syncDialog_.setVisible(true);
     syncDialog_.toFront(false);

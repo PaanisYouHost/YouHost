@@ -108,6 +108,8 @@ struct SyncLostState
     int second = 0;
     bool haveClock = false;
     std::int64_t gapMs = 0;
+    // A click on the centered alarm shrinks it. A new loss opens the center again.
+    bool tucked = false;
 
     void deviceLost(int lossHour = -1, int lossMinute = 0, int lossSecond = 0) noexcept
     {
@@ -117,9 +119,16 @@ struct SyncLostState
             minute = lossMinute;
             second = lossSecond;
             haveClock = true;
+            tucked = false;
         }
         missing = true;
         restoredNotice = false;
+    }
+
+    void tuckWhileMissing() noexcept
+    {
+        if (missing)
+            tucked = true;
     }
 
     void deviceReturned(std::int64_t durationMs = 0) noexcept
@@ -192,7 +201,7 @@ enum class SyncLostChrome
 inline SyncLostChrome syncLostChrome(const SyncLostState& state) noexcept
 {
     if (state.isMissing())
-        return SyncLostChrome::center;
+        return state.tucked ? SyncLostChrome::corner : SyncLostChrome::center;
     if (state.showRestored())
         return SyncLostChrome::corner;
     return SyncLostChrome::hidden;

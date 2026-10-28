@@ -27,6 +27,12 @@ inline constexpr int kDefaultWavBitDepth = 24;
 // A new session asks the device for this buffer. 32 samples is the standing default.
 inline constexpr int kNewSessionBufferSamples = 32;
 
+// A session with no stored buffer uses 32. A stored size of at least 16 wins.
+inline int sessionBufferSamples(int stored) noexcept
+{
+    return stored >= 16 ? stored : kNewSessionBufferSamples;
+}
+
 inline int normaliseWavBitDepth(int bits) noexcept
 {
     if (bits == 16 || bits == 32)

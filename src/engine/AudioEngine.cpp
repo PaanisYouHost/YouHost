@@ -471,7 +471,8 @@ void AudioEngine::pollDeviceStats()
             appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine(wantedName_.toStdString(),
                                                                                 device->getName().toStdString(),
                                                                                 "system opened another card").c_str()));
-            tryReopenWanted();
+            // Stay on the chosen card. Closing the foreign device does not open another one.
+            rejectForeignDevice();
         }
         return;
     }
@@ -1793,7 +1794,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (remember && sameCard)
     {
         if (syncLost_.isMissing() && (deviceLostBanner_ || lossFinalized_))
+        {
             syncLost_.deviceReturned(gapMs);
+            appendHostLog(settings_, "sync restored");
+        }
         deviceLostBanner_ = false;
         lossFinalized_ = false;
         awaitingSavedDevice_ = false;
@@ -1864,8 +1868,11 @@ void AudioEngine::noteSyncLost()
     if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
         return;
     const auto now = juce::Time::getCurrentTime();
+    const bool already = syncLost_.isMissing();
     syncLost_.deviceLost(now.getHours(), now.getMinutes(), now.getSeconds());
     deviceLostBanner_ = true;
+    if (! already)
+        appendHostLog(settings_, "sync lost");
 }
 
 void AudioEngine::clearDisplayedCpu() noexcept
@@ -2481,10 +2488,20 @@ void AudioEngine::setSlotBypassed(int channel, int slot, bool bypassed)
 
 void AudioEngine::setChannelExcluded(int channel, bool excluded)
 {
-    if (channel >= 0 && channel < kMaxChannels)
-        strips_[static_cast<std::size_t>(channel)].excludeFromCompensation = excluded;
-    if (rack_ != nullptr)
-        rack_->setExcluded(channel, excluded);
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    const int left = channel & ~1;
+    const bool linked = left >= 0 && left < kMaxChannels && stereoLinked_[static_cast<std::size_t>(left)];
+    const int partner = excludePartnerChannel(channel, linked);
+    auto apply = [this, excluded](int index)
+    {
+        strips_[static_cast<std::size_t>(index)].excludeFromCompensation = excluded;
+        if (rack_ != nullptr)
+            rack_->setExcluded(index, excluded);
+    };
+    apply(channel);
+    if (partner >= 0 && partner < kMaxChannels && partner != channel)
+        apply(partner);
 }
 
 void AudioEngine::openPluginEditor(int channel, int slot)
@@ -3655,10 +3672,11 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
                 return true;
         return false;
     }();
+    preferredBuffer_ = sessionBufferSamples(data.bufferSamples);
     const auto restored = restoreSessionCard(data.inputDevice.toStdString(),
                                              data.outputDevice.toStdString(),
                                              data.cardChannels,
-                                             data.bufferSamples,
+                                             preferredBuffer_,
                                              data.explicitOffline,
                                              cardPresent);
     if (restored.offline)
@@ -3676,8 +3694,7 @@ bool AudioEngine::loadSessionFrom(const juce::File& fileOrFolder)
     {
         openNamedDevice(juce::String(restored.input), "session open");
     }
-    if (data.bufferSamples >= 16)
-        setPreferredBuffer(data.bufferSamples);
+    setPreferredBuffer(sessionBufferSamples(data.bufferSamples));
     hasPreservedSession_ = data.hasPreserved;
     preservedSession_ = data.preserved;
     if (timelineHandler_)

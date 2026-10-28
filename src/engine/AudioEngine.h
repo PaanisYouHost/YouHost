@@ -291,6 +291,7 @@ public:
     const SyncLostState& syncLostState() const noexcept { return syncLost_; }
     void noteHardwareDevicesChanged();
     void acknowledgeSyncLost() noexcept { syncLost_.acknowledge(); }
+    void tuckSyncLost() noexcept { syncLost_.tuckWhileMissing(); }
     juce::String rateWarning() const { return rateWarning_; }
     juce::String startupDeviceNote() const { return startupDeviceNote_; }
     bool takeUncleanShutdown();

@@ -218,7 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.13 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.14 is a prerelease for testing. It is not the Latest release.
+
+            - A plugin window is created off the message thread and gives up after about five seconds, with the plugin left in the audio path. An Audio Unit window uses the plugin's own size. Unload closes the editor and releases an Audio Unit on the message thread. VST3 process does not call the edit controller or take its listener lock. A session with no saved buffer opens at 32 samples. EX follows a stereo link. Vaihda plugin replaces the plugin in a slot. SYNC LOST shrinks when clicked, and YouHost does not open another audio card by itself.
 
             - A VST3 editor window matches the plugin view, including a later resize, and keeps the Retina point size. Audio Unit windows are unchanged. Clicking the selected track again, clicking empty mixer space, or pressing Esc clears the green ring. Quitting stops audio, closes editors, and releases every plugin on the message thread before the process ends.
 

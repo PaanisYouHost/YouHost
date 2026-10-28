@@ -17,6 +17,20 @@ inline int stereoLeftIndex(int channel) noexcept
     return channel & ~1;
 }
 
+// EX follows the link. Linked: the other channel of the pair. Unlinked: none.
+inline int excludePartnerChannel(int channel, bool linked) noexcept
+{
+    if (! linked)
+        return -1;
+    const int left = stereoLeftIndex(channel);
+    if (left < 0)
+        return -1;
+    const int right = left + 1;
+    if (right >= kMaxChannels)
+        return -1;
+    return channel == left ? right : left;
+}
+
 inline int stereoRightIndex(int channel) noexcept
 {
     const int left = stereoLeftIndex(channel);

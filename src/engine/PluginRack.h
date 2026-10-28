@@ -221,6 +221,21 @@ private:
         int stereoFold = 0;
     };
 
+    struct EditorOpen
+    {
+        int channel = -1;
+        int slot = -1;
+        std::uint64_t ticket = 0;
+        std::uint64_t createMs = 0;
+        std::shared_ptr<HostedPlugin> plugin;
+        juce::AudioProcessorEditor* editor = nullptr;
+        std::atomic<bool> finished { false };
+        std::atomic<bool> attached { false };
+        std::atomic<bool> noticed { false };
+        std::function<void()> deliver;
+        std::function<void()> notice;
+    };
+
     struct SlotModel
     {
         std::shared_ptr<HostedPlugin> plugin;
@@ -451,6 +466,7 @@ private:
     int editorCloseTries_[kMaxChannels][kSlotsPerChannel] {};
 
     std::array<std::array<std::unique_ptr<EditorWindow>, kSlotsPerChannel>, kMaxChannels> editors_ {};
+    std::vector<std::shared_ptr<EditorOpen>> editorOpens_;
 
     struct DeferredPluginRelease;
     struct ChannelWork
