@@ -351,6 +351,8 @@ private:
     std::atomic<int> livePluginPercent_ { 0 };
     std::array<int, kMaxChannels> chainSamples_ {};
     std::array<int, kMaxChannels> delaySamples_ {};
+    std::array<std::vector<float>, kMaxChannels> delayLines_ {};
+    std::array<int, kMaxChannels> delayCursor_ {};
     std::array<ChannelLatencyInput, kMaxChannels> latencyInputs_ {};
     int alignmentSamples_ = 0;
     Routing routing_ {};

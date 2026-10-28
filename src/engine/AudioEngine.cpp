@@ -19,6 +19,7 @@
 #include "CpuMeter.h"
 #include "GroupEdit.h"
 #include "VersionLabel.h"
+#include "PluginFault.h"
 #include "TakeImport.h"
 
 #include <algorithm>
@@ -947,6 +948,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
                                                    const juce::AudioIODeviceCallbackContext& context)
 {
     juce::ScopedNoDenormals noDenormals;
+    noteAudioThread();
     const std::int64_t hostTimeNs = context.hostTimeNs != nullptr
                                         ? static_cast<std::int64_t>(*context.hostTimeNs)
                                         : static_cast<std::int64_t>(-1);

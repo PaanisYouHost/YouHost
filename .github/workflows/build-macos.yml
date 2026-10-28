@@ -218,7 +218,9 @@ jobs:
           body: |
             2026-10-21
 
-            YouHost 1.0.14 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.15 is a prerelease for testing. It is not the Latest release.
+
+            - Waves shells are opened and each plugin inside is listed on its own. VST3 folders are scanned through subfolders. Every found and rejected plugin is written to the log. Fold L on a right-hand mono channel keeps the signal. A new latency value keeps the old delay until the new line is filled. A plugin window that crashes on its own thread is closed and the plugin stays in the audio path.
 
             - A plugin window is created off the message thread and gives up after about five seconds, with the plugin left in the audio path. An Audio Unit window uses the plugin's own size. Unload closes the editor and releases an Audio Unit on the message thread. VST3 process does not call the edit controller or take its listener lock. A session with no saved buffer opens at 32 samples. EX follows a stereo link. Vaihda plugin replaces the plugin in a slot. SYNC LOST shrinks when clicked, and YouHost does not open another audio card by itself.
 

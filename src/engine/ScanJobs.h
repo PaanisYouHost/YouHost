@@ -137,6 +137,18 @@ inline bool skipBecauseWaves(const ScanCandidate& candidate, bool scanWavesShell
     return candidate.waves && ! scanWavesShells;
 }
 
+// A shell's moduleinfo is enough when it names a plugin other than the shell.
+// One "WaveShell" entry is the wrapper, not LinEQ or the rest.
+inline bool shellModuleInfoListsPlugins(int descriptions, int shellNamed) noexcept
+{
+    return descriptions > 0 && descriptions > shellNamed;
+}
+
+inline bool shellDescriptionName(std::string_view name)
+{
+    return containsFold(name, "waveshell") || containsFold(name, "shell");
+}
+
 // Non-shell plugins first so a slow WaveShell cannot block De-Feedback and the rest.
 inline void orderScanCandidates(std::vector<ScanCandidate>& jobs)
 {

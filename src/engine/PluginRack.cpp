@@ -14,6 +14,7 @@
 #include "Vst3Path.h"
 #include "CrashJournal.h"
 #include "WindowFit.h"
+#include "PluginFault.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -684,6 +685,7 @@ struct PluginRack::RealtimePool
                     done_.signal();
                 continue;
             }
+            noteAudioThread();
             rack->workgroup_.join(token);
             juce::ScopedNoDenormals noDenormals;
             const auto began = steadyNs();
@@ -1089,6 +1091,15 @@ PluginRack::~PluginRack()
 
 void PluginRack::timerCallback()
 {
+    if (takePluginFault())
+    {
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "plugin window crashed on its own thread; editor closed, audio kept");
+        closeAllEditors();
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Plugin",
+                                               "A plugin window crashed. The plugin stays in the audio path.");
+    }
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
@@ -1479,9 +1490,10 @@ void PluginRack::clearChannelMemory(LiveGraph& graph, int channel) noexcept
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
-    auto& line = graph.delay[static_cast<std::size_t>(channel)];
+    auto& line = delayLines_[static_cast<std::size_t>(channel)];
     if (! line.empty())
         std::memset(line.data(), 0, sizeof(float) * line.size());
+    delayCursor_[static_cast<std::size_t>(channel)] = 0;
     graph.delayWrite[static_cast<std::size_t>(channel)] = 0;
 
     const int block = graph.maxBlock;
@@ -1523,8 +1535,7 @@ void PluginRack::setStereoLink(int leftChannel, bool linked)
     const auto next = static_cast<std::uint8_t>(linked ? 1 : 0);
     if (stereoLink_[static_cast<std::size_t>(leftChannel)].exchange(next, std::memory_order_relaxed) == next)
         return;
-    requestChannelReset(leftChannel);
-    requestChannelReset(leftChannel + 1);
+    // Keep the delay line. Zeroing it on a link change is the mute with no dropout.
     std::lock_guard<std::mutex> lock(lifeLock_);
     publishUnlocked();
 }
@@ -1614,7 +1625,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 instance->processBlock(view, midi);
                 instance->setPlayHead(nullptr);
             };
-            const auto fold = stereoFoldFromInt(live.stereoFold);
+            const auto fold = foldKeepingRightInput(stereoFoldFromInt(live.stereoFold),
+                                                     (channel & 1) == 1 && right == nullptr);
             auto runOne = [&](float* mono)
             {
                 if (mono == nullptr)
@@ -1772,18 +1784,24 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
     scrub(output, numSamples);
     scrub(partner, numSamples);
 
-    auto delayChannel = [&graph, numSamples](int index, float* data)
+    auto delayChannel = [&graph, numSamples, this](int index, float* data)
     {
         if (data == nullptr || index < 0 || index >= kMaxChannels)
             return;
-        auto& line = graph.delay[static_cast<std::size_t>(index)];
         const int length = graph.delayLength[static_cast<std::size_t>(index)];
-        if (length > 0 && static_cast<int>(line.size()) >= length)
-            delayInPlace(line.data(),
-                         length,
-                         graph.delayWrite[static_cast<std::size_t>(index)],
-                         data,
-                         numSamples);
+        auto& line = delayLines_[static_cast<std::size_t>(index)];
+        auto& cursor = delayCursor_[static_cast<std::size_t>(index)];
+        if (length <= 0)
+            return;
+        if (static_cast<int>(line.size()) != length)
+        {
+            std::vector<float> next(static_cast<std::size_t>(length), 0.0f);
+            int nextWrite = 0;
+            adoptDelayLine(next.data(), length, nextWrite, line.data(), static_cast<int>(line.size()), cursor);
+            line.swap(next);
+            cursor = nextWrite;
+        }
+        delayInPlace(line.data(), length, cursor, data, numSamples);
     };
     delayChannel(channel, output);
     delayChannel(partnerChannel, partner);

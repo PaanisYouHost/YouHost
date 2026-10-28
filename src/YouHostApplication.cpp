@@ -1,4 +1,5 @@
 #include "YouHostApplication.h"
+#include "engine/PluginFault.h"
 #include "engine/CrashJournal.h"
 #include "engine/VersionLabel.h"
 #include "engine/PluginCatalogue.h"
@@ -80,6 +81,7 @@ void YouHostApplication::initialise(const juce::String& commandLine)
         return;
     }
 
+    installPluginFaultGuard();
     lookAndFeel_ = std::make_unique<YouHostLookAndFeel>();
     juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel_.get());
     settings_ = std::make_unique<AppSettings>();

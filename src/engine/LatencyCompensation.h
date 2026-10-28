@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace youhost
 {
@@ -184,6 +185,40 @@ inline void writeGroupLatencyName(GroupLatencyLine& line, const char* name) noex
             line.name[index] = name[index];
     }
     line.name[index] = '\0';
+}
+
+// Copy a live delay line into a new length without making the next output zero.
+// The next sample that would have played stays the next sample.
+inline void adoptDelayLine(float* dest,
+                           int destLength,
+                           int& destWrite,
+                           const float* source,
+                           int sourceLength,
+                           int sourceWrite) noexcept
+{
+    if (dest == nullptr || destLength <= 0)
+    {
+        destWrite = 0;
+        return;
+    }
+    for (int index = 0; index < destLength; ++index)
+        dest[index] = 0.0f;
+    destWrite = 0;
+    if (source == nullptr || sourceLength <= 0)
+        return;
+    if (sourceWrite < 0 || sourceWrite >= sourceLength)
+        sourceWrite = 0;
+    if (destLength == sourceLength)
+    {
+        std::memcpy(dest, source, sizeof(float) * static_cast<std::size_t>(destLength));
+        destWrite = sourceWrite;
+        return;
+    }
+    const int keep = destLength < sourceLength ? destLength : sourceLength;
+    const int skip = sourceLength - keep;
+    for (int index = 0; index < keep; ++index)
+        dest[index] = source[(sourceWrite + skip + index) % sourceLength];
+    destWrite = 0;
 }
 
 // Realtime delay of `length` samples. A dry channel uses this so it lines up

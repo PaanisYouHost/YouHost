@@ -1478,6 +1478,27 @@ void testScanOrderSkipsWavesAndHidesBuiltIns()
     CHECK(youhost::skipBecauseWaves(waves, false));
     CHECK(! youhost::skipBecauseWaves(waves, true));
     CHECK(! youhost::skipBecauseWaves(feedback, false));
+    CHECK(! youhost::shellModuleInfoListsPlugins(1, 1));
+    CHECK(youhost::shellModuleInfoListsPlugins(12, 1));
+    CHECK(youhost::shellDescriptionName("WaveShell1-VST3 12.7"));
+    CHECK(! youhost::shellDescriptionName("LinEQ Lowband"));
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::left, true) == youhost::StereoFold::sum);
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::left, false) == youhost::StereoFold::left);
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::right, true) == youhost::StereoFold::right);
+    float oldLine[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    float kept[4];
+    int keptWrite = -1;
+    youhost::adoptDelayLine(kept, 4, keptWrite, oldLine, 4, 0);
+    CHECK(keptWrite == 0);
+    CHECK(kept[0] == 1.0f);
+    float grown[6];
+    int grownWrite = -1;
+    youhost::adoptDelayLine(grown, 6, grownWrite, oldLine, 4, 0);
+    CHECK(grownWrite == 0);
+    CHECK(grown[0] == 1.0f);
+    CHECK(youhost::formatScanFoundLine("VST3", "LinEQ Lowband", "/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 12.7.vst3")
+              .find("scan found  VST3  LinEQ Lowband") == 0);
+    CHECK(youhost::formatScanRejectedLine("VST3", "missing.vst3", "no plugins inside").find("reason=no plugins inside") != std::string::npos);
 
     std::vector<youhost::ScanCandidate> jobs { waves, feedback, shell };
     youhost::orderScanCandidates(jobs);
@@ -5262,11 +5283,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.14"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.15"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.14"
+             && std::string(youhost::versionNumber()) == "1.0.15"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.14") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.15") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5275,8 +5296,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.14") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.14-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.15") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.15-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
