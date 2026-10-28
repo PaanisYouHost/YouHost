@@ -31,6 +31,65 @@ constexpr int kNormalTimeoutMs = 20000;
 constexpr int kShellTimeoutMs = 45000;
 constexpr int kReuseLimit = 8;
 
+#if JUCE_MAC
+void preloadOneShell(const juce::File& bundle, AppSettings& settings)
+{
+    const auto macOs = bundle.getChildFile("Contents").getChildFile("MacOS");
+    if (! macOs.isDirectory())
+        return;
+    for (const auto& entry : macOs.findChildFiles(juce::File::findFiles, false))
+    {
+        juce::DynamicLibrary library;
+        if (! library.open(entry.getFullPathName()))
+            continue;
+        library.close();
+        appendHostLog(settings, "scan found  shell  " + bundle.getFullPathName());
+        return;
+    }
+    appendHostLog(settings, juce::String::fromUTF8(formatScanRejectedLine("AudioUnit",
+                                                                          bundle.getFullPathName().toRawUTF8(),
+                                                                          "shell bundle has no executable").c_str()));
+}
+
+void preloadWaveShellBundles(AppSettings& settings)
+{
+    const juce::File roots[] = {
+        juce::File("~/Library/Audio/Plug-Ins/Components"),
+        juce::File("/Library/Audio/Plug-Ins/Components"),
+    };
+    for (const auto& root : roots)
+    {
+        if (! root.isDirectory())
+            continue;
+        for (const auto& bundle : root.findChildFiles(juce::File::findDirectories, true, "*"))
+        {
+            if (! bundle.getFileName().containsIgnoreCase("WaveShell"))
+                continue;
+            preloadOneShell(bundle, settings);
+        }
+    }
+}
+
+void addNestedVst3Identifiers(const juce::FileSearchPath& paths, juce::StringArray& identifiers, AppSettings& settings)
+{
+    for (int index = 0; index < paths.getNumPaths(); ++index)
+    {
+        const auto root = paths[index];
+        if (! root.isDirectory())
+            continue;
+        for (const auto& bundle : root.findChildFiles(juce::File::findDirectories, true, "*.vst3"))
+        {
+            const auto path = bundle.getFullPathName();
+            if (identifiers.contains(path))
+                continue;
+            identifiers.add(path);
+            appendHostLog(settings, juce::String::fromUTF8(formatScanFoundLine("VST3", bundle.getFileName().toRawUTF8(), path.toRawUTF8()).c_str()));
+        }
+    }
+}
+
+#endif
+
 juce::String labelFor(const juce::String& identifier)
 {
     const auto file = juce::File(identifier);
@@ -864,7 +923,15 @@ void PluginCatalogue::runScan()
             // The last flag must be true for AudioUnit: false drops every AUv3,
             // and that plugin then never gets a load line.
             const bool allowAsync = format->getName() == "AudioUnit" && audioUnitScanIncludesAsync();
-            const auto identifiers = format->searchPathsForPlugins(paths, true, allowAsync);
+#if JUCE_MAC
+            if (format->getName() == "AudioUnit" && allowWaves)
+                preloadWaveShellBundles(settings_);
+#endif
+            auto identifiers = format->searchPathsForPlugins(paths, true, allowAsync);
+#if JUCE_MAC
+            if (format->getName() == "VST3")
+                addNestedVst3Identifiers(paths, identifiers, settings_);
+#endif
             if (format->getName() == "AudioUnit")
                 appendHostLog(settings_, "AudioUnit scan listed " + juce::String(identifiers.size()) + " plugins");
             for (const auto& identifier : identifiers)
@@ -873,6 +940,9 @@ void PluginCatalogue::runScan()
                 if (skipBecauseWaves(candidate, allowWaves))
                 {
                     ++skippedWaves;
+                    appendHostLog(settings_, juce::String::fromUTF8(formatScanRejectedLine(format->getName().toRawUTF8(),
+                                                                                           identifier.toRawUTF8(),
+                                                                                           "Waves shell scanning is off").c_str()));
                     continue;
                 }
 
@@ -882,7 +952,12 @@ void PluginCatalogue::runScan()
                     blacklisted = list_.getBlacklistedFiles().contains(identifier);
                 }
                 if (blacklisted)
+                {
+                    appendHostLog(settings_, juce::String::fromUTF8(formatScanRejectedLine(format->getName().toRawUTF8(),
+                                                                                           identifier.toRawUTF8(),
+                                                                                           "blacklisted after a failed scan").c_str()));
                     continue;
+                }
                 if (! identifierNeedsScan(format->getName(), identifier))
                     continue;
 
@@ -1102,7 +1177,16 @@ void PluginCatalogue::runScan()
                             failures_.end());
             for (auto* description : outcome.found)
                 if (description != nullptr)
+                {
                     list_.addType(*description);
+                    appendHostLog(settings_, juce::String::fromUTF8(formatScanFoundLine(job.format.toRawUTF8(),
+                                                                                        description->name.toRawUTF8(),
+                                                                                        description->fileOrIdentifier.toRawUTF8()).c_str()));
+                }
+            if (outcome.found.isEmpty())
+                appendHostLog(settings_, juce::String::fromUTF8(formatScanRejectedLine(job.format.toRawUTF8(),
+                                                                                       job.identifier.toRawUTF8(),
+                                                                                       "no plugins inside").c_str()));
         }
         knownCount_.store(list_.getNumTypes(), std::memory_order_relaxed);
         failedCount_.store(static_cast<int>(failures_.size()), std::memory_order_relaxed);

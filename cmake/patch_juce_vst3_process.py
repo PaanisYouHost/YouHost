@@ -23,6 +23,7 @@ import sys
 
 MARKER = "youhostContinuousSamples"
 LOCK_MARKER = "youhostProcessUnlocked"
+WAIT_MARKER = "youhostProcessNoWait"
 
 OLD_DISPATCHER = """    void start (Vst::IEditController& controllerIn)
     {
@@ -351,6 +352,72 @@ NEW_BYPASS_DOUBLE = """    void processBlockBypassed (AudioBuffer<double>& buffe
 """
 
 
+OLD_PUSH = """    void push (Steinberg::int32 index, float value)
+    {
+        if (controller == nullptr)
+            return;
+
+        if (MessageManager::getInstance()->isThisTheMessageThread())
+            controller->setParamNormalized (cache.getParamID (index), value);
+        else
+            cache.set (index, value);
+    }
+"""
+
+NEW_PUSH = """    void push (Steinberg::int32 index, float value)
+    {
+        if (controller == nullptr)
+            return;
+
+        // youhostProcessNoWait: process() must not call the edit controller.
+        // That call waits on the message thread. An Audio Unit render does not.
+        cache.set (index, value);
+    }
+"""
+
+OLD_OUTPUT = """        outputParameterChanges->forEach ([&] (Steinberg::int32 vstParamIndex, Vst::ParamID id, float value)
+        {
+            // Send the parameter value from the processor to the editor
+            parameterDispatcher.push (vstParamIndex, value);
+
+            // Update the host's parameter value
+            if (auto* param = getParameterForID (id))
+                param->setValueWithoutUpdatingProcessor (value);
+        });
+"""
+
+NEW_OUTPUT = """        outputParameterChanges->forEach ([&] (Steinberg::int32 vstParamIndex, Vst::ParamID, float value)
+        {
+            // Queue only. setValueWithoutUpdatingProcessor notifies listeners
+            // and takes their lock. The audio thread does not wait on it.
+            parameterDispatcher.push (vstParamIndex, value);
+        });
+"""
+
+OLD_DIRTY = """tresult PLUGIN_API VST3HostContextHeadless::setDirty (TBool needsSave)
+{
+    if (needsSave)
+        plugin->updateHostDisplay (AudioPluginInstance::ChangeDetails{}.withNonParameterStateChanged (true));
+
+    return kResultOk;
+}
+"""
+
+NEW_DIRTY = """tresult PLUGIN_API VST3HostContextHeadless::setDirty (TBool needsSave)
+{
+    // updateHostDisplay takes the listener lock. process() must not wait.
+    if (auto* manager = MessageManager::getInstanceWithoutCreating())
+        if (! manager->isThisTheMessageThread())
+            return kResultOk;
+
+    if (needsSave)
+        plugin->updateHostDisplay (AudioPluginInstance::ChangeDetails{}.withNonParameterStateChanged (true));
+
+    return kResultOk;
+}
+"""
+
+
 def apply_replacements(text, replacements):
     for old, new, name in replacements:
         if old not in text:
@@ -387,6 +454,14 @@ def main() -> int:
             (OLD_PROCESS_DOUBLE, NEW_PROCESS_DOUBLE, "processBlock double"),
             (OLD_BYPASS_FLOAT, NEW_BYPASS_FLOAT, "processBlockBypassed float"),
             (OLD_BYPASS_DOUBLE, NEW_BYPASS_DOUBLE, "processBlockBypassed double"),
+        ])
+        if text is None:
+            return 1
+    if WAIT_MARKER not in text:
+        text = apply_replacements(text, [
+            (OLD_PUSH, NEW_PUSH, "parameter push"),
+            (OLD_OUTPUT, NEW_OUTPUT, "output parameters"),
+            (OLD_DIRTY, NEW_DIRTY, "setDirty"),
         ])
         if text is None:
             return 1

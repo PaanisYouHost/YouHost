@@ -66,9 +66,9 @@ What's new
 - Open the scanner: S. Scanning may cause dropouts.
 - VST3 folders: /Library/Audio/Plug-Ins/VST3 and ~/Library/Audio/Plug-Ins/VST3.
 - Audio Units are found through the macOS registry.
-- Waves shells and instruments are off by default ("Scan Waves shells" and "Show instruments in inserts" in the scanner). "Rescan selected" scans the selected plugins again.
+- Waves shells are scanned. Each plugin inside the shell is listed on its own. Instruments stay off unless "Show instruments in inserts" is on. "Rescan selected" scans the selected plugins again.
 - The plugin list marks each plugin M, ST or M/ST.
-- Right-click a plugin slot: Open, Bypass, Remove, and for a stereo plugin on a mono channel: Use L / Use R / Sum (L+R)/2.
+- Right-click a plugin slot: Open, Bypass, Remove, Vaihda plugin, and for a stereo plugin on a mono channel: Use L / Use R / Sum (L+R)/2.
 - If a plugin crashed last time, its slot shows a small note: this plugin crashed last time. Choosing it still loads it. Open session without this plugin leaves it out of this launch only. The slot stays empty, and any plugin can be loaded there. A click on that empty slot opens the plugin list, including channel 1 slot 1. The session file keeps that plugin until you save a change.
 - If a stereo plugin won't open on a mono channel (some stereo-only AU plugins), use the VST3 or mono version.
 - Stereo link: right-click > Stereo link with ch N+1, or click LINK on the odd channel (1–2, 3–4…). Recording stays one mono WAV per channel.

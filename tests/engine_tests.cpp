@@ -1478,6 +1478,27 @@ void testScanOrderSkipsWavesAndHidesBuiltIns()
     CHECK(youhost::skipBecauseWaves(waves, false));
     CHECK(! youhost::skipBecauseWaves(waves, true));
     CHECK(! youhost::skipBecauseWaves(feedback, false));
+    CHECK(! youhost::shellModuleInfoListsPlugins(1, 1));
+    CHECK(youhost::shellModuleInfoListsPlugins(12, 1));
+    CHECK(youhost::shellDescriptionName("WaveShell1-VST3 12.7"));
+    CHECK(! youhost::shellDescriptionName("LinEQ Lowband"));
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::left, true) == youhost::StereoFold::sum);
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::left, false) == youhost::StereoFold::left);
+    CHECK(youhost::foldKeepingRightInput(youhost::StereoFold::right, true) == youhost::StereoFold::right);
+    float oldLine[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    float kept[4];
+    int keptWrite = -1;
+    youhost::adoptDelayLine(kept, 4, keptWrite, oldLine, 4, 0);
+    CHECK(keptWrite == 0);
+    CHECK(kept[0] == 1.0f);
+    float grown[6];
+    int grownWrite = -1;
+    youhost::adoptDelayLine(grown, 6, grownWrite, oldLine, 4, 0);
+    CHECK(grownWrite == 0);
+    CHECK(grown[0] == 1.0f);
+    CHECK(youhost::formatScanFoundLine("VST3", "LinEQ Lowband", "/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 12.7.vst3")
+              .find("scan found  VST3  LinEQ Lowband") == 0);
+    CHECK(youhost::formatScanRejectedLine("VST3", "missing.vst3", "no plugins inside").find("reason=no plugins inside") != std::string::npos);
 
     std::vector<youhost::ScanCandidate> jobs { waves, feedback, shell };
     youhost::orderScanCandidates(jobs);
@@ -3936,6 +3957,17 @@ void testReleaseChecklist()
          quitAsks && cancelAborts && saveFirst && saveAsFirst && discardProceeds && recordingStopsFirst);
 
     item("new session buffer is 32", youhost::kNewSessionBufferSamples == 32);
+    item("a session with no stored buffer uses 32",
+         youhost::sessionBufferSamples(0) == 32
+             && youhost::sessionBufferSamples(15) == 32
+             && youhost::sessionBufferSamples(48) == 48
+             && youhost::sessionBufferSamples(1024) == 1024);
+    item("EX follows the stereo link",
+         youhost::excludePartnerChannel(0, false) == -1
+             && youhost::excludePartnerChannel(0, true) == 1
+             && youhost::excludePartnerChannel(1, true) == 0
+             && youhost::excludePartnerChannel(3, false) == -1
+             && youhost::excludePartnerChannel(3, true) == 2);
 
     int queries = 0;
     for (int poll = 0; poll < 50; ++poll)
@@ -4750,6 +4782,15 @@ void testReleaseChecklist()
     const bool restamped = sync.isMissing() && sync.hour == 1 && sync.minute == 2 && sync.second == 3;
     sync.dismiss();
     const bool dismissed = ! sync.showAlarm() && ! sync.isMissing();
+    youhost::SyncLostState clickShrink;
+    clickShrink.deviceLost(9, 1, 2);
+    const bool bigUntilClick = youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::center;
+    clickShrink.tuckWhileMissing();
+    const bool shrunkWhileLost = clickShrink.isMissing()
+                                 && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::corner;
+    clickShrink.acknowledge();
+    const bool okKeepsShrunkAlarm = clickShrink.isMissing()
+                                    && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::corner;
     const auto helpText = youhost::shortcutHelpText();
     const auto gigAt = helpText.find("Before a gig");
     const auto installSteps = helpText.find("xattr -dr com.apple.quarantine");
@@ -4851,6 +4892,7 @@ void testReleaseChecklist()
     const auto paintBody = sliceBetween(mainUi, "void MainComponent::paint(", "void MainComponent::resized()");
     item("SYNC LOST",
          alarmOn && stillLost && waitingForClick && alarmClear && restamped && dismissed
+             && bigUntilClick && shrunkWhileLost && okKeepsShrunkAlarm
              && youhost::syncLossWholeSeconds(3000) == 3
              && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::hidden
              && ! youhost::syncOverlayText(sync).visible
@@ -5241,11 +5283,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.13"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.15"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.13"
+             && std::string(youhost::versionNumber()) == "1.0.15"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.13") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.15") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5254,8 +5296,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.13") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.13-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.15") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.15-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos

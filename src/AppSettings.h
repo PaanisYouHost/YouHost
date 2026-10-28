@@ -202,8 +202,8 @@ public:
     bool loadScanWavesShells()
     {
         if (auto* settings = properties_.getUserSettings())
-            return settings->getBoolValue("scanWavesShells", false);
-        return false;
+            return settings->getBoolValue("scanWavesShells", true);
+        return true;
     }
 
     void saveScanWavesShells(bool enabled)

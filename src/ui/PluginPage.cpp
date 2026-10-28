@@ -1190,6 +1190,7 @@ private:
         menu.addItem(1, "Open");
         menu.addItem(2, snap.bypassed ? "Turn bypass off" : "Bypass");
         menu.addItem(3, "Remove");
+        menu.addItem(4, "Vaihda plugin");
         if (snap.outputChannels > 1 && ! engine_.stereoLinked(channel_))
         {
             juce::PopupMenu fold;
@@ -1208,6 +1209,11 @@ private:
                                    engine_.setSlotBypassed(channel_, slot, ! current.bypassed);
                                else if (result == 3)
                                    engine_.removePlugin(channel_, slot);
+                               else if (result == 4)
+                               {
+                                   if (auto* page = findParentComponentOfClass<PluginPage>())
+                                       page->showPluginList(channel_, slot);
+                               }
                                else if (result >= 10 && result <= 12)
                                    engine_.setStereoFold(channel_, slot, result - 10);
                            });

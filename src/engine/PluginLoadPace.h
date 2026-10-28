@@ -85,6 +85,31 @@ inline std::string formatPluginAttemptLine(const char* phase,
     return line;
 }
 
+inline std::string formatScanFoundLine(const char* format, const char* name, const char* identifier)
+{
+    std::string line = "scan found  ";
+    line += pluginFormatLabel(format, identifier);
+    line += "  ";
+    line += name != nullptr && name[0] != '\0' ? name : "Plugin";
+    if (identifier != nullptr && identifier[0] != '\0')
+    {
+        line += "  id=";
+        line += identifier;
+    }
+    return line;
+}
+
+inline std::string formatScanRejectedLine(const char* format, const char* identifier, const char* reason)
+{
+    std::string line = "scan rejected  ";
+    line += pluginFormatLabel(format, identifier);
+    line += "  ";
+    line += identifier != nullptr && identifier[0] != '\0' ? identifier : "unknown";
+    line += "  reason=";
+    line += reason != nullptr && reason[0] != '\0' ? reason : "no reason from the host";
+    return line;
+}
+
 inline std::string formatScanFailureLine(const char* format, const char* identifier, const char* reason)
 {
     std::string line = "did-not-load  scan  ";

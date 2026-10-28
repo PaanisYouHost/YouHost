@@ -14,6 +14,7 @@
 #include "Vst3Path.h"
 #include "CrashJournal.h"
 #include "WindowFit.h"
+#include "PluginFault.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -684,6 +685,7 @@ struct PluginRack::RealtimePool
                     done_.signal();
                 continue;
             }
+            noteAudioThread();
             rack->workgroup_.join(token);
             juce::ScopedNoDenormals noDenormals;
             const auto began = steadyNs();
@@ -795,6 +797,23 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
         }
     }
 
+    // An Audio Unit chooses its own size. setResizeLimits asks the view to
+    // change frame, which Melodyne rejects by crashing.
+    void usePluginSize() noexcept
+    {
+        usePluginSize_ = true;
+    }
+
+    void quiesce()
+    {
+        if (auto* content = getContentComponent())
+        {
+            if (auto* timed = dynamic_cast<juce::Timer*>(content))
+                timed->stopTimer();
+            content->setVisible(false);
+        }
+    }
+
     void closeButtonPressed() override
     {
         if (onClose_ != nullptr)
@@ -818,6 +837,12 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
         if (targetW == getWidth() && targetH == getHeight())
             return;
         fitting_ = true;
+        if (usePluginSize_)
+        {
+            setSize(targetW, targetH);
+            fitting_ = false;
+            return;
+        }
         if (! isResizable())
             setResizeLimits(targetW, targetH, targetW, targetH);
         else if (auto* limits = getConstrainer())
@@ -837,6 +862,7 @@ struct PluginRack::EditorWindow : public juce::DocumentWindow, private juce::Com
     int frameW_ = 0;
     int frameH_ = 0;
     bool fitting_ = false;
+    bool usePluginSize_ = false;
 };
 
 struct PluginRack::DeferredPluginRelease
@@ -1065,6 +1091,15 @@ PluginRack::~PluginRack()
 
 void PluginRack::timerCallback()
 {
+    if (takePluginFault())
+    {
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "plugin window crashed on its own thread; editor closed, audio kept");
+        closeAllEditors();
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Plugin",
+                                               "A plugin window crashed. The plugin stays in the audio path.");
+    }
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
@@ -1455,9 +1490,10 @@ void PluginRack::clearChannelMemory(LiveGraph& graph, int channel) noexcept
 {
     if (channel < 0 || channel >= kMaxChannels)
         return;
-    auto& line = graph.delay[static_cast<std::size_t>(channel)];
+    auto& line = delayLines_[static_cast<std::size_t>(channel)];
     if (! line.empty())
         std::memset(line.data(), 0, sizeof(float) * line.size());
+    delayCursor_[static_cast<std::size_t>(channel)] = 0;
     graph.delayWrite[static_cast<std::size_t>(channel)] = 0;
 
     const int block = graph.maxBlock;
@@ -1499,8 +1535,7 @@ void PluginRack::setStereoLink(int leftChannel, bool linked)
     const auto next = static_cast<std::uint8_t>(linked ? 1 : 0);
     if (stereoLink_[static_cast<std::size_t>(leftChannel)].exchange(next, std::memory_order_relaxed) == next)
         return;
-    requestChannelReset(leftChannel);
-    requestChannelReset(leftChannel + 1);
+    // Keep the delay line. Zeroing it on a link change is the mute with no dropout.
     std::lock_guard<std::mutex> lock(lifeLock_);
     publishUnlocked();
 }
@@ -1590,7 +1625,8 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
                 instance->processBlock(view, midi);
                 instance->setPlayHead(nullptr);
             };
-            const auto fold = stereoFoldFromInt(live.stereoFold);
+            const auto fold = foldKeepingRightInput(stereoFoldFromInt(live.stereoFold),
+                                                     (channel & 1) == 1 && right == nullptr);
             auto runOne = [&](float* mono)
             {
                 if (mono == nullptr)
@@ -1748,18 +1784,24 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
     scrub(output, numSamples);
     scrub(partner, numSamples);
 
-    auto delayChannel = [&graph, numSamples](int index, float* data)
+    auto delayChannel = [&graph, numSamples, this](int index, float* data)
     {
         if (data == nullptr || index < 0 || index >= kMaxChannels)
             return;
-        auto& line = graph.delay[static_cast<std::size_t>(index)];
         const int length = graph.delayLength[static_cast<std::size_t>(index)];
-        if (length > 0 && static_cast<int>(line.size()) >= length)
-            delayInPlace(line.data(),
-                         length,
-                         graph.delayWrite[static_cast<std::size_t>(index)],
-                         data,
-                         numSamples);
+        auto& line = delayLines_[static_cast<std::size_t>(index)];
+        auto& cursor = delayCursor_[static_cast<std::size_t>(index)];
+        if (length <= 0)
+            return;
+        if (static_cast<int>(line.size()) != length)
+        {
+            std::vector<float> next(static_cast<std::size_t>(length), 0.0f);
+            int nextWrite = 0;
+            adoptDelayLine(next.data(), length, nextWrite, line.data(), static_cast<int>(line.size()), cursor);
+            line.swap(next);
+            cursor = nextWrite;
+        }
+        delayInPlace(line.data(), length, cursor, data, numSamples);
     };
     delayChannel(channel, output);
     delayChannel(partnerChannel, partner);
@@ -2850,114 +2892,219 @@ void PluginRack::openEditor(int channel, int slot)
     if (! plugin->prepared)
         return;
 
-    // The audio thread does not wait on the message thread. createView can
-    // block this thread for seconds. The plugin stays in the audio callback
-    // the whole time: AirEQ, Slate, Eiosis, and Dyna-mite wait inside
-    // createView until the processor has rendered, and pausing it here leaves
-    // that wait stuck. Recording stays the raw input, before plugins.
-    const auto editorBegan = steadyNs();
-    auto* editor = plugin->instance->createEditorAndMakeActive();
-    const auto editorMs = (steadyNs() - editorBegan) / 1000000ULL;
-    if (editorMs >= 2000ULL && settings_ != nullptr)
-        appendHostLog(*settings_, "editor slow " + juce::String(static_cast<int>(editorMs)) + " ms, audio kept running");
-    if (editor == nullptr)
-        editor = new juce::GenericAudioProcessorEditor(*plugin->instance);
+    for (const auto& pending : editorOpens_)
+        if (pending != nullptr && pending->channel == channel && pending->slot == slot
+            && ! pending->attached.load(std::memory_order_acquire)
+            && ! pending->noticed.load(std::memory_order_acquire))
+            return;
 
+    std::uint64_t ticket = 0;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        ticket = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].ticket;
+    }
+
+    // The audio thread does not wait on the message thread. createView can
+    // block for seconds. That wait stays on a worker. The plugin stays in the
+    // audio callback the whole time: AirEQ, Slate, Eiosis, and Dyna-mite wait
+    // inside createView until the processor has rendered, and pausing it here
+    // leaves that wait stuck. Recording stays the raw input, before plugins.
     auto alive = alive_;
-    const auto key = editorWindowKey(plugin->description);
-    auto window = std::make_unique<EditorWindow>(
-        plugin->description.name.isNotEmpty() ? plugin->description.name : "Plugin",
-        [this, alive](int editorChannel, int editorSlot)
+    auto job = std::make_shared<EditorOpen>();
+    job->channel = channel;
+    job->slot = slot;
+    job->ticket = ticket;
+    job->plugin = plugin;
+    std::weak_ptr<EditorOpen> weak = job;
+    job->notice = [this, alive, weak]
+    {
+        const auto job = weak.lock();
+        if (job == nullptr || ! alive->load(std::memory_order_acquire) || quitting_)
+            return;
+        if (! job->finished.load(std::memory_order_acquire) && ! job->noticed.exchange(true, std::memory_order_acq_rel))
         {
-            juce::MessageManager::callAsync([this, alive, editorChannel, editorSlot]
+            const auto reason = "plugin window did not open";
+            if (settings_ != nullptr)
+                appendHostLog(*settings_, juce::String(reason) + ": timed out");
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "Plugin",
+                                                   reason);
+        }
+    };
+    job->deliver = [this, alive, weak]
+    {
+        const auto job = weak.lock();
+        if (job == nullptr || ! alive->load(std::memory_order_acquire) || quitting_)
+            return;
+        if (job->attached.exchange(true, std::memory_order_acq_rel))
+            return;
+        auto* editor = job->editor;
+        const auto channel = job->channel;
+        const auto slot = job->slot;
+        const auto plugin = job->plugin;
+        if (editor == nullptr || plugin == nullptr || plugin->instance == nullptr || ! validSlot(channel, slot))
+        {
+            if (! job->noticed.exchange(true, std::memory_order_acq_rel))
             {
-                if (! alive->load(std::memory_order_acquire))
-                    return;
-                closeEditor(editorChannel, editorSlot);
-            });
-        },
-        settings_,
-        key);
-    window->place(channel, slot);
-    // VST3 and Audio Unit views on the Mac are both sized in points.
-    // The hosted NSView is added at 1:1. No AffineTransform scales it.
-    // The window is sized to the plugin view. setContentScaleFactor is not
-    // how the Audio Unit is fitted, and passing the Retina backing scale
-    // through it makes Vastaus redraw at the wrong size.
-    window->setContentOwned(editor, true);
-    window->watchContent();
-    const int borderW = std::max(0, window->getWidth() - editor->getWidth());
-    const int borderH = std::max(0, window->getHeight() - editor->getHeight());
-    int minWidth = 0;
-    int minHeight = 0;
-    int maxWidth = 0;
-    int maxHeight = 0;
-    if (auto* constrainer = editor->getConstrainer())
-    {
-        minWidth = constrainer->getMinimumWidth();
-        minHeight = constrainer->getMinimumHeight();
-        maxWidth = constrainer->getMaximumWidth();
-        maxHeight = constrainer->getMaximumHeight();
-    }
-    if (minWidth > 0)
-        minWidth += borderW;
-    if (minHeight > 0)
-        minHeight += borderH;
-    if (maxWidth > 0 && maxWidth < 1000000)
-        maxWidth += borderW;
-    else if (editor->isResizable())
-        maxWidth = 8000 + borderW;
-    else
-        maxWidth = 0;
-    if (maxHeight > 0 && maxHeight < 1000000)
-        maxHeight += borderH;
-    else if (editor->isResizable())
-        maxHeight = 8000 + borderH;
-    else
-        maxHeight = 0;
-    float displayScale = 1.0f;
-    int screenWidth = 0;
-    int screenHeight = 0;
-    if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-    {
-        displayScale = static_cast<float>(display->scale);
-        screenWidth = juce::roundToInt(display->userBounds.getWidth());
-        screenHeight = juce::roundToInt(display->userBounds.getHeight());
-    }
-    const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
-    const auto saved = parseWindowState(stored.toStdString());
-    const bool vst3 = plugin->description.pluginFormatName == "VST3";
-    // A VST3 host window is the plugin view, not a larger remembered frame.
-    // Audio Unit sizing is unchanged.
-    const int fittedWidth = vst3 ? editor->getWidth() + borderW
-                                 : std::max(editor->getWidth() + borderW, window->getWidth());
-    const int fittedHeight = vst3 ? editor->getHeight() + borderH
-                                  : std::max(editor->getHeight() + borderH, window->getHeight());
-    const auto plan = planEditorWindow(fittedWidth,
-                                       fittedHeight,
-                                       editor->isResizable(),
-                                       minWidth,
-                                       minHeight,
-                                       maxWidth,
-                                       maxHeight,
-                                       displayScale,
-                                       screenWidth,
-                                       screenHeight,
-                                       vst3 ? SavedWindowSize {} : saved);
-    window->setResizable(plan.resizable, false);
-    if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
-        window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
-    if (plan.width > 0 && plan.height > 0)
-    {
-        if (saved.valid)
-            window->setBounds(saved.x, saved.y, plan.width, plan.height);
+                const auto reason = "plugin window did not open";
+                if (settings_ != nullptr)
+                    appendHostLog(*settings_, juce::String(reason) + ": editor was not created");
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Plugin",
+                                                       reason);
+            }
+            delete editor;
+            return;
+        }
+        std::uint64_t nowTicket = 0;
+        {
+            std::lock_guard<std::mutex> lock(lifeLock_);
+            const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+            nowTicket = model.ticket;
+            if (model.plugin != plugin)
+                nowTicket = 0;
+        }
+        if (nowTicket != job->ticket || editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] != nullptr)
+        {
+            delete editor;
+            return;
+        }
+        if (job->createMs >= 2000ULL && settings_ != nullptr)
+            appendHostLog(*settings_, "editor slow " + juce::String(static_cast<int>(job->createMs)) + " ms, audio kept running");
+        const auto key = editorWindowKey(plugin->description);
+        auto window = std::make_unique<EditorWindow>(
+            plugin->description.name.isNotEmpty() ? plugin->description.name : "Plugin",
+            [this, alive](int editorChannel, int editorSlot)
+            {
+                juce::MessageManager::callAsync([this, alive, editorChannel, editorSlot]
+                {
+                    if (! alive->load(std::memory_order_acquire))
+                        return;
+                    closeEditor(editorChannel, editorSlot);
+                });
+            },
+            settings_,
+            key);
+        window->place(channel, slot);
+        // VST3 and Audio Unit views on the Mac are both sized in points.
+        // The hosted NSView is added at 1:1. No AffineTransform scales it.
+        // The window is sized to the plugin view. setContentScaleFactor is not
+        // how the Audio Unit is fitted, and passing the Retina backing scale
+        // through it makes Vastaus redraw at the wrong size.
+        window->setContentOwned(editor, true);
+        window->watchContent();
+        const int borderW = std::max(0, window->getWidth() - editor->getWidth());
+        const int borderH = std::max(0, window->getHeight() - editor->getHeight());
+        const bool audioUnit = plugin->description.pluginFormatName == "AudioUnit";
+        if (audioUnit)
+        {
+            window->usePluginSize();
+            const int width = std::max(1, editor->getWidth()) + borderW;
+            const int height = std::max(1, editor->getHeight()) + borderH;
+            window->centreWithSize(width, height);
+        }
         else
-            window->centreWithSize(plan.width, plan.height);
-    }
-    if (commandKeys_ != nullptr)
-        window->addKeyListener(commandKeys_);
-    window->setVisible(true);
-    editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
+        {
+            int minWidth = 0;
+            int minHeight = 0;
+            int maxWidth = 0;
+            int maxHeight = 0;
+            if (auto* constrainer = editor->getConstrainer())
+            {
+                minWidth = constrainer->getMinimumWidth();
+                minHeight = constrainer->getMinimumHeight();
+                maxWidth = constrainer->getMaximumWidth();
+                maxHeight = constrainer->getMaximumHeight();
+            }
+            if (minWidth > 0)
+                minWidth += borderW;
+            if (minHeight > 0)
+                minHeight += borderH;
+            if (maxWidth > 0 && maxWidth < 1000000)
+                maxWidth += borderW;
+            else if (editor->isResizable())
+                maxWidth = 8000 + borderW;
+            else
+                maxWidth = 0;
+            if (maxHeight > 0 && maxHeight < 1000000)
+                maxHeight += borderH;
+            else if (editor->isResizable())
+                maxHeight = 8000 + borderH;
+            else
+                maxHeight = 0;
+            float displayScale = 1.0f;
+            int screenWidth = 0;
+            int screenHeight = 0;
+            if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            {
+                displayScale = static_cast<float>(display->scale);
+                screenWidth = juce::roundToInt(display->userBounds.getWidth());
+                screenHeight = juce::roundToInt(display->userBounds.getHeight());
+            }
+            const auto stored = settings_ != nullptr ? settings_->loadNamedWindow(key) : juce::String();
+            const auto saved = parseWindowState(stored.toStdString());
+            const bool vst3 = plugin->description.pluginFormatName == "VST3";
+            // A VST3 host window is the plugin view, not a larger remembered frame.
+            const int fittedWidth = vst3 ? editor->getWidth() + borderW
+                                         : std::max(editor->getWidth() + borderW, window->getWidth());
+            const int fittedHeight = vst3 ? editor->getHeight() + borderH
+                                          : std::max(editor->getHeight() + borderH, window->getHeight());
+            const auto plan = planEditorWindow(fittedWidth,
+                                               fittedHeight,
+                                               editor->isResizable(),
+                                               minWidth,
+                                               minHeight,
+                                               maxWidth,
+                                               maxHeight,
+                                               displayScale,
+                                               screenWidth,
+                                               screenHeight,
+                                               vst3 ? SavedWindowSize {} : saved);
+            window->setResizable(plan.resizable, false);
+            if (plan.minWidth > 0 && plan.minHeight > 0 && plan.maxWidth >= plan.minWidth && plan.maxHeight >= plan.minHeight)
+                window->setResizeLimits(plan.minWidth, plan.minHeight, plan.maxWidth, plan.maxHeight);
+            if (plan.width > 0 && plan.height > 0)
+            {
+                if (saved.valid)
+                    window->setBounds(saved.x, saved.y, plan.width, plan.height);
+                else
+                    window->centreWithSize(plan.width, plan.height);
+            }
+        }
+        if (commandKeys_ != nullptr)
+            window->addKeyListener(commandKeys_);
+        window->setVisible(true);
+        editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
+    };
+    editorOpens_.push_back(job);
+    const auto editorBegan = steadyNs();
+    juce::Thread::launch([job, editorBegan]
+    {
+        juce::AudioProcessorEditor* editor = nullptr;
+        try
+        {
+            if (job->plugin != nullptr && job->plugin->instance != nullptr)
+                editor = job->plugin->instance->createEditorAndMakeActive();
+        }
+        catch (...)
+        {
+            editor = nullptr;
+        }
+        job->editor = editor;
+        job->createMs = (steadyNs() - editorBegan) / 1000000ULL;
+        job->finished.store(true, std::memory_order_release);
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([job]
+            {
+                if (job->deliver)
+                    job->deliver();
+            });
+    });
+    juce::Timer::callAfterDelay(5000, [job]
+    {
+        if (job->notice)
+            job->notice();
+    });
 }
 
 void PluginRack::setGlobalKeyListener(juce::KeyListener* listener)
@@ -3807,6 +3954,7 @@ void PluginRack::removePluginNow(int channel, int slot)
     auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
     if (window != nullptr)
     {
+        window->quiesce();
         window->onClose_ = nullptr;
         window->setVisible(false);
     }
@@ -3930,6 +4078,7 @@ void PluginRack::bury(std::shared_ptr<HostedPlugin> plugin, std::unique_ptr<Edit
         return;
     if (window != nullptr)
     {
+        window->quiesce();
         window->onClose_ = nullptr;
         window->setVisible(false);
     }
@@ -3982,6 +4131,8 @@ void PluginRack::pumpGraves()
                 keep.push_back(std::move(item));
                 continue;
             }
+            if (item.window != nullptr)
+                item.window->quiesce();
             item.window.reset();
             if (gate != nullptr)
                 resumeGate(*gate);
@@ -4033,7 +4184,10 @@ void PluginRack::pumpCondemned()
         auto* dying = item.instance;
         item.instance = nullptr;
         dying->removeListener(this);
-        releaseInstanceOffMessageThread(dying);
+        // An Audio Unit is released on this message thread after the grave
+        // hops, so a plugin timer cannot run into freed memory.
+        // releaseInstanceOffMessageThread is not used for that release.
+        releasePluginOnMessageThread(dying);
     }
     condemned_.swap(keep);
     if (! condemned_.empty())
@@ -4092,7 +4246,10 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
 
     if (rack == nullptr)
     {
-        releaseInstanceOffMessageThread(instance);
+        // Already on the message thread. releaseInstanceOffMessageThread would
+        // free an Audio Unit while its timer is still queued here.
+        juce::ignoreUnused(&releaseInstanceOffMessageThread);
+        releasePluginOnMessageThread(instance);
         return;
     }
 

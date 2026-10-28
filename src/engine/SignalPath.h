@@ -120,6 +120,15 @@ inline const char* stereoFoldToken(StereoFold fold) noexcept
     return "L";
 }
 
+// Fold L on the right channel of an unlinked pair must not keep only the
+// plugin's left output. Sum keeps a signal that the plugin put on the right.
+inline StereoFold foldKeepingRightInput(StereoFold fold, bool hostInputIsRight) noexcept
+{
+    if (hostInputIsRight && fold == StereoFold::left)
+        return StereoFold::sum;
+    return fold;
+}
+
 inline StereoFold stereoFoldFromToken(const char* token) noexcept
 {
     if (token == nullptr)
