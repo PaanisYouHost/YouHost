@@ -113,6 +113,98 @@ inline bool sidechainKeepsStereoMain(bool hasExtraBuses, bool openedStereo) noex
     return hasExtraBuses && openedStereo;
 }
 
+// A VST3 that opened 2/2 stays 2/2 on a mono channel. The mono signal is
+// copied to both inputs and the left output is kept. An Audio Unit still
+// prefers 1/1. VM FG-N's Audio Unit ran at 1/1; its VST3 did not.
+inline bool vst3MonoKeepsOpenedStereo(bool vst3, bool openedStereo) noexcept
+{
+    return vst3 && openedStereo;
+}
+
+// VM FG-N declares 2 in / 2 out. checkBusesLayoutSupported and setBusesLayout
+// both reported that 1/1 extra=disable worked. The processor still read two
+// channels and faulted in vDSP on the audio thread. A declared stereo main
+// bus is not narrowed, and extra=disable is not applied to a bus that opened
+// with channels. An Audio Unit may still take 1/1.
+inline bool vst3LayoutRemovesDeclaredBus(bool vst3,
+                                         const int* declaredIn,
+                                         int declaredInCount,
+                                         const int* declaredOut,
+                                         int declaredOutCount,
+                                         int askedIn,
+                                         int askedOut,
+                                         ExtraBusMode extra) noexcept
+{
+    if (! vst3)
+        return false;
+    if (declaredIn != nullptr && declaredOut != nullptr && declaredInCount >= 1 && declaredOutCount >= 1)
+    {
+        const int mainIn = declaredIn[0];
+        const int mainOut = declaredOut[0];
+        if (mainIn >= 2 && mainOut >= 2 && (askedIn < mainIn || askedOut < mainOut))
+            return true;
+    }
+    if (extra != ExtraBusMode::disable)
+        return false;
+    if (declaredIn != nullptr)
+    {
+        for (int bus = 1; bus < declaredInCount; ++bus)
+            if (declaredIn[bus] > 0)
+                return true;
+    }
+    if (declaredOut != nullptr)
+    {
+        for (int bus = 1; bus < declaredOutCount; ++bus)
+            if (declaredOut[bus] > 0)
+                return true;
+    }
+    return false;
+}
+
+// A layout that is not the one the plugin declared needs both answers.
+// setBusesLayout alone is how 1/1 was accepted for a 2/2 VST3.
+inline bool busOfferAccepted(bool requireDeclaredCheck, bool checkAccepted, bool setAccepted) noexcept
+{
+    if (! setAccepted)
+        return false;
+    if (requireDeclaredCheck && ! checkAccepted)
+        return false;
+    return true;
+}
+
+inline bool busesDifferFromDeclared(const int* declaredIn,
+                                    int declaredInCount,
+                                    const int* declaredOut,
+                                    int declaredOutCount,
+                                    const int* offeredIn,
+                                    int offeredInCount,
+                                    const int* offeredOut,
+                                    int offeredOutCount) noexcept
+{
+    if (offeredInCount != declaredInCount || offeredOutCount != declaredOutCount)
+        return true;
+    if (declaredIn == nullptr || declaredOut == nullptr || offeredIn == nullptr || offeredOut == nullptr)
+        return true;
+    for (int bus = 0; bus < declaredInCount; ++bus)
+        if (offeredIn[bus] != declaredIn[bus])
+            return true;
+    for (int bus = 0; bus < declaredOutCount; ++bus)
+        if (offeredOut[bus] != declaredOut[bus])
+            return true;
+    return false;
+}
+
+// Log when the chosen layout is not the declared one, and when a mono
+// channel keeps a declared 2/2 instead of 1/1.
+inline bool logBusOverride(bool vst3, bool unlinkedMono, int declaredIn, int declaredOut, int choseIn, int choseOut) noexcept
+{
+    if (! vst3)
+        return false;
+    if (declaredIn != choseIn || declaredOut != choseOut)
+        return true;
+    return unlinkedMono && declaredIn >= 2 && declaredOut >= 2;
+}
+
 // A plan that never reached setBusesLayout did not change the plugin.
 // "opened main bus does not match" is that case. Calling setBusesLayout to
 // put the old layout back would run VST3 setupProcessing again while other

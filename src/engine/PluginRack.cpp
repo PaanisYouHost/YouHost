@@ -3,6 +3,7 @@
 #include "CpuMeter.h"
 #include "HostLog.h"
 #include "PluginBuses.h"
+#include "PluginLoadPace.h"
 #include "HostPath.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
@@ -43,6 +44,14 @@ struct InstanceDeleter
         PluginRack::destroyInstance(rack, instance);
     }
 };
+
+PluginRack* messageFaultRack = nullptr;
+
+void messageFaultTrampoline()
+{
+    if (messageFaultRack != nullptr)
+        messageFaultRack->recoverFromMessageFault();
+}
 
 // Slate's destructor dispatch_syncs the message thread from inside
 // AudioComponentInstanceDispose. Doing that release here never returns.
@@ -135,6 +144,8 @@ struct BusChoice
     int totalOutputs = 0;
     bool hasExtraBuses = false;
     bool openedStereo = false;
+    int declaredInputs = 0;
+    int declaredOutputs = 0;
     ExtraBusMode usedExtra = ExtraBusMode::disable;
     ChosenLayout chosen = ChosenLayout::none;
     juce::StringArray attempts;
@@ -167,6 +178,7 @@ juce::AudioChannelSet channelSetForBus(int channels, const juce::AudioChannelSet
 bool offerLayout(juce::AudioPluginInstance& instance,
                  const LayoutPlan& plan,
                  const juce::AudioProcessor::BusesLayout& original,
+                 bool requireDeclaredCheck,
                  juce::String& why)
 {
     if (! plan.ok)
@@ -194,10 +206,13 @@ bool offerLayout(juce::AudioPluginInstance& instance,
     }
     const bool checkAccepted = instance.checkBusesLayoutSupported(layout);
     const bool setAccepted = instance.setBusesLayout(layout);
-    if (! setAccepted)
+    if (! busOfferAccepted(requireDeclaredCheck, checkAccepted, setAccepted))
     {
-        why = checkAccepted ? juce::String("setBusesLayout refused")
-                            : juce::String("checkBusesLayoutSupported refused; setBusesLayout refused");
+        if (! setAccepted)
+            why = checkAccepted ? juce::String("setBusesLayout refused")
+                                : juce::String("checkBusesLayoutSupported refused; setBusesLayout refused");
+        else
+            why = "checkBusesLayoutSupported refused; setBusesLayout accepted; declared buses stay";
         return false;
     }
     if (! countsMatchPlan(instance, plan, why))
@@ -254,15 +269,31 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         inputDefaults[bus] = instance.getChannelCountOfBus(true, bus);
     for (int bus = 0; bus < outputBusCount; ++bus)
         outputDefaults[bus] = instance.getChannelCountOfBus(false, bus);
+    const int declaredMainIn = inputBusCount > 0 ? inputDefaults[0] : 0;
+    const int declaredMainOut = outputBusCount > 0 ? outputDefaults[0] : 0;
+    choice.declaredInputs = declaredMainIn;
+    choice.declaredOutputs = declaredMainOut;
 
     int wantIn[3] {};
     int wantOut[3] {};
     const ChosenLayout preferred = layoutForChannel(choice.openedStereo ? ChosenLayout::stereo : ChosenLayout::mono,
                                                     unlinkedMono,
                                                     true);
+    const bool vst3 = instance.getPluginDescription().pluginFormatName == "VST3";
     const bool monoFirst = preferred == ChosenLayout::mono
-                           && ! sidechainKeepsStereoMain(choice.hasExtraBuses, choice.openedStereo);
-    mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
+                           && ! sidechainKeepsStereoMain(choice.hasExtraBuses, choice.openedStereo)
+                           && ! vst3MonoKeepsOpenedStereo(vst3, choice.openedStereo);
+    int layoutCount = 3;
+    if (vst3MonoKeepsOpenedStereo(vst3, choice.openedStereo))
+    {
+        wantIn[0] = 2;
+        wantOut[0] = 2;
+        layoutCount = 1;
+    }
+    else
+    {
+        mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
+    }
     ExtraBusMode modes[5] {};
     const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
     // True while the plugin still has the layout it opened with. A planner
@@ -270,17 +301,33 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     // a real offer changed it.
     bool pluginLeftOpened = true;
 
-    for (int layout = 0; layout < 3; ++layout)
+    for (int layout = 0; layout < layoutCount; ++layout)
     {
         for (int modeIndex = 0; modeIndex < modeCount; ++modeIndex)
         {
             const auto mode = modes[modeIndex];
+            if (vst3LayoutRemovesDeclaredBus(vst3, inputDefaults, inputBusCount, outputDefaults, outputBusCount,
+                                             wantIn[layout], wantOut[layout], mode))
+            {
+                juce::String skipped;
+                skipped << "attempt " << layoutNameFor(wantIn[layout], wantOut[layout])
+                        << " extra=" << extraBusModeName(mode)
+                        << " supported=no reason=declared " << declaredMainIn << "/" << declaredMainOut
+                        << " not removed";
+                choice.attempts.add(skipped);
+                continue;
+            }
             const auto plan = planPluginLayout(inputDefaults, inputBusCount, outputDefaults, outputBusCount,
                                                wantIn[layout], wantOut[layout], mode);
             if (plan.ok)
                 pluginLeftOpened = false;
+            const bool requireDeclaredCheck = plan.ok && vst3
+                                               && busesDifferFromDeclared(inputDefaults, inputBusCount,
+                                                                          outputDefaults, outputBusCount,
+                                                                          plan.inputBuses, plan.inputBusCount,
+                                                                          plan.outputBuses, plan.outputBusCount);
             juce::String why;
-            const bool ok = offerLayout(instance, plan, remember, why);
+            const bool ok = offerLayout(instance, plan, remember, requireDeclaredCheck, why);
             juce::String line;
             line << "attempt " << layoutNameFor(wantIn[layout], wantOut[layout])
                  << " extra=" << extraBusModeName(mode)
@@ -301,11 +348,12 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
                 continue;
             }
 
-            if (wantIn[layout] == 1 && wantOut[layout] == 1)
+            const bool checkAgreed = why == "ok";
+            if (checkAgreed && wantIn[layout] == 1 && wantOut[layout] == 1)
                 choice.supportMono = true;
-            else if (wantIn[layout] == 1 && wantOut[layout] == 2)
+            else if (checkAgreed && wantIn[layout] == 1 && wantOut[layout] == 2)
                 choice.supportSide = true;
-            else if (wantIn[layout] == 2 && wantOut[layout] == 2)
+            else if (checkAgreed && wantIn[layout] == 2 && wantOut[layout] == 2)
                 choice.supportStereo = true;
             choice.inputChannels = plan.mainIn;
             choice.outputChannels = plan.mainOut;
@@ -318,6 +366,9 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
                                 + " extra=" + juce::String(extraBusModeName(mode))
                                 + " main " + juce::String(choice.inputChannels) + "/" + juce::String(choice.outputChannels)
                                 + " total " + juce::String(choice.totalInputs) + "/" + juce::String(choice.totalOutputs));
+            if (logBusOverride(vst3, unlinkedMono, declaredMainIn, declaredMainOut, choice.inputChannels, choice.outputChannels))
+                choice.attempts.add("override declared " + juce::String(declaredMainIn) + "/" + juce::String(declaredMainOut)
+                                    + " chose " + juce::String(layoutNameFor(choice.inputChannels, choice.outputChannels)));
             return choice;
         }
     }
@@ -351,6 +402,9 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         choice.attempts.add("kept opened layout main " + juce::String(kept.mainIn) + "/" + juce::String(kept.mainOut)
                             + " total " + juce::String(kept.totalIn) + "/" + juce::String(kept.totalOut)
                             + " reason=setBusesLayout did not accept another layout");
+        if (logBusOverride(vst3, unlinkedMono, declaredMainIn, declaredMainOut, kept.mainIn, kept.mainOut))
+            choice.attempts.add("override declared " + juce::String(declaredMainIn) + "/" + juce::String(declaredMainOut)
+                                + " chose " + juce::String(layoutNameFor(kept.mainIn, kept.mainOut)));
         return choice;
     }
 
@@ -373,6 +427,7 @@ void logHostedPlugin(AppSettings* settings,
     line << "plugin " << description.name
          << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
          << " opened " << buses.openInputs << "/" << buses.openOutputs
+         << " declared " << buses.declaredInputs << "/" << buses.declaredOutputs
          << " supports 1/1=" << (buses.supportMono ? "yes" : "no")
          << " 1/2=" << (buses.supportSide ? "yes" : "no")
          << " 2/2=" << (buses.supportStereo ? "yes" : "no")
@@ -890,16 +945,41 @@ public:
     {
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::String error;
-        const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
-        // An Audio Unit is created on the loader thread. A VST3 is created
-        // on the message thread, in the same turn as setActive.
-        if (! vst3)
+        // Audio Unit and VST3 are both created on this loader thread.
+        // VST3 setupProcessing runs on the loader thread.
+        // The message thread stays in the run loop. A slow initialize cannot
+        // stop the audio callback or the UI. Other channels keep the graph
+        // that is already published. blockProcessing_ stays false.
+        // No lock is held across the plugin calls. The message thread
+        // publishes the instance only after this returns.
+        auto logStage = [&](const char* stage, int milliseconds, const char* note)
+        {
+            if (owner_.settings_ == nullptr)
+                return;
+            appendHostLog(*owner_.settings_,
+                          pluginLogLine("load",
+                                        owner_.jobChannel_,
+                                        owner_.jobSlot_,
+                                        owner_.jobDescription_.pluginFormatName,
+                                        owner_.jobDescription_.name,
+                                        pluginIdentifier(owner_.jobDescription_),
+                                        juce::String(formatLoadStageLine(stage, milliseconds, note).c_str())));
+        };
+        auto timeStage = [&](const char* stage, const char* note, auto&& body)
+        {
+            const auto started = juce::Time::getMillisecondCounter();
+            body();
+            logStage(stage, static_cast<int>(juce::Time::getMillisecondCounter() - started), note);
+        };
+        timeStage("instantiate", nullptr, [&]()
+        {
             owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+        });
+        // VST3 setupProcessing runs on the loader thread.
+        // Stage times use formatLoadStageLine.
 
-        // VST3 setupProcessing is on the message thread. The loader waits.
         // The audio callback is the first render, with the same channel count
-        // and block size. No lock is held across the plugin calls. The message
-        // thread publishes the instance only after this returns.
+        // and block size.
         PluginRack::OffThreadBuses setup;
         const int left = owner_.jobChannel_ & ~1;
         const bool unlinkedMono = ! owner_.stereoLink(left);
@@ -912,7 +992,11 @@ public:
             auto* live = plugin != nullptr ? plugin : instance.get();
             if (live == nullptr)
                 return;
-            const auto buses = configureBuses(*live, unlinkedMono);
+            BusChoice buses;
+            timeStage("setupProcessing", nullptr, [&]()
+            {
+                buses = configureBuses(*live, unlinkedMono);
+            });
             measured = buses;
             setup.ready = true;
             setup.ok = buses.ok;
@@ -994,62 +1078,30 @@ public:
             // audio thread before process. AudioPluginHost does the same.
             if (static_cast<bool>(owner_.workgroup_))
                 live->audioWorkgroupContextChanged(owner_.workgroup_);
-            live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+            // JUCE calls setActive inside prepareToPlay. Both spans are the
+            // same call. The log names them so a slow setActive is visible.
+            int prepareMs = 0;
+            timeStage("prepareToPlay", nullptr, [&]()
+            {
+                const auto started = juce::Time::getMillisecondCounter();
+                live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                prepareMs = static_cast<int>(juce::Time::getMillisecondCounter() - started);
+            });
+            logStage("setActive", prepareMs, "inside prepareToPlay");
             setup.latencySamples = live->getLatencySamples();
         };
-        bool preparedOnMessage = false;
-        if (vst3)
+        if (instance != nullptr)
         {
-            // VST3 setupProcessing is on the message thread.
-            preparedOnMessage = owner_.runOnMessageThread([&]()
-            {
-                // Factory, initialize, setupProcessing, setActive, and
-                // prepareToPlay are this one turn. A CFRunLoop timer the
-                // plugin arms during initialize cannot run until this
-                // returns, so it cannot fire into a component that is
-                // not active yet.
-                owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_,
-                                                         owner_.jobRate_,
-                                                         owner_.jobBlock_,
-                                                         instance,
-                                                         error,
-                                                         true);
-                if (instance != nullptr)
-                    setupPlugin();
-            });
-        }
-        else if (instance != nullptr)
-        {
-            // An Audio Unit is prepared on the loader thread. Doing it on
-            // the message thread holds that thread, and the audio callback
-            // waits inside the Audio Units already running. The message
-            // thread stays in the runloop. blockProcessing_ stays false,
-            // so the callback does not pass the dry input.
+            // Prepared on the loader thread. Doing it on the message thread
+            // holds that thread, and the audio callback waits inside the
+            // Audio Units already running. The message thread stays in the
+            // runloop. blockProcessing_ stays false, so the callback does
+            // not pass the dry input.
             setupPlugin();
-            preparedOnMessage = true;
-        }
-        if (vst3 || instance != nullptr)
-        {
-            if (! preparedOnMessage)
-            {
-                setup.ready = true;
-                setup.ok = false;
-                if (owner_.settings_ != nullptr)
-                    appendHostLog(*owner_.settings_,
-                                  pluginLogLine("did-not-load",
-                                                owner_.jobChannel_,
-                                                owner_.jobSlot_,
-                                                owner_.jobDescription_.pluginFormatName,
-                                                owner_.jobDescription_.name,
-                                                pluginIdentifier(owner_.jobDescription_),
-                                                "prepare did not run on the message thread, not activated"));
-            }
-            else if (setup.ok)
-            {
+            if (setup.ok)
                 logHostedPlugin(owner_.settings_, owner_.jobDescription_, measured,
                                 stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_,
                                 setup.latencySamples);
-            }
         }
 
         {
@@ -1082,24 +1134,42 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
     deferred_ = std::make_unique<DeferredPluginRelease>();
     pool_ = std::make_unique<RealtimePool>(dspWorkerCount(), 48000.0, 32);
     startTimerHz(5);
+    messageFaultRack = this;
+    setMessageFaultRecovery(&messageFaultTrampoline);
 }
 
 PluginRack::~PluginRack()
 {
+    if (messageFaultRack == this)
+    {
+        messageFaultRack = nullptr;
+        setMessageFaultRecovery(nullptr);
+    }
     releaseForQuit();
 }
 
 void PluginRack::timerCallback()
 {
-    if (takePluginFault())
+    if (const int fault = takePluginFault())
     {
-        if (settings_ != nullptr)
-            appendHostLog(*settings_, "plugin window crashed on its own thread; editor closed, audio kept");
-        closeAllEditors();
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                               "Plugin",
-                                               "A plugin window crashed. The plugin stays in the audio path.");
+        if (fault == kPluginFaultMessageThread)
+        {
+            recoverFromMessageFault();
+        }
+        else
+        {
+            juce::String line = "plugin window crashed on its own thread; editor closed, audio kept";
+            if (faultName_.isNotEmpty())
+                line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
+            if (settings_ != nullptr)
+                appendHostLog(*settings_, line);
+            closeAllEditors();
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "A plugin may have crashed YouHost",
+                                                   "A plugin window crashed. The plugin stays in the audio path.");
+        }
     }
+    releaseCrashedHolding();
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
@@ -1833,6 +1903,7 @@ void PluginRack::resumeGate(PluginGate& gate) noexcept
 void PluginRack::refreshLatency()
 {
     PhaseScope phase(kPhasePrepare);
+    bool changed = false;
     std::vector<std::shared_ptr<HostedPlugin>> plugins;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1848,10 +1919,17 @@ void PluginRack::refreshLatency()
             continue;
         if (! pauseGate(*plugin->gate))
             continue;
-        plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
+        const int next = clampLatencySamples(plugin->instance->getLatencySamples());
+        if (next != plugin->latencySamples)
+        {
+            plugin->latencySamples = next;
+            changed = true;
+        }
         resumeGate(*plugin->gate);
     }
 
+    if (! changed)
+        return;
     std::lock_guard<std::mutex> lock(lifeLock_);
     publishUnlocked();
 }
@@ -2131,6 +2209,10 @@ void PluginRack::beginLoad(int channel,
                            std::uint64_t restoreGeneration)
 {
     touchMessageBeat();
+    faultChannel_ = channel;
+    faultSlot_ = slot;
+    faultName_ = description.name;
+    faultId_ = pluginIdentifier(description);
     if (! validSlot(channel, slot))
     {
         finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
@@ -2184,19 +2266,21 @@ void PluginRack::beginLoad(int channel,
     if (leaveOutOfThisLaunch(restoreGeneration != 0, omittedFromThisLaunch(channel, slot, incomingId)))
     {
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
+        const bool repeated = repeatedActivationOmit(channel, slot, incomingId);
+        const char* reason = repeated ? kActivationCrashTwice : kLeftOutOfThisLaunch;
         std::shared_ptr<HostedPlugin> previous;
         {
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             model.loading = false;
             model.error.clear();
-            model.note = kPluginCrashedLastTime;
+            model.note = repeated ? juce::String(kPluginCrashedDisabled) : juce::String(kPluginCrashedLastTime);
             previous = std::move(model.plugin);
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
         keepPluginInSessionFile(channel, slot, description, state, bypassed, stereoFold);
-        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), kLeftOutOfThisLaunch, formatName);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason, formatName);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
@@ -3159,7 +3243,21 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         // Channel 1 slot 1 after "left crashed plugins off" is this case.
         destination.liveInstance = model.plugin != nullptr && model.plugin->instance != nullptr;
         if (! destination.liveInstance)
+        {
+            if (model.note == kPluginCrashedDisabled)
+            {
+                for (const auto& kept : keptInSessionFile_)
+                {
+                    if (kept.channel != channel || kept.slot != slot || kept.description.name.isEmpty())
+                        continue;
+                    destination.occupied = true;
+                    destination.bypassed = true;
+                    destination.name = kept.description.name;
+                    break;
+                }
+            }
             continue;
+        }
         destination.occupied = true;
         destination.bypassed = model.plugin->bypassed;
         destination.crashParked = false;
@@ -3744,6 +3842,18 @@ bool PluginRack::omittedFromThisLaunch(int channel, int slot, std::string_view i
     return pluginListedForThisLaunch(channel, slot, identifier, listed.data(), static_cast<int>(listed.size()));
 }
 
+bool PluginRack::repeatedActivationOmit(int channel, int slot, std::string_view identifier) const
+{
+    for (const auto& block : restoreOmit_)
+    {
+        if (! block.repeatedActivation || block.channel != channel || block.slot != slot)
+            continue;
+        if (block.identifier.toStdString() == identifier)
+            return true;
+    }
+    return false;
+}
+
 void PluginRack::keepPluginInSessionFile(int channel,
                                          int slot,
                                          const juce::PluginDescription& description,
@@ -3786,6 +3896,113 @@ void PluginRack::dropKeptPlugin(int channel, int slot)
 void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
+}
+
+void PluginRack::disableCrashedPlugin(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+
+    std::shared_ptr<HostedPlugin> plugin;
+    juce::PluginDescription description;
+    juce::MemoryBlock state;
+    int fold = 0;
+    bool freshly = false;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        freshly = model.plugin != nullptr || model.note != kPluginCrashedDisabled;
+        plugin = std::move(model.plugin);
+        model.loading = false;
+        model.error.clear();
+        model.note = kPluginCrashedDisabled;
+        if (plugin != nullptr)
+        {
+            description = plugin->description;
+            state = plugin->state;
+            fold = plugin->stereoFold;
+            if (plugin->gate != nullptr)
+                plugin->gate->pause.store(1, std::memory_order_release);
+            crashReleaseStarted_ = false;
+            crashedHolding_ = plugin;
+        }
+        publishUnlocked();
+    }
+    if (description.name.isEmpty())
+        description.name = faultName_;
+    if (description.fileOrIdentifier.isEmpty())
+        description.fileOrIdentifier = faultId_;
+    // Record the strike before tearing the plugin down. A fault in that
+    // teardown must not forget that this activation crashed.
+    if (freshly && (plugin != nullptr || description.name.isNotEmpty()))
+    {
+        keepPluginInSessionFile(channel, slot, description, state, true, fold);
+        tracePlugin(channel, slot, "activation-crash", description.name, pluginIdentifier(description), kPluginCrashedDisabled, description.pluginFormatName);
+        noteSlot(channel);
+    }
+
+    // The crashing editor is destroyed here, after the slot is out of the
+    // graph. Burying it would leave its run-loop source alive.
+    auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
+    if (window != nullptr)
+    {
+        editorCloseTries_[channel][slot] = 0;
+        window->onClose_ = nullptr;
+        window->quiesce();
+        window->setVisible(false);
+        window.reset();
+    }
+}
+
+void PluginRack::recoverFromMessageFault()
+{
+    if (validSlot(faultChannel_, faultSlot_))
+        disableCrashedPlugin(faultChannel_, faultSlot_);
+    closeAllEditors();
+    releaseCrashedHolding();
+    if (crashNoticeShown_)
+        return;
+    crashNoticeShown_ = true;
+    juce::String line = "plugin crashed on the message thread";
+    if (faultName_.isNotEmpty())
+        line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
+    line << "; disabled, audio kept";
+    if (settings_ != nullptr)
+        appendHostLog(*settings_, line);
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                           "A plugin may have crashed YouHost",
+                                           "The plugin crashed on the message thread and is disabled. Audio keeps running.");
+}
+
+void PluginRack::releaseCrashedHolding()
+{
+    auto plugin = crashedHolding_;
+    if (plugin == nullptr || plugin->instance == nullptr || crashReleaseStarted_)
+        return;
+    if (plugin->gate != nullptr)
+        plugin->gate->pause.store(1, std::memory_order_release);
+    const auto start = juce::Time::getMillisecondCounter();
+    while (plugin->gate != nullptr
+           && plugin->gate->depth.load(std::memory_order_acquire) != 0
+           && juce::Time::getMillisecondCounter() - start < 8)
+        juce::Thread::sleep(1);
+    if (plugin->gate != nullptr && plugin->gate->depth.load(std::memory_order_acquire) != 0)
+        return;
+
+    // Delete on this turn. A grave-hop delay would let the plugin's own
+    // run-loop source fire again and fault before the instance is gone.
+    crashReleaseStarted_ = true;
+    releaseCrashedNow_ = true;
+    const auto previous = std::set_terminate([] { std::_Exit(0); });
+    try
+    {
+        plugin->instance.reset();
+    }
+    catch (...)
+    {
+    }
+    std::set_terminate(previous);
+    releaseCrashedNow_ = false;
 }
 
 void PluginRack::releaseForQuit()
@@ -4221,6 +4438,15 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
 {
     if (instance == nullptr)
         return;
+
+    if (rack != nullptr && rack->releaseCrashedNow_)
+    {
+        instance->removeListener(rack);
+        // A message-thread crash releases now, so the plugin timer stops.
+        // releaseInstanceOffMessageThread is not used for that release.
+        releasePluginOnMessageThread(instance);
+        return;
+    }
 
     if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
     {

@@ -1434,7 +1434,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     globalInputButton_.onClick = [this] { applyGlobalListen(ChannelListen::input); };
     globalOffButton_.onClick = [this] { applyGlobalListen(ChannelListen::off); };
     globalRecButton_.setTooltip("Set every visible channel to REC. A selection does not limit this. While recording, a change asks twice.");
-    globalInputButton_.setTooltip("Set every visible channel to INPUT. A selection does not limit this. While recording, a change asks twice.");
+    globalInputButton_.setTooltip("Set every visible channel to HOST. A selection does not limit this. While recording, a change asks twice.");
     globalOffButton_.setTooltip("Set every visible channel to OFF. A selection does not limit this. While recording, a change asks twice.");
     recordLock_->onClick = [this]
     {
@@ -1479,7 +1479,7 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     clearClipsButton_.onClick = [this] { engine_.requestClipClearAll(); };
     clearClipsButton_.setTooltip("Clear every latched clip mark");
     setupButton_.onClick = [this] { toggleSetup(); };
-    setupButton_.setTooltip("Device, sample rate, and buffer size. The interface opens with all channels. REC, INPUT, and OFF choose what each channel does.");
+    setupButton_.setTooltip("Device, sample rate, and buffer size. The interface opens with all channels. REC, HOST, and OFF choose what each channel does.");
 
     meterGrid_.setClearHandler([this](int channel)
     {

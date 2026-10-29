@@ -22,6 +22,10 @@ inline constexpr int kPhasePublish = 8;
 inline constexpr int kPhaseCapture = 9;
 
 inline constexpr std::int64_t kStallLimitNs = 2000000000LL;
+// The message thread is busy when its beat is older than this. The old
+// watchdog ignored phase=message, so a plugin timer with no editor open
+// (LinEQ Lowband stereo) could block the UI for seconds without a log line.
+inline constexpr std::int64_t kMessageBusyLimitNs = 500000000LL;
 
 inline const char* stallPhaseName(int phase) noexcept
 {
@@ -49,19 +53,13 @@ inline bool beatIsStale(std::int64_t nowNs, std::int64_t beatNs, std::int64_t li
     return nowNs - beatNs > limitNs;
 }
 
-// phase=message is the idle runloop, waiting for the next event. A stale
-// beat there is not a stuck load. Only a phase that means work in progress
-// is reported.
+// Every phase counts, including the idle run loop. A plugin callback can
+// block that loop with no editor open. phase is the last work the host
+// recorded, and the log line prints it.
 inline bool messageStallMatters(int phase) noexcept
 {
-    return phase == kPhaseAudio
-           || phase == kPhasePlugins
-           || phase == kPhaseLoad
-           || phase == kPhasePrepare
-           || phase == kPhaseEditor
-           || phase == kPhaseCloseEditor
-           || phase == kPhasePublish
-           || phase == kPhaseCapture;
+    (void) phase;
+    return true;
 }
 
 struct StallClock

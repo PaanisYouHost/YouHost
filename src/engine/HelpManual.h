@@ -49,15 +49,15 @@ What's new
 - YouHost never opens a card by itself. Opening a session restores its card, sample rate, bit depth and buffer. If the card is not found, YouHost stays Offline. A later switch happens only when you pick a card, or when a session file names one. YouHost does not move to another card on its own. The MacBook microphone and speakers stay one entry, MacBook Pro (mic + speakers).
 - Switching cards keeps channel names, plugins and groups.
 - A session always has 128 channels. Channels beyond the card's count are hidden. Plugins on a hidden channel, or a channel with no input, do not run. A one-input, two-output device runs plugins only on the channel that has the input.
-- The channel mode button cycles: REC (plugins + recording) → INPUT (plugins, not recorded) → OFF (channel fully off).
-- ALL REC / ALL INPUT / ALL OFF set every visible channel.
+- The channel mode button cycles: REC (plugins + recording) → HOST (plugins, not recorded) → OFF (channel fully off).
+- ALL REC / ALL HOST / ALL OFF set every visible channel.
 
 4. Recording (REC)
 ------------------
 - Record arms, Play/Space starts, Cmd+Space records immediately.
 - Cmd+Space only works if Spotlight is not using that shortcut.
 - Each channel is recorded as its own mono WAV: channel_name_take.wav, e.g. 1_BD_1.wav.
-- Record lock (padlock next to Record): click to arm it, even before the take. While locked, Stop, Space, Record, New, Open, Import, device/sample rate/buffer changes and REC/INPUT/OFF are blocked. Only another click on the padlock unlocks it. Red = locked (RECORDING LOCKED).
+- Record lock (padlock next to Record): click to arm it, even before the take. While locked, Stop, Space, Record, New, Open, Import, device/sample rate/buffer changes and REC/HOST/OFF are blocked. Only another click on the padlock unlocks it. Red = locked (RECORDING LOCKED).
 - Changing a channel mode while recording asks twice.
 - If recording doesn't start, you get an alert and the reason is written to youhost.log.
 

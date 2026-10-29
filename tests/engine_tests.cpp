@@ -1245,7 +1245,7 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("writes session.youhost") != std::string::npos);
     CHECK(help.find("Option+drag") != std::string::npos);
     CHECK(help.find("REC (plugins + recording)") != std::string::npos);
-    CHECK(help.find("INPUT (plugins, not recorded)") != std::string::npos);
+    CHECK(help.find("HOST (plugins, not recorded)") != std::string::npos);
     CHECK(help.find("OFF (channel fully off)") != std::string::npos);
     CHECK(help.find("Open Anyway") != std::string::npos);
     CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
@@ -1631,8 +1631,10 @@ void testInsertMenuAndStall()
     CHECK(! youhost::beatIsStale(youhost::kStallLimitNs, 1, youhost::kStallLimitNs));
     CHECK(youhost::beatIsStale(youhost::kStallLimitNs + 2, 1, youhost::kStallLimitNs));
     CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
-    CHECK(! youhost::messageStallMatters(youhost::kPhaseIdle));
-    CHECK(! youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseIdle));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::kMessageBusyLimitNs == 500000000LL);
+    CHECK(youhost::kMessageBusyLimitNs < youhost::kStallLimitNs);
     CHECK(youhost::messageStallMatters(youhost::kPhaseLoad));
     CHECK(youhost::messageStallMatters(youhost::kPhasePrepare));
 
@@ -1699,6 +1701,24 @@ void testCrashJournal()
     const auto dirty = youhost::readCrashJournal("mark\tactive\t1\t0\tName\tid\n");
     CHECK(! dirty.clean);
     CHECK(dirty.marks.size() == 1);
+
+    youhost::CrashJournal strikes;
+    CHECK(youhost::noteActivationStrike(strikes, "au.fgx", 0, 0, false) == 1);
+    CHECK(youhost::noteActivationStrike(strikes, "au.fgx", 0, 0, false) == 2);
+    CHECK(youhost::leaveDisabledAfterActivationCrashes(2));
+    CHECK(youhost::leaveDisabledAfterActivationCrashes(1) == false);
+    CHECK(std::string(youhost::kPluginCrashedDisabled) == "crashed, disabled");
+    CHECK(std::string(youhost::kActivationCrashTwice) == "crashed during activation twice, left disabled");
+    youhost::CrashJournal died;
+    CHECK(youhost::noteActivationStrike(died, "vst3.fgx", 2, 0, true) == 2);
+    const auto strikeText = youhost::writeCrashJournal(died);
+    CHECK(strikeText.find("strike\tvst3.fgx\t2\t2\t0\n") != std::string::npos);
+    const auto strikeBack = youhost::readCrashJournal(strikeText);
+    CHECK(strikeBack.strikes.size() == 1);
+    CHECK(strikeBack.strikes[0].identifier == "vst3.fgx");
+    CHECK(strikeBack.strikes[0].count == 2);
+    CHECK(strikeBack.strikes[0].channel == 2);
+    CHECK(youhost::writeCrashJournal(youhost::CrashJournal{}).find("strike\t") == std::string::npos);
 
     youhost::CrashJournal session;
     youhost::CrashMark eq;
@@ -2060,7 +2080,10 @@ void testOutputGainAndListen()
     CHECK(youhost::channelListenFromName("input") == youhost::ChannelListen::input);
     CHECK(youhost::channelListenFromName("off") == youhost::ChannelListen::off);
     CHECK(youhost::channelListenFromName("rec") == youhost::ChannelListen::record);
-    CHECK(std::string(youhost::channelListenLabel(youhost::ChannelListen::input)) == "INPUT");
+    CHECK(std::string(youhost::channelListenLabel(youhost::ChannelListen::input)) == "HOST");
+    CHECK(std::string(youhost::channelListenName(youhost::ChannelListen::input)) == "input");
+    CHECK(youhost::channelListenFromName("host") == youhost::ChannelListen::input);
+    CHECK(youhost::channelListenFromName("input") == youhost::ChannelListen::input);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::record) == youhost::ChannelListen::input);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::input) == youhost::ChannelListen::off);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::off) == youhost::ChannelListen::record);
@@ -2733,10 +2756,10 @@ void testSessionChannelsRateLockAndClose()
     const int already[] = { static_cast<int>(youhost::ChannelListen::record), static_cast<int>(youhost::ChannelListen::record) };
     CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, already, 2));
     CHECK(youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
-          == "Switch ch 5 REC -> INPUT");
+          == "Switch ch 5 REC -> HOST");
     CHECK(std::string(youhost::kListenChangeVerb) == "Switch");
     CHECK(std::string(youhost::kListenChangeSureTitle) == "Are you sure?");
-    CHECK(youhost::globalListenChangeLine(youhost::ChannelListen::input) == "Switch every visible channel to INPUT");
+    CHECK(youhost::globalListenChangeLine(youhost::ChannelListen::input) == "Switch every visible channel to HOST");
     CHECK(youhost::listenChangeApplies(youhost::ListenChangeKind::now, 0, 0));
     CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 0, 1));
     CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 0));
@@ -3944,7 +3967,7 @@ void testReleaseChecklist()
     }
     if (! youhost::channelsForPageListen(0, selected, 1, 4).empty())
         allButtons = false;
-    item("ALL REC / ALL INPUT / ALL OFF override on REC and HOST", allButtons);
+    item("ALL REC / ALL HOST / ALL OFF override on REC and HOST", allButtons);
 
     const bool quitAsks = youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::quit);
     const bool cancelAborts = ! youhost::sessionCloseProceeds(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::cancel);
@@ -4110,9 +4133,9 @@ void testReleaseChecklist()
 
     const auto mainUi = readWorkspaceFile("src/ui/MainComponent.cpp");
     const auto mainHeader = readWorkspaceFile("src/ui/MainComponent.h");
-    item("ALL button labels stay ALL REC, ALL INPUT, and ALL OFF",
+    item("ALL button labels stay ALL REC, ALL HOST, and ALL OFF",
          mainHeader.find("\"ALL REC\"") != std::string::npos
-             && mainHeader.find("\"ALL INPUT\"") != std::string::npos
+             && mainHeader.find("\"ALL HOST\"") != std::string::npos
              && mainHeader.find("\"ALL OFF\"") != std::string::npos
              && mainUi.find("only those channels") == std::string::npos
              && mainUi.find("hasSelection ? juce::String(\"REC\")") == std::string::npos);
@@ -4434,7 +4457,7 @@ void testReleaseChecklist()
          youhost::classifyListenChange(true, false, true) == youhost::ListenChangeKind::confirm
              && youhost::classifyListenChange(false, false, true) == youhost::ListenChangeKind::now
              && youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
-                    == "Switch ch 5 REC -> INPUT"
+                    == "Switch ch 5 REC -> HOST"
              && mainUi.find("juce::Colours::red") != std::string::npos
              && mainUi.find("kListenChangeVerb") != std::string::npos
              && mainUi.find("kListenChangeSureTitle") != std::string::npos
@@ -5283,11 +5306,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.15"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.16"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.15"
+             && std::string(youhost::versionNumber()) == "1.0.16"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.15") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.16") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5296,8 +5319,8 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.15") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.15-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.16") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.16-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
@@ -5933,6 +5956,90 @@ void testBeta090()
     youhost::mainLayoutAttemptOrder(true, wantIn, wantOut);
     CHECK(wantIn[0] == 1 && wantOut[0] == 1);
     CHECK(wantIn[1] == 2 && wantOut[1] == 2);
+    CHECK(youhost::vst3MonoKeepsOpenedStereo(true, true));
+    CHECK(! youhost::vst3MonoKeepsOpenedStereo(true, false));
+    CHECK(! youhost::vst3MonoKeepsOpenedStereo(false, true));
+    int fgIn[1] = { 2 };
+    int fgOut[1] = { 2 };
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::disable));
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::opened));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 2, 2, youhost::ExtraBusMode::opened));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(false, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::disable));
+    int fgSideIn[2] = { 2, 2 };
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgSideIn, 2, fgOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    int sdIn[2] = { 2, 2 };
+    int sdOut[1] = { 2 };
+    const auto sdOpened = youhost::planPluginLayout(sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::opened);
+    CHECK(sdOpened.ok);
+    CHECK(sdOpened.inputBuses[0] == 2);
+    CHECK(sdOpened.inputBuses[1] == 2);
+    CHECK(sdOpened.totalIn == 4);
+    CHECK(sdOpened.totalOut == 2);
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::opened));
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    {
+        float storage[4][8];
+        float* channels[4];
+        for (int index = 0; index < 4; ++index)
+        {
+            channels[index] = storage[index];
+            std::fill(storage[index], storage[index] + 8, 3.0f);
+        }
+        float left[8];
+        float right[8];
+        std::fill(left, left + 8, 0.5f);
+        std::fill(right, right + 8, -0.25f);
+        youhost::feedPluginChannels(channels, 4, 2, 8, left, right);
+        CHECK(channels[0][0] == 0.5f);
+        CHECK(channels[1][0] == -0.25f);
+        CHECK(channels[2][0] == 0.0f);
+        CHECK(channels[3][0] == 0.0f);
+        CHECK(channels[2][7] == 0.0f);
+    }
+    CHECK(youhost::formatLoadStageLine("instantiate", 9012) == "load stage instantiate 9012 ms");
+    CHECK(youhost::formatLoadStageLine("setActive", 12, "inside prepareToPlay")
+              == "load stage setActive 12 ms inside prepareToPlay");
+    CHECK(! youhost::busOfferAccepted(true, true, false));
+    CHECK(! youhost::busOfferAccepted(true, false, true));
+    CHECK(youhost::busOfferAccepted(true, true, true));
+    CHECK(youhost::busOfferAccepted(false, false, true));
+    CHECK(youhost::busesDifferFromDeclared(fgIn, 1, fgOut, 1, fgIn, 1, fgOut, 1) == false);
+    int narrowIn[1] = { 1 };
+    int narrowOut[1] = { 1 };
+    CHECK(youhost::busesDifferFromDeclared(fgIn, 1, fgOut, 1, narrowIn, 1, narrowOut, 1));
+    CHECK(youhost::logBusOverride(true, true, 2, 2, 2, 2));
+    CHECK(youhost::logBusOverride(true, false, 2, 2, 1, 1));
+    CHECK(! youhost::logBusOverride(false, true, 2, 2, 1, 1));
+    CHECK(! youhost::logBusOverride(true, false, 2, 2, 2, 2));
+    {
+        constexpr int n = 8;
+        float mono[n];
+        float left[n];
+        float right[n];
+        for (int index = 0; index < n; ++index)
+            mono[index] = 0.25f;
+        std::fill(right, right + n, 99.0f);
+        bool sawBoth = false;
+        youhost::renderFoldedMono(mono, n, 2, 2, youhost::StereoFold::left, left, right,
+                                  [&](float** channels, int width, int count)
+                                  {
+                                      CHECK(width == 2);
+                                      CHECK(channels[0] != nullptr);
+                                      CHECK(channels[1] != nullptr);
+                                      CHECK(channels[1][0] == 0.25f);
+                                      CHECK(count == n);
+                                      sawBoth = channels[0] != nullptr && channels[1] != nullptr;
+                                      for (int index = 0; index < count; ++index)
+                                          channels[0][index] = 0.5f;
+                                  });
+        CHECK(sawBoth);
+        CHECK(mono[0] == 0.5f);
+        CHECK(youhost::pluginInputsFed(2) == 2);
+    }
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("vst3LayoutRemovesDeclaredBus") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("override declared ") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("busOfferAccepted") != std::string::npos);
     CHECK(youhost::sidechainKeepsStereoMain(true, true));
     CHECK(! youhost::sidechainKeepsStereoMain(true, false));
     CHECK(! youhost::sidechainKeepsStereoMain(false, true));
@@ -6110,8 +6217,9 @@ void testBeta090()
     CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
     CHECK(loaderRun.find("configureBuses") != std::string::npos);
     CHECK(loaderRun.find("lifeLock_") == std::string::npos);
-    CHECK(loaderRun.find("runOnMessageThread") != std::string::npos);
-    CHECK(loaderRun.find("VST3 setupProcessing is on the message thread") != std::string::npos);
+    CHECK(loaderRun.find("runOnMessageThread") == std::string::npos);
+    CHECK(loaderRun.find("VST3 setupProcessing runs on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("formatLoadStageLine") != std::string::npos);
     CHECK(loaderRun.find("processBlock") == std::string::npos);
     CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") == std::string::npos);
     const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
@@ -6673,18 +6781,15 @@ void testStability106()
     const auto loaderRun = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
                                         "createInstanceBlocking",
                                         "deliverOffThreadInstance");
-    CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("Prepared on the loader thread") != std::string::npos);
     CHECK(loaderRun.find("stateRestoredDifferentBuses") != std::string::npos);
     CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    CHECK(loaderRun.find("runOnMessageThread") == std::string::npos);
     const auto stateAt = loaderRun.find("stateRestoredDifferentBuses");
     const auto prepareAt = loaderRun.find("prepareToPlay");
     CHECK(stateAt != std::string::npos && prepareAt != std::string::npos && stateAt < prepareAt);
-    const auto messageTurn = sliceBetween(loaderRun, "runOnMessageThread", "An Audio Unit is prepared on the loader thread");
-    CHECK(messageTurn.find("createInstanceBlocking") != std::string::npos);
-    CHECK(messageTurn.find("setupPlugin()") != std::string::npos);
-    CHECK(messageTurn.find("CFRunLoop timer") != std::string::npos);
-    const auto createdAt = messageTurn.find("createInstanceBlocking");
-    const auto setupCallAt = messageTurn.find("setupPlugin()");
+    const auto createdAt = loaderRun.find("createInstanceBlocking");
+    const auto setupCallAt = loaderRun.find("setupPlugin()");
     CHECK(createdAt != std::string::npos && setupCallAt != std::string::npos && createdAt < setupCallAt);
     const auto catalogue = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
     CHECK(catalogue.find("allowMessageThread") != std::string::npos);
@@ -6963,6 +7068,11 @@ void testStability106()
     CHECK(pageNow.find("kSlotLoadAgain") == std::string::npos);
     CHECK(pageNow.find("kSlotRetryClick") == std::string::npos);
     CHECK(pageNow.find("crashParked") == std::string::npos);
+    CHECK(pageNow.find("crashed, disabled") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginFault.cpp").find("thread_local sigjmp_buf messageJump") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("recoverFromMessageFault") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("kPluginCrashedDisabled") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("repeatedActivation = true") != std::string::npos);
     CHECK(pageNow.find("left off") == std::string::npos);
     CHECK(pageNow.find("source.note") != std::string::npos);
 

@@ -17,10 +17,19 @@ struct CrashMark
     std::string identifier;
 };
 
+struct ActivationStrike
+{
+    std::string identifier;
+    int channel = -1;
+    int slot = -1;
+    int count = 0;
+};
+
 struct CrashJournal
 {
     bool clean = true;
     std::vector<CrashMark> marks;
+    std::vector<ActivationStrike> strikes;
 };
 
 inline std::string sanitiseJournalField(std::string_view text)
@@ -53,6 +62,20 @@ inline std::string writeCrashJournal(const CrashJournal& journal)
         text += sanitiseJournalField(mark.name);
         text += '\t';
         text += sanitiseJournalField(mark.identifier);
+        text += '\n';
+    }
+    for (const auto& strike : journal.strikes)
+    {
+        if (strike.identifier.empty() || strike.count <= 0)
+            continue;
+        text += "strike\t";
+        text += sanitiseJournalField(strike.identifier);
+        text += '\t';
+        text += std::to_string(strike.count);
+        text += '\t';
+        text += std::to_string(strike.channel);
+        text += '\t';
+        text += std::to_string(strike.slot);
         text += '\n';
     }
     return text;
@@ -96,6 +119,27 @@ inline CrashJournal readCrashJournal(std::string_view text)
         }
 
         const auto fields = splitJournalFields(line);
+        if (fields.size() >= 3 && fields[0] == "strike")
+        {
+            ActivationStrike strike;
+            strike.identifier = std::string(fields[1]);
+            try
+            {
+                strike.count = std::stoi(std::string(fields[2]));
+                if (fields.size() >= 5)
+                {
+                    strike.channel = std::stoi(std::string(fields[3]));
+                    strike.slot = std::stoi(std::string(fields[4]));
+                }
+            }
+            catch (...)
+            {
+                strike.count = 0;
+            }
+            if (! strike.identifier.empty() && strike.count > 0)
+                journal.strikes.push_back(std::move(strike));
+            continue;
+        }
         if (fields.size() < 6 || fields[0] != "mark")
             continue;
 
@@ -257,6 +301,52 @@ struct SlotAdmit
 };
 
 inline constexpr const char* kPluginCrashedLastTime = "this plugin crashed last time";
+inline constexpr const char* kPluginCrashedDisabled = "crashed, disabled";
+inline constexpr const char* kActivationCrashTwice = "crashed during activation twice, left disabled";
+
+inline int activationStrikeCount(const CrashJournal& journal, std::string_view identifier)
+{
+    for (const auto& strike : journal.strikes)
+        if (strike.identifier == identifier)
+            return strike.count;
+    return 0;
+}
+
+// A previous launch already died on this plugin, so the first survived crash
+// is the second one. Two activation crashes and the next start leaves it off.
+inline int noteActivationStrike(CrashJournal& journal,
+                                 std::string_view identifier,
+                                 int channel,
+                                 int slot,
+                                 bool diedLastLaunch)
+{
+    int count = activationStrikeCount(journal, identifier);
+    if (diedLastLaunch && count < 1)
+        count = 1;
+    ++count;
+    for (auto& strike : journal.strikes)
+    {
+        if (strike.identifier == identifier)
+        {
+            strike.count = count;
+            strike.channel = channel;
+            strike.slot = slot;
+            return count;
+        }
+    }
+    ActivationStrike strike;
+    strike.identifier = std::string(identifier);
+    strike.channel = channel;
+    strike.slot = slot;
+    strike.count = count;
+    journal.strikes.push_back(std::move(strike));
+    return count;
+}
+
+inline bool leaveDisabledAfterActivationCrashes(int count) noexcept
+{
+    return count >= 2;
+}
 inline constexpr const char* kLeftOutOfThisLaunch = "left out of this launch";
 inline constexpr const char* kSlotFreedReason = "the slot is free";
 
