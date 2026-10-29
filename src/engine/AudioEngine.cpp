@@ -2117,14 +2117,21 @@ bool AudioEngine::takeUncleanShutdown()
     const bool dirty = ! journal_.clean && ! journal_.marks.empty();
     if (! dirty)
     {
+        const auto strikes = journal_.strikes;
         journal_.clean = false;
         journal_.marks.clear();
+        journal_.strikes = strikes;
         storeCrashJournal(settings_, journal_);
+        omitRepeatedActivationCrashes();
         appendHostLog(settings_, "start");
         return false;
     }
 
     crashChoicePending_ = true;
+    diedActivating_.clear();
+    for (const auto& mark : crashPluginsToSkip(journal_))
+        if (! mark.identifier.empty())
+            diedActivating_.push_back(mark.identifier);
     appendHostLog(settings_, "unclean start");
     const auto last = juce::File(settings_.loadLastSessionFolder());
     const auto sessionFile = last.getChildFile(kSessionFileName);
@@ -2146,6 +2153,27 @@ juce::String AudioEngine::uncleanPluginMessage() const
     auto text = juce::String::fromUTF8(crashDialogMessage(journal_).c_str());
     text << "Crash notes are in youhost.log and crash-journal.txt in the YouHost support folder.";
     return text;
+}
+
+void AudioEngine::omitRepeatedActivationCrashes()
+{
+    if (rack_ == nullptr)
+        return;
+    std::vector<PluginRack::CrashBlock> forced;
+    for (const auto& strike : journal_.strikes)
+    {
+        if (! leaveDisabledAfterActivationCrashes(strike.count))
+            continue;
+        PluginRack::CrashBlock block;
+        block.channel = strike.channel;
+        block.slot = strike.slot;
+        block.identifier = juce::String::fromUTF8(strike.identifier.c_str());
+        block.repeatedActivation = true;
+        forced.push_back(std::move(block));
+        appendHostLog(settings_, juce::String(kActivationCrashTwice) + ": " + juce::String::fromUTF8(strike.identifier.c_str()));
+    }
+    if (! forced.empty())
+        rack_->omitFromNextRestore(forced);
 }
 
 void AudioEngine::acceptCrashChoice(bool leaveOff)
@@ -2175,11 +2203,27 @@ void AudioEngine::acceptCrashChoice(bool leaveOff)
     if (rack_ != nullptr)
     {
         rack_->rememberCrashedPlugins(warned);
-        if (leaveOff)
+        if (! leaveOff)
+            omit.clear();
+        for (const auto& strike : journal_.strikes)
+        {
+            if (! leaveDisabledAfterActivationCrashes(strike.count))
+                continue;
+            PluginRack::CrashBlock block;
+            block.channel = strike.channel;
+            block.slot = strike.slot;
+            block.identifier = juce::String::fromUTF8(strike.identifier.c_str());
+            block.repeatedActivation = true;
+            omit.push_back(std::move(block));
+            appendHostLog(settings_, juce::String(kActivationCrashTwice) + ": " + juce::String::fromUTF8(strike.identifier.c_str()));
+        }
+        if (! omit.empty())
             rack_->omitFromNextRestore(omit);
     }
 
+    const auto strikes = journal_.strikes;
     journal_.marks.clear();
+    journal_.strikes = strikes;
     journal_.clean = false;
     crashChoicePending_ = false;
     storeCrashJournal(settings_, journal_);
@@ -2221,6 +2265,15 @@ void AudioEngine::notePluginTrace(int channel,
 {
     if (quitPrepared_)
         return;
+
+    if (phase == "activation-crash")
+    {
+        const bool diedLastLaunch = std::find(diedActivating_.begin(), diedActivating_.end(), identifier.toStdString()) != diedActivating_.end();
+        const int count = noteActivationStrike(journal_, identifier.toStdString(), channel, slot, diedLastLaunch);
+        diedActivating_.erase(std::remove(diedActivating_.begin(), diedActivating_.end(), identifier.toStdString()), diedActivating_.end());
+        if (leaveDisabledAfterActivationCrashes(count))
+            appendHostLog(settings_, juce::String(kActivationCrashTwice) + ": " + name);
+    }
 
     if (phase == "unload" || phase == "moved-from")
         eraseCrashMark(journal_, channel, slot);

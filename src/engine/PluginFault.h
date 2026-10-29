@@ -14,4 +14,9 @@ void installPluginFaultGuard();
 void noteAudioThread() noexcept;
 int takePluginFault() noexcept;
 
+// Called on the message thread after a plugin fault jumps back to the run
+// loop, before [NSApp run] starts again. The hook disables that plugin.
+using MessageFaultRecovery = void (*)();
+void setMessageFaultRecovery(MessageFaultRecovery recovery) noexcept;
+
 } // namespace youhost

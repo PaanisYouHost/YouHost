@@ -1700,6 +1700,24 @@ void testCrashJournal()
     CHECK(! dirty.clean);
     CHECK(dirty.marks.size() == 1);
 
+    youhost::CrashJournal strikes;
+    CHECK(youhost::noteActivationStrike(strikes, "au.fgx", 0, 0, false) == 1);
+    CHECK(youhost::noteActivationStrike(strikes, "au.fgx", 0, 0, false) == 2);
+    CHECK(youhost::leaveDisabledAfterActivationCrashes(2));
+    CHECK(youhost::leaveDisabledAfterActivationCrashes(1) == false);
+    CHECK(std::string(youhost::kPluginCrashedDisabled) == "crashed, disabled");
+    CHECK(std::string(youhost::kActivationCrashTwice) == "crashed during activation twice, left disabled");
+    youhost::CrashJournal died;
+    CHECK(youhost::noteActivationStrike(died, "vst3.fgx", 2, 0, true) == 2);
+    const auto strikeText = youhost::writeCrashJournal(died);
+    CHECK(strikeText.find("strike\tvst3.fgx\t2\t2\t0\n") != std::string::npos);
+    const auto strikeBack = youhost::readCrashJournal(strikeText);
+    CHECK(strikeBack.strikes.size() == 1);
+    CHECK(strikeBack.strikes[0].identifier == "vst3.fgx");
+    CHECK(strikeBack.strikes[0].count == 2);
+    CHECK(strikeBack.strikes[0].channel == 2);
+    CHECK(youhost::writeCrashJournal(youhost::CrashJournal{}).find("strike\t") == std::string::npos);
+
     youhost::CrashJournal session;
     youhost::CrashMark eq;
     eq.phase = "active";
@@ -6966,6 +6984,11 @@ void testStability106()
     CHECK(pageNow.find("kSlotLoadAgain") == std::string::npos);
     CHECK(pageNow.find("kSlotRetryClick") == std::string::npos);
     CHECK(pageNow.find("crashParked") == std::string::npos);
+    CHECK(pageNow.find("crashed, disabled") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginFault.cpp").find("thread_local sigjmp_buf messageJump") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("recoverFromMessageFault") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("kPluginCrashedDisabled") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/AudioEngine.cpp").find("repeatedActivation = true") != std::string::npos);
     CHECK(pageNow.find("left off") == std::string::npos);
     CHECK(pageNow.find("source.note") != std::string::npos);
 

@@ -378,6 +378,7 @@ private:
     void installDeviceListListener();
     void removeDeviceListListener();
     bool deviceNameListed(const juce::String& name);
+    void omitRepeatedActivationCrashes();
     void notePluginTrace(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format = {});
     void rememberSavedSetup(const juce::XmlElement* saved);
 
@@ -561,6 +562,7 @@ private:
     juce::BigInteger lastInputMask_;
     juce::BigInteger lastOutputMask_;
     CrashJournal journal_;
+    std::vector<std::string> diedActivating_;
     std::unique_ptr<juce::Thread> stallThread_;
     std::unique_ptr<SessionDisk> sessionDisk_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);

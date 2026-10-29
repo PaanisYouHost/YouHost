@@ -220,7 +220,7 @@ jobs:
 
             YouHost 1.0.16 is a prerelease for testing. It is not the Latest release.
 
-            - A 2-in/2-out VST3 on a mono channel stays 2/2. The mono signal is copied to both inputs and the left output is kept. A plugin crash on the message thread closes that plugin, writes a log line, and leaves the session running.
+            - A 2-in/2-out VST3 on a mono channel stays 2/2. The mono signal is copied to both inputs and the left output is kept. A plugin crash on the message thread disables that plugin, marks the slot crashed, disabled, and leaves audio and recording running. Two activation crashes in a row are left off on the next start.
 
             - Waves shells are opened and each plugin inside is listed on its own. VST3 folders are scanned through subfolders. Every found and rejected plugin is written to the log. Fold L on a right-hand mono channel keeps the signal. A new latency value keeps the old delay until the new line is filled. A plugin window that crashes on its own thread is closed and the plugin stays in the audio path.
 

@@ -170,6 +170,8 @@ public:
         int channel = -1;
         int slot = -1;
         juce::String identifier;
+        // Two activation crashes. The next launch leaves this slot off.
+        bool repeatedActivation = false;
     };
 
     // Filled by the audio thread during process(). Read on that same thread
@@ -197,6 +199,10 @@ public:
     BlockPluginNote blockPluginNote() const noexcept;
     void setPluginTrace(std::function<void(int channel, int slot, const juce::String& phase, const juce::String& name, const juce::String& identifier, const juce::String& reason, const juce::String& format)> trace);
     void releaseForQuit();
+    void disableCrashedPlugin(int channel, int slot);
+    // Message-thread plugin fault. The slot stays, the instance is released,
+    // and the notice is shown once. Recording is not stopped.
+    void recoverFromMessageFault();
     static void destroyInstance(PluginRack* rack, juce::AudioPluginInstance* instance);
 
 private:
@@ -313,6 +319,8 @@ private:
     bool isBlocked(const juce::PluginDescription& description) const;
     bool crashedBefore(const juce::PluginDescription& description) const;
     bool omittedFromThisLaunch(int channel, int slot, std::string_view identifier) const;
+    bool repeatedActivationOmit(int channel, int slot, std::string_view identifier) const;
+    void releaseCrashedHolding();
     void claimSlotForManualLoad(int channel, int slot);
     void keepPluginInSessionFile(int channel,
                                  int slot,
@@ -356,6 +364,10 @@ private:
     int faultChannel_ = -1;
     int faultSlot_ = -1;
     juce::String faultName_;
+    juce::String faultId_;
+    std::shared_ptr<HostedPlugin> crashedHolding_;
+    bool crashNoticeShown_ = false;
+    bool crashReleaseStarted_ = false;
     std::array<ChannelLatencyInput, kMaxChannels> latencyInputs_ {};
     int alignmentSamples_ = 0;
     Routing routing_ {};
@@ -492,6 +504,7 @@ private:
     bool gravesPosted_ = false;
     bool condemnPosted_ = false;
     bool quitting_ = false;
+    bool releaseCrashedNow_ = false;
     struct MessageThreadJob;
     std::shared_ptr<MessageThreadJob> messageJob_;
     static void completeMessageJob(const std::shared_ptr<MessageThreadJob>& job);

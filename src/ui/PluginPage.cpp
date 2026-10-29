@@ -31,6 +31,8 @@ juce::String slotLabel(int slot, const SlotSnapshot& snap)
     auto name = snap.name;
     if (name.length() > 22)
         name = name.substring(0, 22);
+    if (snap.note == "crashed, disabled")
+        return juce::String(slot + 1) + " " + name + "  crashed, disabled";
     return juce::String(slot + 1) + " " + name;
 }
 

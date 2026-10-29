@@ -44,6 +44,14 @@ struct InstanceDeleter
     }
 };
 
+PluginRack* messageFaultRack = nullptr;
+
+void messageFaultTrampoline()
+{
+    if (messageFaultRack != nullptr)
+        messageFaultRack->recoverFromMessageFault();
+}
+
 // Slate's destructor dispatch_syncs the message thread from inside
 // AudioComponentInstanceDispose. Doing that release here never returns.
 // The instance is deleted on another thread. This thread does not wait.
@@ -1094,10 +1102,17 @@ PluginRack::PluginRack(PluginCatalogue& catalogue, std::atomic<int>& compensatio
     deferred_ = std::make_unique<DeferredPluginRelease>();
     pool_ = std::make_unique<RealtimePool>(dspWorkerCount(), 48000.0, 32);
     startTimerHz(5);
+    messageFaultRack = this;
+    setMessageFaultRecovery(&messageFaultTrampoline);
 }
 
 PluginRack::~PluginRack()
 {
+    if (messageFaultRack == this)
+    {
+        messageFaultRack = nullptr;
+        setMessageFaultRecovery(nullptr);
+    }
     releaseForQuit();
 }
 
@@ -1105,22 +1120,24 @@ void PluginRack::timerCallback()
 {
     if (const int fault = takePluginFault())
     {
-        const bool messageThread = fault == kPluginFaultMessageThread;
-        juce::String line = messageThread ? "plugin crashed on the message thread"
-                                          : "plugin window crashed on its own thread; editor closed, audio kept";
-        if (faultName_.isNotEmpty())
-            line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
-        if (settings_ != nullptr)
-            appendHostLog(*settings_, line);
-        closeAllEditors();
-        if (messageThread && validSlot(faultChannel_, faultSlot_))
-            removePlugin(faultChannel_, faultSlot_);
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                               "Plugin",
-                                               messageThread
-                                                   ? "A plugin crashed. It was removed. Audio keeps running."
-                                                   : "A plugin window crashed. The plugin stays in the audio path.");
+        if (fault == kPluginFaultMessageThread)
+        {
+            recoverFromMessageFault();
+        }
+        else
+        {
+            juce::String line = "plugin window crashed on its own thread; editor closed, audio kept";
+            if (faultName_.isNotEmpty())
+                line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
+            if (settings_ != nullptr)
+                appendHostLog(*settings_, line);
+            closeAllEditors();
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "A plugin may have crashed YouHost",
+                                                   "A plugin window crashed. The plugin stays in the audio path.");
+        }
     }
+    releaseCrashedHolding();
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
@@ -2155,6 +2172,7 @@ void PluginRack::beginLoad(int channel,
     faultChannel_ = channel;
     faultSlot_ = slot;
     faultName_ = description.name;
+    faultId_ = pluginIdentifier(description);
     if (! validSlot(channel, slot))
     {
         finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);
@@ -2208,19 +2226,21 @@ void PluginRack::beginLoad(int channel,
     if (leaveOutOfThisLaunch(restoreGeneration != 0, omittedFromThisLaunch(channel, slot, incomingId)))
     {
         const auto name = description.name.isNotEmpty() ? description.name : juce::String("Plugin");
+        const bool repeated = repeatedActivationOmit(channel, slot, incomingId);
+        const char* reason = repeated ? kActivationCrashTwice : kLeftOutOfThisLaunch;
         std::shared_ptr<HostedPlugin> previous;
         {
             std::lock_guard<std::mutex> lock(lifeLock_);
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
             model.loading = false;
             model.error.clear();
-            model.note = kPluginCrashedLastTime;
+            model.note = repeated ? juce::String(kPluginCrashedDisabled) : juce::String(kPluginCrashedLastTime);
             previous = std::move(model.plugin);
             publishUnlocked();
         }
         bury(std::move(previous), nullptr);
         keepPluginInSessionFile(channel, slot, description, state, bypassed, stereoFold);
-        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), kLeftOutOfThisLaunch, formatName);
+        tracePlugin(channel, slot, "did-not-load", name, pluginIdentifier(description), reason, formatName);
         finishChannelWork(channel, ticket);
         noteSlot(channel);
         completeRestoreStep(restoreGeneration);
@@ -3183,7 +3203,21 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         // Channel 1 slot 1 after "left crashed plugins off" is this case.
         destination.liveInstance = model.plugin != nullptr && model.plugin->instance != nullptr;
         if (! destination.liveInstance)
+        {
+            if (model.note == kPluginCrashedDisabled)
+            {
+                for (const auto& kept : keptInSessionFile_)
+                {
+                    if (kept.channel != channel || kept.slot != slot || kept.description.name.isEmpty())
+                        continue;
+                    destination.occupied = true;
+                    destination.bypassed = true;
+                    destination.name = kept.description.name;
+                    break;
+                }
+            }
             continue;
+        }
         destination.occupied = true;
         destination.bypassed = model.plugin->bypassed;
         destination.crashParked = false;
@@ -3768,6 +3802,18 @@ bool PluginRack::omittedFromThisLaunch(int channel, int slot, std::string_view i
     return pluginListedForThisLaunch(channel, slot, identifier, listed.data(), static_cast<int>(listed.size()));
 }
 
+bool PluginRack::repeatedActivationOmit(int channel, int slot, std::string_view identifier) const
+{
+    for (const auto& block : restoreOmit_)
+    {
+        if (! block.repeatedActivation || block.channel != channel || block.slot != slot)
+            continue;
+        if (block.identifier.toStdString() == identifier)
+            return true;
+    }
+    return false;
+}
+
 void PluginRack::keepPluginInSessionFile(int channel,
                                          int slot,
                                          const juce::PluginDescription& description,
@@ -3810,6 +3856,113 @@ void PluginRack::dropKeptPlugin(int channel, int slot)
 void PluginRack::setPluginTrace(std::function<void(int, int, const juce::String&, const juce::String&, const juce::String&, const juce::String&, const juce::String&)> trace)
 {
     trace_ = std::move(trace);
+}
+
+void PluginRack::disableCrashedPlugin(int channel, int slot)
+{
+    if (! validSlot(channel, slot))
+        return;
+
+    std::shared_ptr<HostedPlugin> plugin;
+    juce::PluginDescription description;
+    juce::MemoryBlock state;
+    int fold = 0;
+    bool freshly = false;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        freshly = model.plugin != nullptr || model.note != kPluginCrashedDisabled;
+        plugin = std::move(model.plugin);
+        model.loading = false;
+        model.error.clear();
+        model.note = kPluginCrashedDisabled;
+        if (plugin != nullptr)
+        {
+            description = plugin->description;
+            state = plugin->state;
+            fold = plugin->stereoFold;
+            if (plugin->gate != nullptr)
+                plugin->gate->pause.store(1, std::memory_order_release);
+            crashReleaseStarted_ = false;
+            crashedHolding_ = plugin;
+        }
+        publishUnlocked();
+    }
+    if (description.name.isEmpty())
+        description.name = faultName_;
+    if (description.fileOrIdentifier.isEmpty())
+        description.fileOrIdentifier = faultId_;
+    // Record the strike before tearing the plugin down. A fault in that
+    // teardown must not forget that this activation crashed.
+    if (freshly && (plugin != nullptr || description.name.isNotEmpty()))
+    {
+        keepPluginInSessionFile(channel, slot, description, state, true, fold);
+        tracePlugin(channel, slot, "activation-crash", description.name, pluginIdentifier(description), kPluginCrashedDisabled, description.pluginFormatName);
+        noteSlot(channel);
+    }
+
+    // The crashing editor is destroyed here, after the slot is out of the
+    // graph. Burying it would leave its run-loop source alive.
+    auto window = std::move(editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)]);
+    if (window != nullptr)
+    {
+        editorCloseTries_[channel][slot] = 0;
+        window->onClose_ = nullptr;
+        window->quiesce();
+        window->setVisible(false);
+        window.reset();
+    }
+}
+
+void PluginRack::recoverFromMessageFault()
+{
+    if (validSlot(faultChannel_, faultSlot_))
+        disableCrashedPlugin(faultChannel_, faultSlot_);
+    closeAllEditors();
+    releaseCrashedHolding();
+    if (crashNoticeShown_)
+        return;
+    crashNoticeShown_ = true;
+    juce::String line = "plugin crashed on the message thread";
+    if (faultName_.isNotEmpty())
+        line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
+    line << "; disabled, audio kept";
+    if (settings_ != nullptr)
+        appendHostLog(*settings_, line);
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                           "A plugin may have crashed YouHost",
+                                           "The plugin crashed on the message thread and is disabled. Audio keeps running.");
+}
+
+void PluginRack::releaseCrashedHolding()
+{
+    auto plugin = crashedHolding_;
+    if (plugin == nullptr || plugin->instance == nullptr || crashReleaseStarted_)
+        return;
+    if (plugin->gate != nullptr)
+        plugin->gate->pause.store(1, std::memory_order_release);
+    const auto start = juce::Time::getMillisecondCounter();
+    while (plugin->gate != nullptr
+           && plugin->gate->depth.load(std::memory_order_acquire) != 0
+           && juce::Time::getMillisecondCounter() - start < 8)
+        juce::Thread::sleep(1);
+    if (plugin->gate != nullptr && plugin->gate->depth.load(std::memory_order_acquire) != 0)
+        return;
+
+    // Delete on this turn. A grave-hop delay would let the plugin's own
+    // run-loop source fire again and fault before the instance is gone.
+    crashReleaseStarted_ = true;
+    releaseCrashedNow_ = true;
+    const auto previous = std::set_terminate([] { std::_Exit(0); });
+    try
+    {
+        plugin->instance.reset();
+    }
+    catch (...)
+    {
+    }
+    std::set_terminate(previous);
+    releaseCrashedNow_ = false;
 }
 
 void PluginRack::releaseForQuit()
@@ -4245,6 +4398,15 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
 {
     if (instance == nullptr)
         return;
+
+    if (rack != nullptr && rack->releaseCrashedNow_)
+    {
+        instance->removeListener(rack);
+        // A message-thread crash releases now, so the plugin timer stops.
+        // releaseInstanceOffMessageThread is not used for that release.
+        releasePluginOnMessageThread(instance);
+        return;
+    }
 
     if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
     {
