@@ -5954,6 +5954,55 @@ void testBeta090()
     CHECK(youhost::vst3MonoKeepsOpenedStereo(true, true));
     CHECK(! youhost::vst3MonoKeepsOpenedStereo(true, false));
     CHECK(! youhost::vst3MonoKeepsOpenedStereo(false, true));
+    int fgIn[1] = { 2 };
+    int fgOut[1] = { 2 };
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::disable));
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::opened));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 2, 2, youhost::ExtraBusMode::opened));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, fgIn, 1, fgOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(false, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::disable));
+    int fgSideIn[2] = { 2, 2 };
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgSideIn, 2, fgOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    CHECK(! youhost::busOfferAccepted(true, true, false));
+    CHECK(! youhost::busOfferAccepted(true, false, true));
+    CHECK(youhost::busOfferAccepted(true, true, true));
+    CHECK(youhost::busOfferAccepted(false, false, true));
+    CHECK(youhost::busesDifferFromDeclared(fgIn, 1, fgOut, 1, fgIn, 1, fgOut, 1) == false);
+    int narrowIn[1] = { 1 };
+    int narrowOut[1] = { 1 };
+    CHECK(youhost::busesDifferFromDeclared(fgIn, 1, fgOut, 1, narrowIn, 1, narrowOut, 1));
+    CHECK(youhost::logBusOverride(true, true, 2, 2, 2, 2));
+    CHECK(youhost::logBusOverride(true, false, 2, 2, 1, 1));
+    CHECK(! youhost::logBusOverride(false, true, 2, 2, 1, 1));
+    CHECK(! youhost::logBusOverride(true, false, 2, 2, 2, 2));
+    {
+        constexpr int n = 8;
+        float mono[n];
+        float left[n];
+        float right[n];
+        for (int index = 0; index < n; ++index)
+            mono[index] = 0.25f;
+        std::fill(right, right + n, 99.0f);
+        bool sawBoth = false;
+        youhost::renderFoldedMono(mono, n, 2, 2, youhost::StereoFold::left, left, right,
+                                  [&](float** channels, int width, int count)
+                                  {
+                                      CHECK(width == 2);
+                                      CHECK(channels[0] != nullptr);
+                                      CHECK(channels[1] != nullptr);
+                                      CHECK(channels[1][0] == 0.25f);
+                                      CHECK(count == n);
+                                      sawBoth = channels[0] != nullptr && channels[1] != nullptr;
+                                      for (int index = 0; index < count; ++index)
+                                          channels[0][index] = 0.5f;
+                                  });
+        CHECK(sawBoth);
+        CHECK(mono[0] == 0.5f);
+        CHECK(youhost::pluginInputsFed(2) == 2);
+    }
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("vst3LayoutRemovesDeclaredBus") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("override declared ") != std::string::npos);
+    CHECK(readWorkspaceFile("src/engine/PluginRack.cpp").find("busOfferAccepted") != std::string::npos);
     CHECK(youhost::sidechainKeepsStereoMain(true, true));
     CHECK(! youhost::sidechainKeepsStereoMain(true, false));
     CHECK(! youhost::sidechainKeepsStereoMain(false, true));

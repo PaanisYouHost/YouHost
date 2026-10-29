@@ -143,6 +143,8 @@ struct BusChoice
     int totalOutputs = 0;
     bool hasExtraBuses = false;
     bool openedStereo = false;
+    int declaredInputs = 0;
+    int declaredOutputs = 0;
     ExtraBusMode usedExtra = ExtraBusMode::disable;
     ChosenLayout chosen = ChosenLayout::none;
     juce::StringArray attempts;
@@ -175,6 +177,7 @@ juce::AudioChannelSet channelSetForBus(int channels, const juce::AudioChannelSet
 bool offerLayout(juce::AudioPluginInstance& instance,
                  const LayoutPlan& plan,
                  const juce::AudioProcessor::BusesLayout& original,
+                 bool requireDeclaredCheck,
                  juce::String& why)
 {
     if (! plan.ok)
@@ -202,10 +205,13 @@ bool offerLayout(juce::AudioPluginInstance& instance,
     }
     const bool checkAccepted = instance.checkBusesLayoutSupported(layout);
     const bool setAccepted = instance.setBusesLayout(layout);
-    if (! setAccepted)
+    if (! busOfferAccepted(requireDeclaredCheck, checkAccepted, setAccepted))
     {
-        why = checkAccepted ? juce::String("setBusesLayout refused")
-                            : juce::String("checkBusesLayoutSupported refused; setBusesLayout refused");
+        if (! setAccepted)
+            why = checkAccepted ? juce::String("setBusesLayout refused")
+                                : juce::String("checkBusesLayoutSupported refused; setBusesLayout refused");
+        else
+            why = "checkBusesLayoutSupported refused; setBusesLayout accepted; declared buses stay";
         return false;
     }
     if (! countsMatchPlan(instance, plan, why))
@@ -262,6 +268,10 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         inputDefaults[bus] = instance.getChannelCountOfBus(true, bus);
     for (int bus = 0; bus < outputBusCount; ++bus)
         outputDefaults[bus] = instance.getChannelCountOfBus(false, bus);
+    const int declaredMainIn = inputBusCount > 0 ? inputDefaults[0] : 0;
+    const int declaredMainOut = outputBusCount > 0 ? outputDefaults[0] : 0;
+    choice.declaredInputs = declaredMainIn;
+    choice.declaredOutputs = declaredMainOut;
 
     int wantIn[3] {};
     int wantOut[3] {};
@@ -295,12 +305,28 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         for (int modeIndex = 0; modeIndex < modeCount; ++modeIndex)
         {
             const auto mode = modes[modeIndex];
+            if (vst3LayoutRemovesDeclaredBus(vst3, inputDefaults, inputBusCount, outputDefaults, outputBusCount,
+                                             wantIn[layout], wantOut[layout], mode))
+            {
+                juce::String skipped;
+                skipped << "attempt " << layoutNameFor(wantIn[layout], wantOut[layout])
+                        << " extra=" << extraBusModeName(mode)
+                        << " supported=no reason=declared " << declaredMainIn << "/" << declaredMainOut
+                        << " not removed";
+                choice.attempts.add(skipped);
+                continue;
+            }
             const auto plan = planPluginLayout(inputDefaults, inputBusCount, outputDefaults, outputBusCount,
                                                wantIn[layout], wantOut[layout], mode);
             if (plan.ok)
                 pluginLeftOpened = false;
+            const bool requireDeclaredCheck = plan.ok && vst3
+                                               && busesDifferFromDeclared(inputDefaults, inputBusCount,
+                                                                          outputDefaults, outputBusCount,
+                                                                          plan.inputBuses, plan.inputBusCount,
+                                                                          plan.outputBuses, plan.outputBusCount);
             juce::String why;
-            const bool ok = offerLayout(instance, plan, remember, why);
+            const bool ok = offerLayout(instance, plan, remember, requireDeclaredCheck, why);
             juce::String line;
             line << "attempt " << layoutNameFor(wantIn[layout], wantOut[layout])
                  << " extra=" << extraBusModeName(mode)
@@ -321,11 +347,12 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
                 continue;
             }
 
-            if (wantIn[layout] == 1 && wantOut[layout] == 1)
+            const bool checkAgreed = why == "ok";
+            if (checkAgreed && wantIn[layout] == 1 && wantOut[layout] == 1)
                 choice.supportMono = true;
-            else if (wantIn[layout] == 1 && wantOut[layout] == 2)
+            else if (checkAgreed && wantIn[layout] == 1 && wantOut[layout] == 2)
                 choice.supportSide = true;
-            else if (wantIn[layout] == 2 && wantOut[layout] == 2)
+            else if (checkAgreed && wantIn[layout] == 2 && wantOut[layout] == 2)
                 choice.supportStereo = true;
             choice.inputChannels = plan.mainIn;
             choice.outputChannels = plan.mainOut;
@@ -338,6 +365,9 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
                                 + " extra=" + juce::String(extraBusModeName(mode))
                                 + " main " + juce::String(choice.inputChannels) + "/" + juce::String(choice.outputChannels)
                                 + " total " + juce::String(choice.totalInputs) + "/" + juce::String(choice.totalOutputs));
+            if (logBusOverride(vst3, unlinkedMono, declaredMainIn, declaredMainOut, choice.inputChannels, choice.outputChannels))
+                choice.attempts.add("override declared " + juce::String(declaredMainIn) + "/" + juce::String(declaredMainOut)
+                                    + " chose " + juce::String(layoutNameFor(choice.inputChannels, choice.outputChannels)));
             return choice;
         }
     }
@@ -371,6 +401,9 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
         choice.attempts.add("kept opened layout main " + juce::String(kept.mainIn) + "/" + juce::String(kept.mainOut)
                             + " total " + juce::String(kept.totalIn) + "/" + juce::String(kept.totalOut)
                             + " reason=setBusesLayout did not accept another layout");
+        if (logBusOverride(vst3, unlinkedMono, declaredMainIn, declaredMainOut, kept.mainIn, kept.mainOut))
+            choice.attempts.add("override declared " + juce::String(declaredMainIn) + "/" + juce::String(declaredMainOut)
+                                + " chose " + juce::String(layoutNameFor(kept.mainIn, kept.mainOut)));
         return choice;
     }
 
@@ -393,6 +426,7 @@ void logHostedPlugin(AppSettings* settings,
     line << "plugin " << description.name
          << " id " << (description.fileOrIdentifier.isNotEmpty() ? description.fileOrIdentifier : description.createIdentifierString())
          << " opened " << buses.openInputs << "/" << buses.openOutputs
+         << " declared " << buses.declaredInputs << "/" << buses.declaredOutputs
          << " supports 1/1=" << (buses.supportMono ? "yes" : "no")
          << " 1/2=" << (buses.supportSide ? "yes" : "no")
          << " 2/2=" << (buses.supportStereo ? "yes" : "no")
