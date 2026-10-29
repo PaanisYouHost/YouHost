@@ -260,9 +260,21 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     const ChosenLayout preferred = layoutForChannel(choice.openedStereo ? ChosenLayout::stereo : ChosenLayout::mono,
                                                     unlinkedMono,
                                                     true);
+    const bool vst3 = instance.getPluginDescription().pluginFormatName == "VST3";
     const bool monoFirst = preferred == ChosenLayout::mono
-                           && ! sidechainKeepsStereoMain(choice.hasExtraBuses, choice.openedStereo);
-    mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
+                           && ! sidechainKeepsStereoMain(choice.hasExtraBuses, choice.openedStereo)
+                           && ! vst3MonoKeepsOpenedStereo(vst3, choice.openedStereo);
+    int layoutCount = 3;
+    if (vst3MonoKeepsOpenedStereo(vst3, choice.openedStereo))
+    {
+        wantIn[0] = 2;
+        wantOut[0] = 2;
+        layoutCount = 1;
+    }
+    else
+    {
+        mainLayoutAttemptOrder(monoFirst, wantIn, wantOut);
+    }
     ExtraBusMode modes[5] {};
     const int modeCount = copyExtraBusAttemptOrder(choice.hasExtraBuses, modes, 5);
     // True while the plugin still has the layout it opened with. A planner
@@ -270,7 +282,7 @@ BusChoice configureBuses(juce::AudioPluginInstance& instance, bool unlinkedMono)
     // a real offer changed it.
     bool pluginLeftOpened = true;
 
-    for (int layout = 0; layout < 3; ++layout)
+    for (int layout = 0; layout < layoutCount; ++layout)
     {
         for (int modeIndex = 0; modeIndex < modeCount; ++modeIndex)
         {
@@ -1091,14 +1103,23 @@ PluginRack::~PluginRack()
 
 void PluginRack::timerCallback()
 {
-    if (takePluginFault())
+    if (const int fault = takePluginFault())
     {
+        const bool messageThread = fault == kPluginFaultMessageThread;
+        juce::String line = messageThread ? "plugin crashed on the message thread"
+                                          : "plugin window crashed on its own thread; editor closed, audio kept";
+        if (faultName_.isNotEmpty())
+            line << ": " << faultName_ << " ch " << (faultChannel_ + 1) << " slot " << (faultSlot_ + 1);
         if (settings_ != nullptr)
-            appendHostLog(*settings_, "plugin window crashed on its own thread; editor closed, audio kept");
+            appendHostLog(*settings_, line);
         closeAllEditors();
+        if (messageThread && validSlot(faultChannel_, faultSlot_))
+            removePlugin(faultChannel_, faultSlot_);
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                "Plugin",
-                                               "A plugin window crashed. The plugin stays in the audio path.");
+                                               messageThread
+                                                   ? "A plugin crashed. It was removed. Audio keeps running."
+                                                   : "A plugin window crashed. The plugin stays in the audio path.");
     }
     const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
@@ -2131,6 +2152,9 @@ void PluginRack::beginLoad(int channel,
                            std::uint64_t restoreGeneration)
 {
     touchMessageBeat();
+    faultChannel_ = channel;
+    faultSlot_ = slot;
+    faultName_ = description.name;
     if (! validSlot(channel, slot))
     {
         finishChannelWork(channel, channelWork_[static_cast<std::size_t>(channel)].ticket);

@@ -1,10 +1,10 @@
 #include "PluginFault.h"
 
 #include <atomic>
-#include <cstdint>
 
 #if defined(__APPLE__) || defined(__linux__)
  #include <pthread.h>
+ #include <setjmp.h>
  #include <signal.h>
  #include <unistd.h>
 #endif
@@ -18,6 +18,19 @@ namespace
 thread_local bool hostThread = false;
 std::atomic<int> faultPending { 0 };
 bool installed = false;
+#endif
+
+} // namespace
+
+#if defined(__APPLE__) || defined(__linux__)
+sigjmp_buf messageJump;
+int messageJumpArmed = 0;
+#endif
+
+namespace
+{
+
+#if defined(__APPLE__) || defined(__linux__)
 
 bool isHostThread() noexcept
 {
@@ -26,6 +39,13 @@ bool isHostThread() noexcept
 
 void faultHandler(int signalNumber, siginfo_t*, void*)
 {
+    if (isHostThread() && messageJumpArmed != 0)
+    {
+        youhost::messageJumpArmed = 0;
+        faultPending.store(kPluginFaultMessageThread, std::memory_order_relaxed);
+        siglongjmp(youhost::messageJump, 1);
+    }
+
     if (isHostThread())
     {
         struct sigaction restore {};
@@ -35,7 +55,7 @@ void faultHandler(int signalNumber, siginfo_t*, void*)
         return;
     }
 
-    faultPending.store(1, std::memory_order_relaxed);
+    faultPending.store(kPluginFaultOtherThread, std::memory_order_relaxed);
     for (;;)
         pause();
 }
@@ -73,13 +93,39 @@ void noteAudioThread() noexcept
 #endif
 }
 
-bool takePluginFault() noexcept
+int takePluginFault() noexcept
 {
 #if defined(__APPLE__) || defined(__linux__)
-    return faultPending.exchange(0, std::memory_order_relaxed) != 0;
+    return faultPending.exchange(0, std::memory_order_relaxed);
 #else
-    return false;
+    return 0;
 #endif
 }
 
 } // namespace youhost
+
+#if defined(__APPLE__) || defined(__linux__)
+extern "C" int youhostMessageFaultSetjmp()
+{
+    if (sigsetjmp(youhost::messageJump, 1) != 0)
+    {
+        youhost::messageJumpArmed = 0;
+        return 1;
+    }
+    youhost::messageJumpArmed = 1;
+    return 0;
+}
+
+extern "C" void youhostMessageFaultRecovered()
+{
+}
+#else
+extern "C" int youhostMessageFaultSetjmp()
+{
+    return 0;
+}
+
+extern "C" void youhostMessageFaultRecovered()
+{
+}
+#endif

@@ -113,6 +113,14 @@ inline bool sidechainKeepsStereoMain(bool hasExtraBuses, bool openedStereo) noex
     return hasExtraBuses && openedStereo;
 }
 
+// A VST3 that opened 2/2 stays 2/2 on a mono channel. Forcing 1/1 is what
+// crashed FG-X 2 in bundleExit. The mono signal is copied to both inputs and
+// the left output is kept. An Audio Unit still prefers 1/1.
+inline bool vst3MonoKeepsOpenedStereo(bool vst3, bool openedStereo) noexcept
+{
+    return vst3 && openedStereo;
+}
+
 // A plan that never reached setBusesLayout did not change the plugin.
 // "opened main bus does not match" is that case. Calling setBusesLayout to
 // put the old layout back would run VST3 setupProcessing again while other
