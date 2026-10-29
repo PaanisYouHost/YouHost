@@ -885,13 +885,13 @@ public:
         arm_.setButtonText(channelListenLabel(listen));
         if (listen == ChannelListen::record)
         {
-            arm_.setTooltip("REC. Live sound passes through and the next take records this channel. Click for INPUT.");
+            arm_.setTooltip("REC. Live sound passes through and the next take records this channel. Click for HOST.");
             arm_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8d2430));
             arm_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         }
         else if (listen == ChannelListen::input)
         {
-            arm_.setTooltip("INPUT. Live sound passes through the plugins and is not recorded. Click for OFF.");
+            arm_.setTooltip("HOST. Live sound passes through the plugins and is not recorded. Click for OFF.");
             arm_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff245a9a));
             arm_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         }

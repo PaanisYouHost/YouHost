@@ -220,7 +220,7 @@ jobs:
 
             YouHost 1.0.16 is a prerelease for testing. It is not the Latest release.
 
-            - A VST3 that declares 2 in / 2 out stays 2/2 on a mono channel. 1/1 extra=disable is not accepted, even when a support check says yes. The mono signal is copied to both inputs and the left output is kept. A plugin crash on the message thread disables that plugin, marks the slot crashed, disabled, and leaves audio and recording running. Two activation crashes in a row are left off on the next start.
+            - A VST3 that declares 2 in / 2 out stays 2/2 on a mono channel. 1/1 extra=disable is not accepted, even when a support check says yes. A plugin that opens 4/2 keeps the extra input pair, and those extra inputs are silence. The mono signal is copied to both main inputs and the left output is kept. The channel mode button is REC / HOST / OFF. A plugin crash on the message thread disables that plugin, marks the slot crashed, disabled, and leaves audio and recording running. Two activation crashes in a row are left off on the next start. VST3 instantiate, setupProcessing, prepareToPlay, and setActive run on the loader thread. A slow load does not stop the audio callback or the UI.
 
             - Waves shells are opened and each plugin inside is listed on its own. VST3 folders are scanned through subfolders. Every found and rejected plugin is written to the log. Fold L on a right-hand mono channel keeps the signal. A new latency value keeps the old delay until the new line is filled. A plugin window that crashes on its own thread is closed and the plugin stays in the audio path.
 
@@ -243,7 +243,7 @@ jobs:
             - Each audio block records how long the stages and the slowest plugin took. A dropout line names that plugin. The DSP meter follows the callback, so it cannot sit at a latched plugin sum.
             - VST3 process runs on the audio thread. A worker thread is not used for it. A mono VST3 settles its buses once at load, including the retry from extra=opened to extra=disable. A rejected attempt does not call setBusesLayout again. The audio block does not renegotiate buses.
             - After a crash, choosing any plugin in that slot loads it, including the one that crashed. Channel 1 slot 1 is not locked. The log says why a plugin did not load. The crash journal keeps history across restarts.
-            - VST3 prepare (setupProcessing and setActive) runs on the message thread. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule.
+            - VST3 instantiate, setupProcessing, prepareToPlay, and setActive run on the loader thread. The message thread only takes the finished instance. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule. A slow load leaves every other channel running.
             - A load-time silence reading no longer turns a plugin off. Lookahead plugins and gates are silent until they have had enough audio, and that reading was rejecting working plugins.
             - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence.
             - A plugin is processed once per device callback when that callback fits the prepared block. A shorter callback is not held until a larger block.

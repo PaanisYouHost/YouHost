@@ -121,6 +121,23 @@ inline std::string formatScanFailureLine(const char* format, const char* identif
     return line;
 }
 
+// Milliseconds for one load stage. setActive is inside JUCE prepareToPlay,
+// so that stage is logged with the same span and a note.
+inline std::string formatLoadStageLine(const char* stage, int milliseconds, const char* note = nullptr)
+{
+    std::string line = "load stage ";
+    line += stage != nullptr && stage[0] != '\0' ? stage : "unknown";
+    line += " ";
+    line += std::to_string(milliseconds < 0 ? 0 : milliseconds);
+    line += " ms";
+    if (note != nullptr && note[0] != '\0')
+    {
+        line += " ";
+        line += note;
+    }
+    return line;
+}
+
 // One session plugin is in flight at a time. The next one starts on a later
 // message-loop turn, after this one has finished.
 struct SessionLoadCursor

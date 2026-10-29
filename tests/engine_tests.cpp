@@ -1245,7 +1245,7 @@ void testShortcutsMatchTheHelp()
     CHECK(help.find("writes session.youhost") != std::string::npos);
     CHECK(help.find("Option+drag") != std::string::npos);
     CHECK(help.find("REC (plugins + recording)") != std::string::npos);
-    CHECK(help.find("INPUT (plugins, not recorded)") != std::string::npos);
+    CHECK(help.find("HOST (plugins, not recorded)") != std::string::npos);
     CHECK(help.find("OFF (channel fully off)") != std::string::npos);
     CHECK(help.find("Open Anyway") != std::string::npos);
     CHECK(help.find("xattr -dr com.apple.quarantine /Applications/YouHost.app") != std::string::npos);
@@ -1631,8 +1631,10 @@ void testInsertMenuAndStall()
     CHECK(! youhost::beatIsStale(youhost::kStallLimitNs, 1, youhost::kStallLimitNs));
     CHECK(youhost::beatIsStale(youhost::kStallLimitNs + 2, 1, youhost::kStallLimitNs));
     CHECK(std::string(youhost::stallPhaseName(youhost::kPhaseLoad)) == "load");
-    CHECK(! youhost::messageStallMatters(youhost::kPhaseIdle));
-    CHECK(! youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseIdle));
+    CHECK(youhost::messageStallMatters(youhost::kPhaseMessage));
+    CHECK(youhost::kMessageBusyLimitNs == 500000000LL);
+    CHECK(youhost::kMessageBusyLimitNs < youhost::kStallLimitNs);
     CHECK(youhost::messageStallMatters(youhost::kPhaseLoad));
     CHECK(youhost::messageStallMatters(youhost::kPhasePrepare));
 
@@ -2078,7 +2080,10 @@ void testOutputGainAndListen()
     CHECK(youhost::channelListenFromName("input") == youhost::ChannelListen::input);
     CHECK(youhost::channelListenFromName("off") == youhost::ChannelListen::off);
     CHECK(youhost::channelListenFromName("rec") == youhost::ChannelListen::record);
-    CHECK(std::string(youhost::channelListenLabel(youhost::ChannelListen::input)) == "INPUT");
+    CHECK(std::string(youhost::channelListenLabel(youhost::ChannelListen::input)) == "HOST");
+    CHECK(std::string(youhost::channelListenName(youhost::ChannelListen::input)) == "input");
+    CHECK(youhost::channelListenFromName("host") == youhost::ChannelListen::input);
+    CHECK(youhost::channelListenFromName("input") == youhost::ChannelListen::input);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::record) == youhost::ChannelListen::input);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::input) == youhost::ChannelListen::off);
     CHECK(youhost::cycleChannelListen(youhost::ChannelListen::off) == youhost::ChannelListen::record);
@@ -2751,10 +2756,10 @@ void testSessionChannelsRateLockAndClose()
     const int already[] = { static_cast<int>(youhost::ChannelListen::record), static_cast<int>(youhost::ChannelListen::record) };
     CHECK(! youhost::globalListenNeedsConfirm(true, youhost::ChannelListen::record, already, 2));
     CHECK(youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
-          == "Switch ch 5 REC -> INPUT");
+          == "Switch ch 5 REC -> HOST");
     CHECK(std::string(youhost::kListenChangeVerb) == "Switch");
     CHECK(std::string(youhost::kListenChangeSureTitle) == "Are you sure?");
-    CHECK(youhost::globalListenChangeLine(youhost::ChannelListen::input) == "Switch every visible channel to INPUT");
+    CHECK(youhost::globalListenChangeLine(youhost::ChannelListen::input) == "Switch every visible channel to HOST");
     CHECK(youhost::listenChangeApplies(youhost::ListenChangeKind::now, 0, 0));
     CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 0, 1));
     CHECK(! youhost::listenChangeApplies(youhost::ListenChangeKind::confirm, 1, 0));
@@ -3962,7 +3967,7 @@ void testReleaseChecklist()
     }
     if (! youhost::channelsForPageListen(0, selected, 1, 4).empty())
         allButtons = false;
-    item("ALL REC / ALL INPUT / ALL OFF override on REC and HOST", allButtons);
+    item("ALL REC / ALL HOST / ALL OFF override on REC and HOST", allButtons);
 
     const bool quitAsks = youhost::sessionCloseAsks(true, false, youhost::SessionCloseReason::quit);
     const bool cancelAborts = ! youhost::sessionCloseProceeds(true, false, youhost::SessionCloseReason::quit, youhost::UnsavedChoice::cancel);
@@ -4128,9 +4133,9 @@ void testReleaseChecklist()
 
     const auto mainUi = readWorkspaceFile("src/ui/MainComponent.cpp");
     const auto mainHeader = readWorkspaceFile("src/ui/MainComponent.h");
-    item("ALL button labels stay ALL REC, ALL INPUT, and ALL OFF",
+    item("ALL button labels stay ALL REC, ALL HOST, and ALL OFF",
          mainHeader.find("\"ALL REC\"") != std::string::npos
-             && mainHeader.find("\"ALL INPUT\"") != std::string::npos
+             && mainHeader.find("\"ALL HOST\"") != std::string::npos
              && mainHeader.find("\"ALL OFF\"") != std::string::npos
              && mainUi.find("only those channels") == std::string::npos
              && mainUi.find("hasSelection ? juce::String(\"REC\")") == std::string::npos);
@@ -4452,7 +4457,7 @@ void testReleaseChecklist()
          youhost::classifyListenChange(true, false, true) == youhost::ListenChangeKind::confirm
              && youhost::classifyListenChange(false, false, true) == youhost::ListenChangeKind::now
              && youhost::channelListenChangeLine(4, youhost::ChannelListen::record, youhost::ChannelListen::input)
-                    == "Switch ch 5 REC -> INPUT"
+                    == "Switch ch 5 REC -> HOST"
              && mainUi.find("juce::Colours::red") != std::string::npos
              && mainUi.find("kListenChangeVerb") != std::string::npos
              && mainUi.find("kListenChangeSureTitle") != std::string::npos
@@ -5963,6 +5968,38 @@ void testBeta090()
     CHECK(! youhost::vst3LayoutRemovesDeclaredBus(false, fgIn, 1, fgOut, 1, 1, 1, youhost::ExtraBusMode::disable));
     int fgSideIn[2] = { 2, 2 };
     CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, fgSideIn, 2, fgOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    int sdIn[2] = { 2, 2 };
+    int sdOut[1] = { 2 };
+    const auto sdOpened = youhost::planPluginLayout(sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::opened);
+    CHECK(sdOpened.ok);
+    CHECK(sdOpened.inputBuses[0] == 2);
+    CHECK(sdOpened.inputBuses[1] == 2);
+    CHECK(sdOpened.totalIn == 4);
+    CHECK(sdOpened.totalOut == 2);
+    CHECK(! youhost::vst3LayoutRemovesDeclaredBus(true, sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::opened));
+    CHECK(youhost::vst3LayoutRemovesDeclaredBus(true, sdIn, 2, sdOut, 1, 2, 2, youhost::ExtraBusMode::disable));
+    {
+        float storage[4][8];
+        float* channels[4];
+        for (int index = 0; index < 4; ++index)
+        {
+            channels[index] = storage[index];
+            std::fill(storage[index], storage[index] + 8, 3.0f);
+        }
+        float left[8];
+        float right[8];
+        std::fill(left, left + 8, 0.5f);
+        std::fill(right, right + 8, -0.25f);
+        youhost::feedPluginChannels(channels, 4, 2, 8, left, right);
+        CHECK(channels[0][0] == 0.5f);
+        CHECK(channels[1][0] == -0.25f);
+        CHECK(channels[2][0] == 0.0f);
+        CHECK(channels[3][0] == 0.0f);
+        CHECK(channels[2][7] == 0.0f);
+    }
+    CHECK(youhost::formatLoadStageLine("instantiate", 9012) == "load stage instantiate 9012 ms");
+    CHECK(youhost::formatLoadStageLine("setActive", 12, "inside prepareToPlay")
+              == "load stage setActive 12 ms inside prepareToPlay");
     CHECK(! youhost::busOfferAccepted(true, true, false));
     CHECK(! youhost::busOfferAccepted(true, false, true));
     CHECK(youhost::busOfferAccepted(true, true, true));
@@ -6180,8 +6217,9 @@ void testBeta090()
     CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
     CHECK(loaderRun.find("configureBuses") != std::string::npos);
     CHECK(loaderRun.find("lifeLock_") == std::string::npos);
-    CHECK(loaderRun.find("runOnMessageThread") != std::string::npos);
-    CHECK(loaderRun.find("VST3 setupProcessing is on the message thread") != std::string::npos);
+    CHECK(loaderRun.find("runOnMessageThread") == std::string::npos);
+    CHECK(loaderRun.find("VST3 setupProcessing runs on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("formatLoadStageLine") != std::string::npos);
     CHECK(loaderRun.find("processBlock") == std::string::npos);
     CHECK(loaderRun.find("syncBusLayouts and prepareToPlay stay on this thread") == std::string::npos);
     const auto deferredEditor = sliceBetween(busSource, "void PluginRack::scheduleDeferredEditor", "void PluginRack::openEditor");
@@ -6743,18 +6781,15 @@ void testStability106()
     const auto loaderRun = sliceBetween(readWorkspaceFile("src/engine/PluginRack.cpp"),
                                         "createInstanceBlocking",
                                         "deliverOffThreadInstance");
-    CHECK(loaderRun.find("An Audio Unit is prepared on the loader thread") != std::string::npos);
+    CHECK(loaderRun.find("Prepared on the loader thread") != std::string::npos);
     CHECK(loaderRun.find("stateRestoredDifferentBuses") != std::string::npos);
     CHECK(loaderRun.find("prepareToPlay") != std::string::npos);
+    CHECK(loaderRun.find("runOnMessageThread") == std::string::npos);
     const auto stateAt = loaderRun.find("stateRestoredDifferentBuses");
     const auto prepareAt = loaderRun.find("prepareToPlay");
     CHECK(stateAt != std::string::npos && prepareAt != std::string::npos && stateAt < prepareAt);
-    const auto messageTurn = sliceBetween(loaderRun, "runOnMessageThread", "An Audio Unit is prepared on the loader thread");
-    CHECK(messageTurn.find("createInstanceBlocking") != std::string::npos);
-    CHECK(messageTurn.find("setupPlugin()") != std::string::npos);
-    CHECK(messageTurn.find("CFRunLoop timer") != std::string::npos);
-    const auto createdAt = messageTurn.find("createInstanceBlocking");
-    const auto setupCallAt = messageTurn.find("setupPlugin()");
+    const auto createdAt = loaderRun.find("createInstanceBlocking");
+    const auto setupCallAt = loaderRun.find("setupPlugin()");
     CHECK(createdAt != std::string::npos && setupCallAt != std::string::npos && createdAt < setupCallAt);
     const auto catalogue = readWorkspaceFile("src/engine/PluginCatalogue.cpp");
     CHECK(catalogue.find("allowMessageThread") != std::string::npos);

@@ -9,8 +9,9 @@
 namespace youhost
 {
 
-// REC records and plays through the plugins. INPUT plays through and is not
-// recorded. OFF is silent and is not recorded.
+// REC records and plays through the plugins. HOST plays through and is not
+// recorded. OFF is silent and is not recorded. The stored name stays "input"
+// so a session written before the label change still opens.
 enum class ChannelListen
 {
     off = 0,
@@ -20,7 +21,7 @@ enum class ChannelListen
 
 inline ChannelListen channelListenFromName(std::string_view name) noexcept
 {
-    if (equalsFold(name, "input"))
+    if (equalsFold(name, "input") || equalsFold(name, "host"))
         return ChannelListen::input;
     if (equalsFold(name, "off") || equalsFold(name, "0") || equalsFold(name, "false"))
         return ChannelListen::off;
@@ -43,7 +44,7 @@ inline const char* channelListenLabel(ChannelListen mode) noexcept
     switch (mode)
     {
         case ChannelListen::off: return "OFF";
-        case ChannelListen::input: return "INPUT";
+        case ChannelListen::input: return "HOST";
         case ChannelListen::record: return "REC";
     }
     return "REC";
@@ -106,7 +107,7 @@ inline bool listenChangeApplies(ListenChangeKind kind, int firstOk, int secondOk
     return false;
 }
 
-// Channel numbers on the strip are 1-based. Example: "Switch ch 5 REC -> INPUT".
+// Channel numbers on the strip are 1-based. Example: "Switch ch 5 REC -> HOST".
 inline std::string channelListenChangeLine(int channel, ChannelListen from, ChannelListen to)
 {
     return std::string(kListenChangeVerb) + " ch " + std::to_string(channel + 1) + " "
@@ -118,7 +119,7 @@ inline std::string globalListenChangeLine(ChannelListen next)
     return std::string(kListenChangeVerb) + " every visible channel to " + channelListenLabel(next);
 }
 
-// True when a global REC, INPUT, or OFF would change any visible channel during a take.
+// True when a global REC, HOST, or OFF would change any visible channel during a take.
 inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const int* targetModes, int targetCount) noexcept
 {
     if (! recording || targetModes == nullptr || targetCount <= 0)
@@ -129,7 +130,7 @@ inline bool globalListenNeedsConfirm(bool recording, ChannelListen next, const i
     return false;
 }
 
-// ALL REC, ALL INPUT, and ALL OFF set every visible channel. A selection does
+// ALL REC, ALL HOST, and ALL OFF set every visible channel. A selection does
 // not narrow them. REC page and HOST page both use this list.
 inline std::vector<int> channelsForGlobalListen(const int* selected, int selectedCount, int visible)
 {

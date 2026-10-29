@@ -152,7 +152,7 @@ private:
     juce::TextButton allButton_ { "All" };
     juce::TextButton hideButton_ { "Hide" };
     juce::TextButton globalRecButton_ { "ALL REC" };
-    juce::TextButton globalInputButton_ { "ALL INPUT" };
+    juce::TextButton globalInputButton_ { "ALL HOST" };
     juce::TextButton globalOffButton_ { "ALL OFF" };
     std::unique_ptr<RecordLockButton> recordLock_;
     std::function<void(bool)> afterCopy_;

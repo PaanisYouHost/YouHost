@@ -140,7 +140,7 @@ private:
         const auto audioBeat = clock.audioNs.load(std::memory_order_relaxed);
         const int messagePhase = clock.messagePhase.load(std::memory_order_relaxed);
         const bool message = messageStallMatters(messagePhase)
-                             && beatIsStale(now, messageBeat, kStallLimitNs);
+                             && beatIsStale(now, messageBeat, kMessageBusyLimitNs);
         const bool audio = clock.audioLive.load(std::memory_order_relaxed) != 0
                            && beatIsStale(now, audioBeat, kStallLimitNs);
         if (! message && ! audio)

@@ -3,6 +3,7 @@
 #include "CpuMeter.h"
 #include "HostLog.h"
 #include "PluginBuses.h"
+#include "PluginLoadPace.h"
 #include "HostPath.h"
 #include "LatencyCompensation.h"
 #include "PluginCatalogue.h"
@@ -944,16 +945,41 @@ public:
     {
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::String error;
-        const bool vst3 = owner_.jobDescription_.pluginFormatName == "VST3";
-        // An Audio Unit is created on the loader thread. A VST3 is created
-        // on the message thread, in the same turn as setActive.
-        if (! vst3)
+        // Audio Unit and VST3 are both created on this loader thread.
+        // VST3 setupProcessing runs on the loader thread.
+        // The message thread stays in the run loop. A slow initialize cannot
+        // stop the audio callback or the UI. Other channels keep the graph
+        // that is already published. blockProcessing_ stays false.
+        // No lock is held across the plugin calls. The message thread
+        // publishes the instance only after this returns.
+        auto logStage = [&](const char* stage, int milliseconds, const char* note)
+        {
+            if (owner_.settings_ == nullptr)
+                return;
+            appendHostLog(*owner_.settings_,
+                          pluginLogLine("load",
+                                        owner_.jobChannel_,
+                                        owner_.jobSlot_,
+                                        owner_.jobDescription_.pluginFormatName,
+                                        owner_.jobDescription_.name,
+                                        pluginIdentifier(owner_.jobDescription_),
+                                        juce::String(formatLoadStageLine(stage, milliseconds, note).c_str())));
+        };
+        auto timeStage = [&](const char* stage, const char* note, auto&& body)
+        {
+            const auto started = juce::Time::getMillisecondCounter();
+            body();
+            logStage(stage, static_cast<int>(juce::Time::getMillisecondCounter() - started), note);
+        };
+        timeStage("instantiate", nullptr, [&]()
+        {
             owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_, owner_.jobRate_, owner_.jobBlock_, instance, error);
+        });
+        // VST3 setupProcessing runs on the loader thread.
+        // Stage times use formatLoadStageLine.
 
-        // VST3 setupProcessing is on the message thread. The loader waits.
         // The audio callback is the first render, with the same channel count
-        // and block size. No lock is held across the plugin calls. The message
-        // thread publishes the instance only after this returns.
+        // and block size.
         PluginRack::OffThreadBuses setup;
         const int left = owner_.jobChannel_ & ~1;
         const bool unlinkedMono = ! owner_.stereoLink(left);
@@ -966,7 +992,11 @@ public:
             auto* live = plugin != nullptr ? plugin : instance.get();
             if (live == nullptr)
                 return;
-            const auto buses = configureBuses(*live, unlinkedMono);
+            BusChoice buses;
+            timeStage("setupProcessing", nullptr, [&]()
+            {
+                buses = configureBuses(*live, unlinkedMono);
+            });
             measured = buses;
             setup.ready = true;
             setup.ok = buses.ok;
@@ -1048,62 +1078,30 @@ public:
             // audio thread before process. AudioPluginHost does the same.
             if (static_cast<bool>(owner_.workgroup_))
                 live->audioWorkgroupContextChanged(owner_.workgroup_);
-            live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+            // JUCE calls setActive inside prepareToPlay. Both spans are the
+            // same call. The log names them so a slow setActive is visible.
+            int prepareMs = 0;
+            timeStage("prepareToPlay", nullptr, [&]()
+            {
+                const auto started = juce::Time::getMillisecondCounter();
+                live->prepareToPlay(owner_.jobRate_, owner_.jobBlock_);
+                prepareMs = static_cast<int>(juce::Time::getMillisecondCounter() - started);
+            });
+            logStage("setActive", prepareMs, "inside prepareToPlay");
             setup.latencySamples = live->getLatencySamples();
         };
-        bool preparedOnMessage = false;
-        if (vst3)
+        if (instance != nullptr)
         {
-            // VST3 setupProcessing is on the message thread.
-            preparedOnMessage = owner_.runOnMessageThread([&]()
-            {
-                // Factory, initialize, setupProcessing, setActive, and
-                // prepareToPlay are this one turn. A CFRunLoop timer the
-                // plugin arms during initialize cannot run until this
-                // returns, so it cannot fire into a component that is
-                // not active yet.
-                owner_.catalogue_.createInstanceBlocking(owner_.jobDescription_,
-                                                         owner_.jobRate_,
-                                                         owner_.jobBlock_,
-                                                         instance,
-                                                         error,
-                                                         true);
-                if (instance != nullptr)
-                    setupPlugin();
-            });
-        }
-        else if (instance != nullptr)
-        {
-            // An Audio Unit is prepared on the loader thread. Doing it on
-            // the message thread holds that thread, and the audio callback
-            // waits inside the Audio Units already running. The message
-            // thread stays in the runloop. blockProcessing_ stays false,
-            // so the callback does not pass the dry input.
+            // Prepared on the loader thread. Doing it on the message thread
+            // holds that thread, and the audio callback waits inside the
+            // Audio Units already running. The message thread stays in the
+            // runloop. blockProcessing_ stays false, so the callback does
+            // not pass the dry input.
             setupPlugin();
-            preparedOnMessage = true;
-        }
-        if (vst3 || instance != nullptr)
-        {
-            if (! preparedOnMessage)
-            {
-                setup.ready = true;
-                setup.ok = false;
-                if (owner_.settings_ != nullptr)
-                    appendHostLog(*owner_.settings_,
-                                  pluginLogLine("did-not-load",
-                                                owner_.jobChannel_,
-                                                owner_.jobSlot_,
-                                                owner_.jobDescription_.pluginFormatName,
-                                                owner_.jobDescription_.name,
-                                                pluginIdentifier(owner_.jobDescription_),
-                                                "prepare did not run on the message thread, not activated"));
-            }
-            else if (setup.ok)
-            {
+            if (setup.ok)
                 logHostedPlugin(owner_.settings_, owner_.jobDescription_, measured,
                                 stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_,
                                 setup.latencySamples);
-            }
         }
 
         {
@@ -1905,6 +1903,7 @@ void PluginRack::resumeGate(PluginGate& gate) noexcept
 void PluginRack::refreshLatency()
 {
     PhaseScope phase(kPhasePrepare);
+    bool changed = false;
     std::vector<std::shared_ptr<HostedPlugin>> plugins;
     {
         std::lock_guard<std::mutex> lock(lifeLock_);
@@ -1920,10 +1919,17 @@ void PluginRack::refreshLatency()
             continue;
         if (! pauseGate(*plugin->gate))
             continue;
-        plugin->latencySamples = clampLatencySamples(plugin->instance->getLatencySamples());
+        const int next = clampLatencySamples(plugin->instance->getLatencySamples());
+        if (next != plugin->latencySamples)
+        {
+            plugin->latencySamples = next;
+            changed = true;
+        }
         resumeGate(*plugin->gate);
     }
 
+    if (! changed)
+        return;
     std::lock_guard<std::mutex> lock(lifeLock_);
     publishUnlocked();
 }
