@@ -432,8 +432,25 @@ inline void feedPluginChannels(float* const* plugin,
 inline const char* kPluginMonoChannelMessage = "This plugin can't be used on a mono channel";
 inline const char* kPluginStereoChannelMessage = "A mono plugin can't be used on a stereo channel";
 inline const char* kPluginLayoutMessage = "This plugin needs a sidechain/layout YouHost can't host";
-inline const char* kPluginDidNotOpenMessage = "The plugin did not open. See youhost.log.";
+inline const char* kPluginDidNotOpenMessage =
+    "This plugin did not open. Audio kept running. Try the other format (VST3 or AU), or choose a different plugin.";
 inline const char* kPluginSilentProbeMessage = "This plugin produced silence. It is turned off. See youhost.log.";
+inline const char* kPluginWindowCrashedNote = "window crashed";
+inline const char* kPluginWindowDidNotOpenNote = "window did not open";
+
+// The alert shown when an Audio Unit or VST3 window fails instead of taking YouHost down.
+inline std::string pluginWindowProblemText(const char* pluginName, bool crashed)
+{
+    std::string who = (pluginName != nullptr && pluginName[0] != '\0') ? pluginName : "The plugin";
+    if (crashed)
+    {
+        return who + "'s window crashed. YouHost kept running, and the plugin stays on the channel. "
+                     "You can open the window again, or remove the plugin and load it once more. "
+                     "If this keeps happening, try the other format (VST3 or AU).";
+    }
+    return who + "'s window did not open. Audio is still running. Try opening it again. "
+                 "If it never opens, remove the plugin and load the other format (VST3 or AU).";
+}
 
 // `hostError` is the text the AU or VST3 wrapper returned. It wins when the
 // instance never existed. A layout miss uses one of the three specific lines.

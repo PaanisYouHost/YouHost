@@ -16,6 +16,7 @@
 #include "CrashJournal.h"
 #include "WindowFit.h"
 #include "PluginFault.h"
+#include "PluginPrime.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include <tuple>
 
 #if defined(__APPLE__)
+#include <pthread/qos.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -728,6 +730,13 @@ struct PluginRack::RealtimePool
     void runWorker(int index)
     {
         juce::WorkgroupToken token;
+        bool joined = false;
+        juce::AudioWorkgroup joinedGroup;
+#if defined(__APPLE__)
+        // The device IO thread is already realtime. Workers are not, until they
+        // join the same workgroup and ask for user-interactive QoS.
+        (void) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
         while (! stop_.load(std::memory_order_acquire))
         {
             wakes_[static_cast<std::size_t>(index)].wait();
@@ -741,7 +750,12 @@ struct PluginRack::RealtimePool
                 continue;
             }
             noteAudioThread();
-            rack->workgroup_.join(token);
+            if (static_cast<bool>(rack->workgroup_) && (! joined || ! (joinedGroup == rack->workgroup_)))
+            {
+                rack->workgroup_.join(token);
+                joinedGroup = rack->workgroup_;
+                joined = true;
+            }
             juce::ScopedNoDenormals noDenormals;
             const auto began = steadyNs();
             for (;;)
@@ -932,6 +946,37 @@ struct PluginRack::DeferredPluginRelease
     std::vector<Item> items;
 };
 
+// Discarded silent blocks. The live graph does not see this instance yet,
+// so the audio thread is not waiting on these calls and they add no latency.
+static void primePluginOffAudioThread(juce::AudioPluginInstance& live, juce::AudioWorkgroup& workgroup, int block)
+{
+    if (block < 1)
+        block = 32;
+    if (block > 8192)
+        block = 8192;
+    const int inputs = std::max(1, live.getTotalNumInputChannels());
+    const int outputs = std::max(1, live.getTotalNumOutputChannels());
+    const int width = std::min(8, std::max(inputs, outputs));
+    juce::AudioBuffer<float> buffer(width, block);
+    juce::MidiBuffer midi;
+    juce::WorkgroupToken token;
+    if (static_cast<bool>(workgroup))
+        workgroup.join(token);
+    for (int index = 0; index < kPluginPrimeBlocks; ++index)
+    {
+        buffer.clear();
+        midi.clear();
+        try
+        {
+            live.processBlock(buffer, midi);
+        }
+        catch (...)
+        {
+            break;
+        }
+    }
+}
+
 class PluginRack::BackgroundInstantiate : public juce::Thread
 {
 public:
@@ -978,8 +1023,8 @@ public:
         // VST3 setupProcessing runs on the loader thread.
         // Stage times use formatLoadStageLine.
 
-        // The audio callback is the first render, with the same channel count
-        // and block size.
+        // Silent prime runs on this loader thread before publish. The audio
+        // callback is not the plugin's first process, and the prime is discarded.
         PluginRack::OffThreadBuses setup;
         const int left = owner_.jobChannel_ & ~1;
         const bool unlinkedMono = ! owner_.stereoLink(left);
@@ -1099,9 +1144,16 @@ public:
             // not pass the dry input.
             setupPlugin();
             if (setup.ok)
+            {
                 logHostedPlugin(owner_.settings_, owner_.jobDescription_, measured,
                                 stereoFoldFromInt(owner_.jobStereo_), owner_.jobRate_, owner_.jobBlock_,
                                 setup.latencySamples);
+                const auto primeStarted = juce::Time::getMillisecondCounter();
+                primePluginOffAudioThread(*instance, owner_.workgroup_, owner_.jobBlock_);
+                logStage("prime",
+                         static_cast<int>(juce::Time::getMillisecondCounter() - primeStarted),
+                         "silent blocks off the audio thread, discarded, no added latency");
+            }
         }
 
         {
@@ -1164,9 +1216,11 @@ void PluginRack::timerCallback()
             if (settings_ != nullptr)
                 appendHostLog(*settings_, line);
             closeAllEditors();
+            const auto text = pluginWindowProblemText(faultName_.toRawUTF8(), true);
+            markSlotNote(faultChannel_, faultSlot_, kPluginWindowCrashedNote);
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                   "A plugin may have crashed YouHost",
-                                                   "A plugin window crashed. The plugin stays in the audio path.");
+                                                   "Plugin window",
+                                                   juce::String(text));
         }
     }
     releaseCrashedHolding();
@@ -3007,12 +3061,14 @@ void PluginRack::openEditor(int channel, int slot)
             return;
         if (! job->finished.load(std::memory_order_acquire) && ! job->noticed.exchange(true, std::memory_order_acq_rel))
         {
-            const auto reason = "plugin window did not open";
+            const auto name = job->plugin != nullptr ? job->plugin->description.name : juce::String();
+            const auto text = pluginWindowProblemText(name.toRawUTF8(), false);
             if (settings_ != nullptr)
-                appendHostLog(*settings_, juce::String(reason) + ": timed out");
+                appendHostLog(*settings_, juce::String(text));
+            markSlotNote(job->channel, job->slot, kPluginWindowDidNotOpenNote);
             juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                   "Plugin",
-                                                   reason);
+                                                   "Plugin window",
+                                                   juce::String(text));
         }
     };
     job->deliver = [this, alive, weak]
@@ -3030,12 +3086,14 @@ void PluginRack::openEditor(int channel, int slot)
         {
             if (! job->noticed.exchange(true, std::memory_order_acq_rel))
             {
-                const auto reason = "plugin window did not open";
+                const auto name = plugin != nullptr ? plugin->description.name : juce::String();
+                const auto text = pluginWindowProblemText(name.toRawUTF8(), false);
                 if (settings_ != nullptr)
-                    appendHostLog(*settings_, juce::String(reason) + ": editor was not created");
+                    appendHostLog(*settings_, juce::String(text));
+                markSlotNote(channel, slot, kPluginWindowDidNotOpenNote);
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                       "Plugin",
-                                                       reason);
+                                                       "Plugin window",
+                                                       juce::String(text));
             }
             delete editor;
             return;
@@ -3160,6 +3218,29 @@ void PluginRack::openEditor(int channel, int slot)
         window->setVisible(true);
         editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
     };
+    const bool vst3Editor = plugin->description.pluginFormatName == "VST3";
+    if (vst3Editor)
+    {
+        // FabFilter (and other VST3 editors) must be created on the message
+        // thread. A background thread deadlocks the UI, and the slot then
+        // never shows processing time. Audio Units stay on the worker below:
+        // some AU views wait forever, and that wait must not freeze this thread.
+        const auto editorBegan = steadyNs();
+        try
+        {
+            if (job->plugin != nullptr && job->plugin->instance != nullptr)
+                job->editor = job->plugin->instance->createEditorAndMakeActive();
+        }
+        catch (...)
+        {
+            job->editor = nullptr;
+        }
+        job->createMs = (steadyNs() - editorBegan) / 1000000ULL;
+        job->finished.store(true, std::memory_order_release);
+        if (job->deliver)
+            job->deliver();
+        return;
+    }
     editorOpens_.push_back(job);
     const auto editorBegan = steadyNs();
     juce::Thread::launch([job, editorBegan]
@@ -3417,6 +3498,20 @@ void PluginRack::noteSlot(int channel)
 {
     if (slotHandler_ != nullptr)
         slotHandler_(channel);
+}
+
+void PluginRack::markSlotNote(int channel, int slot, const juce::String& note)
+{
+    if (! validSlot(channel, slot))
+        return;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.note == kPluginCrashedDisabled)
+            return;
+        model.note = note;
+    }
+    noteSlot(channel);
 }
 
 void PluginRack::scheduleNextRestore()

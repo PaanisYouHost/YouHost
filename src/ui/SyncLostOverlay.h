@@ -54,7 +54,6 @@ class SyncLostOverlay : public juce::Component
 {
 public:
     std::function<void()> onOpenDetails;
-    std::function<void()> onShrink;
 
     SyncLostOverlay()
     {
@@ -121,15 +120,8 @@ public:
 
     void mouseDown(const juce::MouseEvent&) override
     {
-        // A click shrinks the centered alarm to the corner. It does not touch the device.
-        if (place_ == SyncLostChrome::center)
-        {
-            if (onShrink != nullptr)
-                onShrink();
-            return;
-        }
-        // The corner box only asks for the dialog. It does not touch the device.
-        if (place_ != SyncLostChrome::corner || onOpenDetails == nullptr)
+        // The big button and the small box both open the explanation. Neither touch the device.
+        if (place_ == SyncLostChrome::hidden || onOpenDetails == nullptr)
             return;
         onOpenDetails();
     }
@@ -174,10 +166,10 @@ public:
     {
         graphics.fillAll(juce::Colour(0xff14060a));
         graphics.setColour(juce::Colours::white);
-        graphics.setFont(syncLostFont(22.0f));
+        graphics.setFont(syncLostFont(18.0f));
         auto area = getLocalBounds().reduced(24, 18);
         area.removeFromBottom(48);
-        graphics.drawFittedText(juce::String(message_), area, juce::Justification::centred, 4);
+        graphics.drawFittedText(juce::String(message_), area, juce::Justification::centred, 8);
     }
 
     void resized() override

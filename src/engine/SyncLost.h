@@ -96,9 +96,11 @@ inline bool pollStartupList(StartupListWatch& watch, std::string_view savedName,
     return ! watch.notice.empty();
 }
 
-// The notice and the reopen are separate. While the card is gone a large
-// window stays centered. After audio returns it shrinks to a bottom-left
-// box until OK. Reattach does not wait for that click.
+// The big SYNC LOST button stays centered while the card is gone.
+// Pressing it opens an explanation. OK closes that explanation completely.
+// It does not leave a small box. The small blinking box appears only when
+// the card's sync returns on its own. OK on that explanation also closes it
+// completely. Reattach does not wait for the click.
 struct SyncLostState
 {
     bool missing = false;
@@ -108,45 +110,50 @@ struct SyncLostState
     int second = 0;
     bool haveClock = false;
     std::int64_t gapMs = 0;
-    // A click on the centered alarm shrinks it. A new loss opens the center again.
-    bool tucked = false;
+    // OK while the card is still gone. The big window stays down until the
+    // card returns on its own, which then raises the small box.
+    bool dismissedWhileLost = false;
 
     void deviceLost(int lossHour = -1, int lossMinute = 0, int lossSecond = 0) noexcept
     {
+        if (dismissedWhileLost)
+            return;
         if (! missing && lossHour >= 0)
         {
             hour = lossHour;
             minute = lossMinute;
             second = lossSecond;
             haveClock = true;
-            tucked = false;
         }
         missing = true;
         restoredNotice = false;
     }
 
-    void tuckWhileMissing() noexcept
-    {
-        if (missing)
-            tucked = true;
-    }
+    // A click opens the explanation. It does not shrink the window.
+    void tuckWhileMissing() noexcept {}
 
     void deviceReturned(std::int64_t durationMs = 0) noexcept
     {
-        if (! missing)
+        if (! missing && ! dismissedWhileLost)
             return;
         missing = false;
+        dismissedWhileLost = false;
         restoredNotice = true;
         gapMs = durationMs < 0 ? 0 : durationMs;
     }
 
-    // OK dismisses the restored dialog only. The centered window stays
-    // while sync is still lost.
+    // OK closes the big window and the small box completely.
     void acknowledge() noexcept
     {
         if (missing)
+        {
+            missing = false;
+            restoredNotice = false;
+            dismissedWhileLost = true;
             return;
+        }
         restoredNotice = false;
+        dismissedWhileLost = false;
         haveClock = false;
         gapMs = 0;
     }
@@ -155,15 +162,18 @@ struct SyncLostState
     {
         missing = false;
         restoredNotice = false;
+        dismissedWhileLost = false;
         haveClock = false;
         gapMs = 0;
     }
 
     bool isMissing() const noexcept { return missing; }
 
+    bool suppressLoss() const noexcept { return dismissedWhileLost; }
+
     bool showAlarm() const noexcept { return missing || restoredNotice; }
 
-    bool keepReattaching() const noexcept { return missing; }
+    bool keepReattaching() const noexcept { return missing || dismissedWhileLost; }
 
     bool showRestored() const noexcept { return restoredNotice && ! missing; }
 };
@@ -201,7 +211,7 @@ enum class SyncLostChrome
 inline SyncLostChrome syncLostChrome(const SyncLostState& state) noexcept
 {
     if (state.isMissing())
-        return state.tucked ? SyncLostChrome::corner : SyncLostChrome::center;
+        return SyncLostChrome::center;
     if (state.showRestored())
         return SyncLostChrome::corner;
     return SyncLostChrome::hidden;
@@ -243,7 +253,7 @@ inline SyncLostBox syncLostDialogBox(int parentWidth, int parentHeight) noexcept
         width = 640;
     if (width < 320)
         width = 320;
-    constexpr int height = 200;
+    constexpr int height = 300;
     return { (parentWidth - width) / 2, (parentHeight - height) / 2, width, height };
 }
 
@@ -301,6 +311,21 @@ inline SyncOverlayText syncOverlayText(const SyncLostState& state)
         text.primary = syncRestoredLine(state.hour, state.minute, state.second, state.gapMs);
     }
     return text;
+}
+
+// Plain explanation for the dialog behind the big button and the small box.
+// OK closes whichever one is open.
+inline std::string syncLostExplanation(const SyncLostState& state)
+{
+    if (state.showRestored())
+    {
+        std::string text = syncRestoredLine(state.hour, state.minute, state.second, state.gapMs);
+        text += "\n\nThe card came back by itself. Press OK to close this.";
+        return text;
+    }
+    return "The audio card stopped. YouHost stays on this card and does not switch to another. "
+           "You can stop the recording and save the session. Press OK to close this window. "
+           "If the card comes back by itself, a small box blinks at the bottom left.";
 }
 
 } // namespace youhost

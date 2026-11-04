@@ -3,6 +3,7 @@
 #include "AppSettings.h"
 #include "engine/AudioEngine.h"
 #include "ui/CpuWindow.h"
+#include "ui/GigWindow.h"
 #include "ui/DropoutWindow.h"
 #include "ui/LatencyReadout.h"
 #include "ui/MeterGrid.h"
@@ -56,6 +57,7 @@ private:
     void toggleScanner();
     void toggleDropouts();
     void toggleCpu();
+    void toggleGig();
     void toggleLatency();
     void toggleMarkers();
     enum class MonitorWindow
@@ -115,6 +117,7 @@ private:
     ScannerWindow scanner_;
     DropoutWindow dropouts_;
     CpuWindow cpu_;
+    GigWindow gig_;
     class FileMenu;
     std::unique_ptr<FileMenu> fileMenu_;
     juce::TooltipWindow tooltipWindow_ { this, 700 };
@@ -141,6 +144,7 @@ private:
     juce::TextButton saveAsButton_ { "Save As" };
     juce::TextButton dropoutsButton_ { "3 DROPOUTS" };
     juce::TextButton cpuButton_ { "4 CPU" };
+    juce::TextButton gigButton_ { "GIG" };
     juce::TextButton setupButton_ { "Audio setup" };
     juce::TextButton latencyButton_ { "5 LATENCY" };
     juce::TextButton markersButton_ { "6 MARKERS" };

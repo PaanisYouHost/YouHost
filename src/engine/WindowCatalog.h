@@ -184,4 +184,20 @@ inline int placeSessionWindowHeight() noexcept
     return 320;
 }
 
+// Title, the claim paragraph, and five check rows. The window opens at least this tall.
+inline int gigWindowContentHeight() noexcept
+{
+    return 16 + 22 + 8 + 64 + 8 + 5 * 52 + 16;
+}
+
+inline int gigWindowWidth() noexcept
+{
+    return 640;
+}
+
+inline int gigWindowHeight() noexcept
+{
+    return gigWindowContentHeight() + 36;
+}
+
 } // namespace youhost

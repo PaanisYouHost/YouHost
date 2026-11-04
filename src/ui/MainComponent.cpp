@@ -1233,7 +1233,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
       pluginPage_(engine, settings),
       scanner_(engine, settings),
       dropouts_(engine, settings),
-      cpu_(engine, settings)
+      cpu_(engine, settings),
+      gig_(engine, settings)
 {
     setOpaque(true);
     setWantsKeyboardFocus(true);
@@ -1342,12 +1343,12 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &prevButton_, &nextButton_,
                           &stopButton_, &playButton_, &recButton_, &helpButton_, &rmsButton_, &peakButton_,
                           &clearClipsButton_, &newButton_, &openButton_, &saveButton_, &saveAsButton_,
-                          &dropoutsButton_, &cpuButton_, &setupButton_, &latencyButton_, &markersButton_, &markerButton_,
+                          &dropoutsButton_, &cpuButton_, &gigButton_, &setupButton_, &latencyButton_, &markersButton_, &markerButton_,
                           &retryButton_, &groupButton_,
                           &allButton_, &hideButton_, &globalRecButton_, &globalInputButton_, &globalOffButton_ })
         quiet(*button);
 
-    for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &latencyButton_,
+    for (auto* button : { &recorderButton_, &pluginsButton_, &scannerButton_, &dropoutsButton_, &cpuButton_, &gigButton_, &latencyButton_,
                           &markersButton_, &setupButton_, &groupButton_, &allButton_, &hideButton_ })
         button->setColour(juce::TextButton::buttonOnColourId, theme::buttonOn);
 
@@ -1357,6 +1358,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     scannerButton_.setTooltip("SCAN (" + juce::String(shortcutChord(ShortcutId::scanner))
                               + "). Used when new plugins are installed.");
     cpuButton_.onClick = [this] { toggleCpu(); };
+    gigButton_.onClick = [this] { toggleGig(); };
+    gigButton_.setTooltip("Gig mode. While a card is open, YouHost joins its audio workgroup, turns App Nap and idle sleep off, and lists heavy background tasks.");
     cpuButton_.setTooltip("CPU (" + juce::String(shortcutChord(ShortcutId::cpu))
                           + "). DSP is the buffer. 100% fills it.");
     prevButton_.onClick = [this] { engine_.transportJump(-1); };
@@ -1404,18 +1407,10 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
     markersButton_.setTooltip("Open or close MARKERS (" + juce::String(shortcutChord(ShortcutId::markers)) + ").");
     markerButton_.onClick = [this] { engine_.dropMarker(); refresh(); };
     markerButton_.setTooltip("Drop a marker at the playhead (M). Recording keeps going.");
-    syncOverlay_.onShrink = [this]
-    {
-        engine_.tuckSyncLost();
-        syncOverlay_.sync(engine_.syncLostState());
-        if (syncOverlay_.isVisible())
-            placeSyncOverlay();
-    };
     syncOverlay_.onOpenDetails = [this] { showSyncRestoredDialog(); };
     syncDialog_.onOk = [this]
     {
-        if (! engine_.syncLostState().isMissing())
-            engine_.acknowledgeSyncLost();
+        engine_.acknowledgeSyncLost();
         syncDialog_.setVisible(false);
         refresh();
     };
@@ -2233,6 +2228,12 @@ void MainComponent::toggleCpu()
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
     if (cpu_.isVisible())
         keepMonitorWindowsOpen(MonitorWindow::cpu);
+}
+
+void MainComponent::toggleGig()
+{
+    gig_.toggle();
+    gigButton_.setToggleState(gig_.isVisible(), juce::dontSendNotification);
 }
 
 void MainComponent::toggleLatency()
@@ -3128,6 +3129,7 @@ void MainComponent::refresh()
     scannerButton_.setToggleState(scanner_.isVisible(), juce::dontSendNotification);
     dropoutsButton_.setToggleState(dropouts_.isVisible(), juce::dontSendNotification);
     cpuButton_.setToggleState(cpu_.isVisible(), juce::dontSendNotification);
+    gigButton_.setToggleState(gig_.isVisible(), juce::dontSendNotification);
     latencyButton_.setToggleState(latencyWindow_ != nullptr && latencyWindow_->isVisible(), juce::dontSendNotification);
     markersButton_.setToggleState(markersWindow_ != nullptr && markersWindow_->isVisible(), juce::dontSendNotification);
     if (engine_.markerRevision() != markerRevisionSeen_)
@@ -3193,8 +3195,13 @@ void MainComponent::refresh()
     }
     if (syncOverlay_.place() == SyncLostChrome::corner && ! syncDialog_.isVisible())
         syncOverlay_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
-    if (syncDialog_.isVisible() && syncOverlay_.place() == SyncLostChrome::hidden)
-        syncDialog_.setVisible(false);
+    if (syncDialog_.isVisible())
+    {
+        if (syncOverlay_.place() == SyncLostChrome::hidden)
+            syncDialog_.setVisible(false);
+        else
+            syncDialog_.setMessage(syncLostExplanation(engine_.syncLostState()));
+    }
     if (loading)
         heavyPaintHeld_ = true;
 }
@@ -3373,6 +3380,8 @@ void MainComponent::resized()
     saveAsButton_.setBounds(views.removeFromLeft(72).reduced(0, 2));
     views.removeFromLeft(8);
     setupButton_.setBounds(views.removeFromLeft(96).reduced(0, 2));
+    views.removeFromLeft(4);
+    gigButton_.setBounds(views.removeFromLeft(52).reduced(0, 2));
     views.removeFromLeft(8);
     groupButton_.setBounds(views.removeFromLeft(56).reduced(0, 2));
     views.removeFromLeft(4);
@@ -3520,12 +3529,9 @@ void MainComponent::placeSyncDialog()
 
 void MainComponent::showSyncRestoredDialog()
 {
-    if (syncOverlay_.place() != SyncLostChrome::corner)
+    if (syncOverlay_.place() == SyncLostChrome::hidden)
         return;
-    if (engine_.syncLostState().isMissing())
-        syncDialog_.setMessage("Sync lost. Recording can be stopped and the session saved.");
-    else
-        syncDialog_.setMessage(syncOverlay_.restoredLine());
+    syncDialog_.setMessage(syncLostExplanation(engine_.syncLostState()));
     placeSyncDialog();
     syncDialog_.setVisible(true);
     syncDialog_.toFront(false);
