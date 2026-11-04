@@ -948,7 +948,7 @@ struct PluginRack::DeferredPluginRelease
 
 // Discarded silent blocks. The live graph does not see this instance yet,
 // so the audio thread is not waiting on these calls and they add no latency.
-void primePluginOffAudioThread(juce::AudioPluginInstance& live, juce::AudioWorkgroup& workgroup, int block)
+static void primePluginOffAudioThread(juce::AudioPluginInstance& live, juce::AudioWorkgroup& workgroup, int block)
 {
     if (block < 1)
         block = 32;

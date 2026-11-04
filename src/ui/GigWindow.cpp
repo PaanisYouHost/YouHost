@@ -178,7 +178,7 @@ GigWindow::GigWindow(AudioEngine& engine, AppSettings& settings)
     : juce::DocumentWindow("GIG", theme::panel, juce::DocumentWindow::closeButton),
       settings_(settings)
 {
-    auto content = std::make_unique<Content>(engine_);
+    auto content = std::make_unique<Content>(engine);
     content_ = content.get();
     setUsingNativeTitleBar(true);
     setContentOwned(content.release(), true);
