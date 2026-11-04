@@ -183,7 +183,8 @@ if(APPLE)
         src/engine/PluginRack.cpp
         src/engine/Recorder.cpp
         src/engine/SessionDisk.cpp
-        src/engine/SessionDocument.cpp)
+        src/engine/SessionDocument.cpp
+        src/engine/LivePower.mm)
     target_include_directories(YouHostGroupStressTest PRIVATE src)
     target_compile_features(YouHostGroupStressTest PRIVATE cxx_std_20)
     target_compile_definitions(YouHostGroupStressTest PRIVATE
@@ -201,7 +202,9 @@ if(APPLE)
         "-framework AudioToolbox"
         "-framework CoreAudio"
         "-framework CoreFoundation"
-        "-framework Cocoa")
+        "-framework Cocoa"
+        "-framework IOKit"
+        "-framework Foundation")
     add_test(NAME YouHostGroupStressTest COMMAND YouHostGroupStressTest)
 
     # 1/1 versus Fold L 2/2 on Apple AUs. The product flag has to match the level.
