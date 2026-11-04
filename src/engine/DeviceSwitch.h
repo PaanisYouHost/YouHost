@@ -84,9 +84,9 @@ inline ClockSyncAction showWatch(ShowCard& show) noexcept
     input.hostWasRunning = true;
     input.aliveDown = show.propertyFault;
     const auto action = decideClockSync(show.clock, input);
-    if (action == ClockSyncAction::lost && ! show.overlay.isMissing())
+    if (action == ClockSyncAction::lost && ! show.overlay.isMissing() && ! show.overlay.suppressLoss())
         show.overlay.deviceLost(10, 34, 49);
-    else if (action == ClockSyncAction::restored && show.overlay.isMissing())
+    else if (action == ClockSyncAction::restored && (show.overlay.isMissing() || show.overlay.suppressLoss()))
         show.overlay.deviceReturned(1000);
     return action;
 }
@@ -129,7 +129,7 @@ inline void showHotUnplug(ShowCard& show) noexcept
 
 inline void showHotReturn(ShowCard& show) noexcept
 {
-    if (! show.overlay.isMissing())
+    if (! show.overlay.isMissing() && ! show.overlay.suppressLoss())
         return;
     show.open = true;
     show.offline = false;

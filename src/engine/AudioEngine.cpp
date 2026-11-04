@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "LivePower.h"
 #include "AppSettings.h"
 #include "ChannelColor.h"
 #include "ChannelSelect.h"
@@ -542,6 +543,7 @@ void AudioEngine::setOfflineTemplate(bool offline)
         return;
     if (offline)
     {
+        endLivePowerClaim();
         hostWasRunning_.store(false, std::memory_order_release);
         startupList_.pending = false;
         clearSyncLost();
@@ -1501,7 +1503,7 @@ void AudioEngine::noteClockLost()
         return;
     if (! syncLostMayShow(hostWasRunning_.load(std::memory_order_acquire), offlineTemplate_))
         return;
-    if (syncLost_.isMissing())
+    if (syncLost_.isMissing() || syncLost_.suppressLoss())
         return;
     clockSyncMissing_ = true;
     clockLostSinceMs_ = juce::Time::getMillisecondCounter();
@@ -1512,7 +1514,7 @@ void AudioEngine::noteClockLost()
 
 void AudioEngine::noteClockRestored()
 {
-    if (! clockSyncMissing_ || ! syncLost_.isMissing())
+    if (! clockSyncMissing_ || (! syncLost_.isMissing() && ! syncLost_.suppressLoss()))
         return;
     const auto nowMs = juce::Time::getMillisecondCounter();
     const auto gap = clockLostSinceMs_ == 0 ? std::int64_t { 0 }
@@ -1694,6 +1696,10 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
 {
     if (forcingChannels_)
         return;
+    // Message thread. Keeps App Nap and idle sleep off while this card is open.
+    // Not called from the audio callback.
+    if (! offlineTemplate_ && device.isOpen())
+        beginLivePowerClaim();
     if (! offlineTemplate_ && device.isOpen())
         hostWasRunning_.store(true, std::memory_order_release);
 
@@ -1795,7 +1801,7 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     const bool resumeTake = cameBack && resumeRecordingOnReturn_;
     if (remember && sameCard)
     {
-        if (syncLost_.isMissing() && (deviceLostBanner_ || lossFinalized_))
+        if ((syncLost_.isMissing() || syncLost_.suppressLoss()) && (deviceLostBanner_ || lossFinalized_))
         {
             syncLost_.deviceReturned(gapMs);
             appendHostLog(settings_, "sync restored");
@@ -2235,6 +2241,7 @@ void AudioEngine::prepareForQuit()
     if (quitPrepared_)
         return;
     quitPrepared_ = true;
+    endLivePowerClaim();
     closingDevice_.store(true, std::memory_order_release);
     deviceManager_.removeAudioCallback(this);
     deviceManager_.removeChangeListener(this);

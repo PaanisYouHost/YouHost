@@ -23,6 +23,8 @@
 #include "engine/ClockSync.h"
 #include "engine/DeviceSwitch.h"
 #include "engine/SyncLost.h"
+#include "engine/GigMode.h"
+#include "engine/PluginPrime.h"
 #include "engine/Markers.h"
 #include "engine/GroupEdit.h"
 #include "engine/EditHistory.h"
@@ -3917,6 +3919,7 @@ void testReleaseChecklist()
         { "New session", youhost::placeSessionWindowWidth(), youhost::placeSessionWindowHeight() },
         { "Group dialog", youhost::groupRenameWindowWidth(), youhost::groupRenameWindowHeight() },
         { "Plugin list", youhost::pluginListWindowWidth(), youhost::pluginListWindowHeight() },
+        { "GIG", youhost::gigWindowWidth(), youhost::gigWindowHeight() },
     };
     youhost::SavedWindowSize oldSmall;
     oldSmall.valid = true;
@@ -4788,7 +4791,9 @@ void testReleaseChecklist()
                          && lostText.secondary == youhost::kSyncLostFinnish
                          && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::center;
     sync.acknowledge();
-    const bool stillLost = sync.showAlarm() && sync.keepReattaching() && sync.isMissing();
+    const bool closedWhileLost = ! sync.showAlarm() && ! sync.isMissing() && sync.suppressLoss()
+                                 && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::hidden;
+    const auto closedText = youhost::syncLostExplanation(sync);
     sync.deviceReturned(3000);
     const auto restored = youhost::syncOverlayText(sync);
     const auto cornerBox = youhost::syncLostCornerBox(1280, 800);
@@ -4809,11 +4814,17 @@ void testReleaseChecklist()
     clickShrink.deviceLost(9, 1, 2);
     const bool bigUntilClick = youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::center;
     clickShrink.tuckWhileMissing();
-    const bool shrunkWhileLost = clickShrink.isMissing()
-                                 && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::corner;
+    const bool clickDoesNotShrink = clickShrink.isMissing()
+                                    && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::center;
+    const auto bigExplanation = youhost::syncLostExplanation(clickShrink);
     clickShrink.acknowledge();
-    const bool okKeepsShrunkAlarm = clickShrink.isMissing()
-                                    && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::corner;
+    const bool okClosesCompletely = ! clickShrink.showAlarm()
+                                    && clickShrink.suppressLoss()
+                                    && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::hidden;
+    clickShrink.deviceReturned(2500);
+    const bool smallOnlyAfterReturn = clickShrink.showRestored()
+                                      && youhost::syncLostChrome(clickShrink) == youhost::SyncLostChrome::corner;
+    const auto smallExplanation = youhost::syncLostExplanation(clickShrink);
     const auto helpText = youhost::shortcutHelpText();
     const auto gigAt = helpText.find("Before a gig");
     const auto installSteps = helpText.find("xattr -dr com.apple.quarantine");
@@ -4914,8 +4925,11 @@ void testReleaseChecklist()
     const auto choseOther = sliceBetween(engineSrc, "void AudioEngine::pollDeviceStats()", "LatencyNumbers AudioEngine::latencyNumbers");
     const auto paintBody = sliceBetween(mainUi, "void MainComponent::paint(", "void MainComponent::resized()");
     item("SYNC LOST",
-         alarmOn && stillLost && waitingForClick && alarmClear && restamped && dismissed
-             && bigUntilClick && shrunkWhileLost && okKeepsShrunkAlarm
+         alarmOn && closedWhileLost && waitingForClick && alarmClear && restamped && dismissed
+             && bigUntilClick && clickDoesNotShrink && okClosesCompletely && smallOnlyAfterReturn
+             && closedText.find("Press OK") != std::string::npos
+             && bigExplanation.find("Press OK") != std::string::npos
+             && smallExplanation.find("came back by itself") != std::string::npos
              && youhost::syncLossWholeSeconds(3000) == 3
              && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::hidden
              && ! youhost::syncOverlayText(sync).visible
@@ -4934,6 +4948,8 @@ void testReleaseChecklist()
              && overlayUi.find("closeAudioDevice") == std::string::npos
              && overlayUi.find("recorder_") == std::string::npos
              && overlayUi.find("onOpenDetails") != std::string::npos
+             && overlayUi.find("onShrink") == std::string::npos
+             && mainUi.find("tuckSyncLost") == std::string::npos
              && overlayUi.find("\"OK\"") != std::string::npos
              && mainUi.find("acknowledgeSyncLost") != std::string::npos
              && mainUi.find("syncOverlay_.sync") != std::string::npos
@@ -5131,8 +5147,8 @@ void testReleaseChecklist()
                            && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::center
                            && panic.recording;
     panic.overlay.acknowledge();
-    const bool okKeepsCenter = panic.overlay.isMissing()
-                               && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::center;
+    const bool okClosesCenter = ! panic.overlay.showAlarm() && panic.overlay.suppressLoss()
+                                && youhost::syncLostChrome(panic.overlay) == youhost::SyncLostChrome::hidden;
     const auto lostAtNs = panic.nowNs;
     const bool clockBack = youhost::showRunSteady(panic, lostAtNs + 50000000, lostAtNs + 1200000000, 50000000)
                            && panic.overlay.showRestored() && ! panic.overlay.isMissing()
@@ -5151,8 +5167,8 @@ void testReleaseChecklist()
     const bool hotArmed = youhost::showRunSteady(unplugged, 2000000000, 2300000000, 50000000) && ! unplugged.clock.grace;
     youhost::showHotUnplug(unplugged);
     unplugged.overlay.acknowledge();
-    const bool hotLost = ! unplugged.recording && unplugged.resumeRecording && unplugged.overlay.isMissing()
-                         && youhost::syncLostChrome(unplugged.overlay) == youhost::SyncLostChrome::center;
+    const bool hotClosed = ! unplugged.recording && unplugged.resumeRecording && ! unplugged.overlay.showAlarm()
+                           && unplugged.overlay.suppressLoss();
     youhost::showHotReturn(unplugged);
     const bool hotResumed = unplugged.recording && ! unplugged.resumeRecording && unplugged.overlay.showRestored()
                             && youhost::syncLostChrome(unplugged.overlay) == youhost::SyncLostChrome::corner;
@@ -5181,8 +5197,8 @@ void testReleaseChecklist()
     const auto downBody = sliceBetween(engineSrc, "void AudioEngine::handleDeviceDown()", "void AudioEngine::noteHardwareDevicesChanged()");
     item("Fast device switching",
          abcClear && switchD && switchE && fiveInsideThree && offlineClear && finalReady
-             && graceEnded && clockLost && okKeepsCenter && clockBack && okClearsRestored
-             && graceUnplugIgnored && hotArmed && hotLost && hotResumed && hotCleared
+             && graceEnded && clockLost && okClosesCenter && clockBack && okClearsRestored
+             && graceUnplugIgnored && hotArmed && hotClosed && hotResumed && hotCleared
              && wingWaits && wingFound && wingOffline
              && youhost::kDeviceOpenGraceNs == 2000000000
              && youhost::kStartupDeviceListTries == 8
@@ -5192,7 +5208,7 @@ void testReleaseChecklist()
              && userChange.find("clearSyncLost") != std::string::npos
              && downBody.find("clockMemory_.grace") != std::string::npos
              && engineSrc.find("pollStartupDeviceList();") != std::string::npos
-             && helpText.find("A large window stays until the card returns") != std::string::npos
+             && helpText.find("Press the big SYNC LOST button") != std::string::npos
              && checklistDoc.find("Fast device switching") != std::string::npos
              && checklistDoc.find("Five device changes inside 3 s") != std::string::npos
              && checklistDoc.find("no SYNC LOST, no hang, and no stuck window") != std::string::npos);
@@ -5306,11 +5322,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.16"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.17"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.16"
+             && std::string(youhost::versionNumber()) == "1.0.17"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.16") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.17") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5319,14 +5335,65 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.16") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.16-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.17") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.17-macOS.zip") != std::string::npos
              && checklistDoc.find("prerelease, not Latest") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-10-21") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-04") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Needs real-hardware testing") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
+    int coldCalls = 0;
+    const auto coldUs = [&coldCalls]()
+    {
+        ++coldCalls;
+        return coldCalls == 1 ? 825 : 40;
+    };
+    int primedUs = 0;
+    for (int block = 0; block < youhost::kPluginPrimeBlocks; ++block)
+        primedUs += coldUs();
+    const int liveUs = coldUs();
+    const auto primeCall = rackSrc.find("silent blocks off the audio thread, discarded, no added latency");
+    const auto publishAt = rackSrc.find("offThreadInstance_ = std::move(instance)");
+    const auto vst3Editor = rackSrc.find("VST3 editors) must be created on the message");
+    const auto powerMm = readWorkspaceFile("src/engine/LivePower.mm");
+    const auto windowText = youhost::pluginWindowProblemText("De-Feedback", true);
+    const auto openText = youhost::pluginWindowProblemText("Pro-G", false);
+    item("Gig mode and prime",
+         youhost::primeCoversColdProcess(youhost::kPluginPrimeBlocks)
+             && youhost::firstLiveProcessIndex(youhost::kPluginPrimeBlocks) == youhost::kPluginPrimeBlocks
+             && primedUs >= 825 && liveUs < 666 && liveUs == 40
+             && primeCall != std::string::npos && publishAt != std::string::npos && primeCall < publishAt
+             && vst3Editor != std::string::npos
+             && rackSrc.find("kPluginWindowCrashedNote") != std::string::npos
+             && rackSrc.find("QOS_CLASS_USER_INTERACTIVE") != std::string::npos
+             && engineSrc.find("beginLivePowerClaim") != std::string::npos
+             && engineSrc.find("endLivePowerClaim") != std::string::npos
+             && engineSrc.find("suppressLoss") != std::string::npos
+             && powerMm.find("NSActivityLatencyCritical") != std::string::npos
+             && powerMm.find("NSActivityIdleSystemSleepDisabled") != std::string::npos
+             && powerMm.find("kIOPMAssertionTypePreventUserIdleSystemSleep") != std::string::npos
+             && mainUi.find("gigButton_") != std::string::npos
+             && readWorkspaceFile("src/ui/PluginPage.cpp").find("snap.error") != std::string::npos
+             && windowText.find("kept running") != std::string::npos
+             && windowText.find("try the other format") != std::string::npos
+             && openText.find("Audio is still running") != std::string::npos
+             && std::string(youhost::kPluginDidNotOpenMessage).find("Audio kept running") != std::string::npos
+             && youhost::spotlightLoad("mdworker") == youhost::GigLoad::busy
+             && youhost::spotlightLoad("YouHost") == youhost::GigLoad::clear
+             && youhost::timeMachineLoad("Running = 1") == youhost::GigLoad::busy
+             && youhost::timeMachineLoad("Running = 0") == youhost::GigLoad::clear
+             && youhost::updatesLoad("AutomaticDownload = 1") == youhost::GigLoad::busy
+             && youhost::updatesLoad("softwareupdated") == youhost::GigLoad::clear
+             && youhost::wifiLoad("Wi-Fi Power (en0): On") == youhost::GigLoad::busy
+             && youhost::wifiLoad("Wi-Fi Power (en0): Off") == youhost::GigLoad::clear
+             && youhost::bluetoothLoad("ControllerPowerState = 1") == youhost::GigLoad::busy
+             && youhost::gigCheckLine("Spotlight", youhost::GigLoad::busy, youhost::kGigSpotlightHint).find(youhost::kGigSpotlightHint) != std::string::npos
+             && std::string(youhost::kGigClaimLine).find("workgroup") != std::string::npos
+             && youhost::gigWindowHeight() >= youhost::gigWindowContentHeight()
+             && helpText.find("GIG opens the gig check") != std::string::npos);
     const auto fromMarker = youhost::playSampleFromSelectedMarker(true, false, true, 48000, true);
     youhost::RawKey commandBackspace;
     commandBackspace.token = youhost::RawToken::backspace;

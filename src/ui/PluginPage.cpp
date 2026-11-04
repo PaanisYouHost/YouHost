@@ -27,12 +27,21 @@ juce::String slotLabel(int slot, const SlotSnapshot& snap)
     if (snap.loading)
         return juce::String(slot + 1) + " ...";
     if (! snap.occupied || snap.name.isEmpty())
+    {
+        if (snap.error.isNotEmpty())
+            return juce::String(slot + 1) + "  " + snap.error;
+        if (snap.note.isNotEmpty())
+            return juce::String(slot + 1) + "  " + snap.note;
         return juce::String(slot + 1);
+    }
     auto name = snap.name;
     if (name.length() > 22)
         name = name.substring(0, 22);
-    if (snap.note == "crashed, disabled")
-        return juce::String(slot + 1) + " " + name + "  crashed, disabled";
+    // "crashed, disabled" and a failed window are shown on the slot, not only in the log.
+    if (snap.note.isNotEmpty())
+        return juce::String(slot + 1) + " " + name + "  " + snap.note;
+    if (snap.error.isNotEmpty())
+        return juce::String(slot + 1) + " " + name + "  " + snap.error;
     return juce::String(slot + 1) + " " + name;
 }
 

@@ -15,6 +15,7 @@ Two basic rules
 
 What's new
 ----------
+- 1.0.17: While a card is open, YouHost joins that card's audio workgroup and turns App Nap and idle sleep off. A plugin is warmed up with silent blocks before it is heard, which does not add latency. GIG lists Spotlight, Time Machine, updates, Wi-Fi, and Bluetooth, each with one hint. The big SYNC LOST button opens an explanation, and OK closes it completely. A small blinking box appears only when the card comes back by itself. A plugin window that fails says what happened and what to do, and the slot shows the same short note.
 - 1.0.6: a channel with no input, and any channel past the card, does not run its plugins. The DSP meter follows the audio callback, and a dropout line names the slowest plugin. Choosing any plugin loads it in any slot. If that plugin crashed last time, the slot shows a small note: this plugin crashed last time. The crash journal keeps older crashes. A stall on the message thread does not bypass the plugins, and a card that briefly reports fewer channels keeps the plugins on the channels that were open. A plugin window opens at the plugin's own size and scale. A VST3 window on the Mac uses the same point size as its Audio Unit. The Retina backing scale is not applied a second time. Clicks land on the control that is drawn. A mono VST3 settles its buses once at load. The audio block does not renegotiate them. Every load, including an Audio Unit that does not open, is written to the log with its format and slot. A one-input, two-output device runs plugins only on the channel that has the input. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. That reading is a weak baseline for plugin speed. 1.0.7: the device callback does not hold its lock while a plugin runs, a mono plugin is processed in place, and Core Audio gives the callback the whole buffer period.
 - 1.0.5: VST3 plugins are prepared on the message thread and processed only on the audio thread, the same way as an Audio Unit. A plugin that reports silence during load stays loaded. Opening an editor does not pause the plugin, so audio and recording keep going.
 - 1.0.4: a sidechain plugin is processed on its full layout, with the sidechain fed silence.
@@ -41,6 +42,7 @@ What's new
 - Set the buffer to 32. Raise it to 64 if dropouts appear.
 - Waves LV1: lower the SoundGrid driver buffer and the network buffer (e.g. 12 ms → 3.6 ms).
 - Don't scan plugins during a show.
+- GIG opens the gig check: workgroup, App Nap, sleep, and heavy background tasks.
 
 3. Audio card and settings
 --------------------------
@@ -148,7 +150,7 @@ Shortcuts do nothing while a text field has focus.
 
 12. Troubleshooting
 -------------------
-- SYNC LOST: the card in use disappeared. A large window stays until the card returns; then it shrinks to a blinking box in the bottom-left corner. Click it to see when sync was lost and for how long. It does not stop audio or recording.
+- SYNC LOST: the card in use disappeared. Press the big SYNC LOST button to read what happened. OK closes it completely. A small blinking box appears at the bottom left only when the card comes back by itself. Click that box for the same explanation. OK closes it completely. It does not stop audio or recording.
 - Sample rate mismatch: a red line names both rates, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
 - Dropouts: open DROPOUTS (3). Raise the buffer to 64; see section 2. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. That reading is a weak baseline for plugin speed.
 - CPU: open CPU (4). DSP 100% = the buffer is full and the next callback drops out. You can see each plugin's share.

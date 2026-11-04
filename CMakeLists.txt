@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 1.0.16
+    VERSION 1.0.17
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -44,6 +44,7 @@ target_sources(YouHost PRIVATE
     src/engine/SessionDocument.cpp
     src/ui/ChannelMenu.cpp
     src/ui/CpuWindow.cpp
+    src/ui/GigWindow.cpp
     src/ui/DropoutWindow.cpp
     src/ui/LatencyReadout.cpp
     src/ui/MeterGrid.cpp
@@ -74,11 +75,14 @@ target_link_libraries(YouHost PRIVATE
     juce::juce_recommended_warning_flags)
 
 if(APPLE)
+    target_sources(YouHost PRIVATE src/engine/LivePower.mm)
     target_link_libraries(YouHost PRIVATE
         "-framework AudioUnit"
         "-framework CoreAudioKit"
         "-framework CoreAudio"
-        "-framework CoreFoundation")
+        "-framework CoreFoundation"
+        "-framework IOKit"
+        "-framework Foundation")
 endif()
 
 add_executable(YouHostTests tests/engine_tests.cpp)

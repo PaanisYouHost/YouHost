@@ -298,6 +298,7 @@ private:
     void completeRestoreStep(std::uint64_t generation);
     void finishRestore();
     void noteSlot(int channel);
+    void markSlotNote(int channel, int slot, const juce::String& note);
     void scheduleDeferredEditor(int channel, int slot);
     void pumpBackgroundQueue();
     void launchBackgroundLoad();

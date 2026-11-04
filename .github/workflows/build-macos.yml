@@ -216,6 +216,14 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
+            2026-11-04
+
+            YouHost 1.0.17 is a prerelease for testing. It is not the Latest release.
+
+            Tested by automated tests: the big SYNC LOST window opens an explanation and OK closes it completely. The small blinking box appears only when sync returns on its own, and OK closes that too. A plugin is primed with discarded silent blocks before it joins the live path, which adds no latency. A VST3 editor is created on the message thread. A failed plugin window says what happened and what to do, and the slot shows a short note. GIG lists Spotlight, Time Machine, updates, Wi-Fi, and Bluetooth with one hint each. Session files stay format 7. Open session without this plugin still leaves a crashed plugin out of this launch.
+
+            Needs real-hardware testing: the audio thread and plugin workers join the device workgroup, and App Nap and idle sleep stay off while a card is open. Idle late callbacks, inserting De-Feedback at buffer 32, and FabFilter Pro-G in a slot have to be checked on a gig machine. Nothing here adds buffer latency.
+
             2026-10-21
 
             YouHost 1.0.16 is a prerelease for testing. It is not the Latest release.
