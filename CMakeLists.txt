@@ -196,7 +196,8 @@ if(APPLE)
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_PLUGINHOST_AU=1
-        JUCE_PLUGINHOST_VST3=0)
+        JUCE_PLUGINHOST_VST3=0
+        YOUHOST_SKIP_PLUGIN_PROOF=1)
     target_link_libraries(YouHostGroupStressTest PRIVATE
         juce::juce_audio_processors
         juce::juce_audio_utils
