@@ -130,6 +130,11 @@ public:
     {
     }
 
+    void begin()
+    {
+        startThread();
+    }
+
     ~ProtectServer() override
     {
         signalThreadShouldExit();
@@ -577,7 +582,7 @@ void runProtectWorker(const juce::String& commandLine)
     }
     noteQuitMarkDirectory(directory.getFullPathName().toRawUTF8());
     server = new ProtectServer(directory);
-    server->startThread();
+    server->begin();
 }
 
 } // namespace youhost

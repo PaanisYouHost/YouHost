@@ -1,3 +1,4 @@
+#include "QuitGuard.h"
 #include "QuitPolicy.h"
 
 #include <atomic>
