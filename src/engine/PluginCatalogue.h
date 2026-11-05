@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace youhost
@@ -36,6 +37,7 @@ struct FailedPlugin
 {
     juce::String identifier;
     juce::String reason;
+    bool blacklist = true;
 };
 
 struct CatalogueStatus
@@ -115,7 +117,8 @@ private:
     void runScan();
     void setStatus(juce::String text, bool scanning);
     void requestSave();
-    void rememberFailure(const juce::String& identifier, const juce::String& reason);
+    void rememberFailure(const juce::String& identifier, const juce::String& reason, bool blacklist = true);
+    bool cacheReady() const noexcept { return cacheReady_.load(std::memory_order_acquire); }
     void loadStoredFailures();
     void saveStoredFailures();
     bool identifierNeedsScan(const juce::String& formatName, const juce::String& identifier) const;
@@ -142,6 +145,8 @@ private:
     std::atomic<int> totalCount_ { 0 };
     std::atomic<int> token_ { 0 };
     std::atomic<juce::uint32> scanStartedMs_ { 0 };
+    std::atomic<bool> cacheReady_ { false };
+    std::thread cacheThread_;
 
     mutable std::mutex statusMutex_;
     juce::String statusText_ { "Plugins not scanned" };

@@ -34,6 +34,7 @@ struct AudioThreadConfig
     Routing routing {};
     MeterTiming meterTiming {};
     int64_t expectedPeriodNs = 0;
+    int bufferSamples = 0;
 };
 
 inline Routing makeRouting(const std::array<bool, kMaxChannels>& inputs,

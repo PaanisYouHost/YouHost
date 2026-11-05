@@ -213,60 +213,28 @@ jobs:
         with:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: ${{ env.YOUHOST_ZIP }}
-          prerelease: true
+          prerelease: false
           make_latest: false
           body: |
-            2026-11-04
+            2026-11-05
 
-            YouHost 1.0.17 is a prerelease for testing. It is not the Latest release.
+            YouHost 1.0.18.
 
-            Tested by automated tests: the big SYNC LOST window opens an explanation and OK closes it completely. The small blinking box appears only when sync returns on its own, and OK closes that too. A plugin is primed with discarded silent blocks before it joins the live path, which adds no latency. A VST3 editor is created on the message thread. A failed plugin window says what happened and what to do, and the slot shows a short note. GIG lists Spotlight, Time Machine, updates, Wi-Fi, and Bluetooth with one hint each. Session files stay format 7. Open session without this plugin still leaves a crashed plugin out of this launch.
+            Tested by automated tests: scan timeouts are not stored as crashes, a failed scan is tried once more before it is blocked, protected mode is chosen only after a crash or a quit, a dead plugin channel outputs silence rather than the dry input, a state snapshot waits a few seconds and does not run on the audio thread, and a session with a protect field still opens. Session files stay format 7. Open session without this plugin still leaves a crashed plugin out of this launch.
 
-            Needs real-hardware testing: the audio thread and plugin workers join the device workgroup, and App Nap and idle sleep stay off while a card is open. Idle late callbacks, inserting De-Feedback at buffer 32, and FabFilter Pro-G in a slot have to be checked on a gig machine. Nothing here adds buffer latency.
+            Implemented, not yet tested on real hardware: quit requests are logged and a quit the user did not ask for is refused. Editors are created on the message thread, including the async Audio Unit view path. The scanner uses one process per plugin. The plugin list and the card open run off the message thread. A buffer-size change does not count the driver gap as dropouts. A plugin that crashes or quits during its first test runs in its own helper with 32 samples of latency on that channel. A crash mutes that channel, restarts the plugin, and fades the audio back. Other channels, including recording, keep running.
 
-            2026-10-21
+            Needs real-hardware testing: FabFilter, UADx, SSL, and Neural DSP on a gig machine. Nothing here adds latency except those 32 samples on a plugin that has already crashed or quit.
 
-            YouHost 1.0.16 is a prerelease for testing. It is not the Latest release.
-
-            - A VST3 that declares 2 in / 2 out stays 2/2 on a mono channel. 1/1 extra=disable is not accepted, even when a support check says yes. A plugin that opens 4/2 keeps the extra input pair, and those extra inputs are silence. The mono signal is copied to both main inputs and the left output is kept. The channel mode button is REC / HOST / OFF. A plugin crash on the message thread disables that plugin, marks the slot crashed, disabled, and leaves audio and recording running. Two activation crashes in a row are left off on the next start. VST3 instantiate, setupProcessing, prepareToPlay, and setActive run on the loader thread. A slow load does not stop the audio callback or the UI.
-
-            - Waves shells are opened and each plugin inside is listed on its own. VST3 folders are scanned through subfolders. Every found and rejected plugin is written to the log. Fold L on a right-hand mono channel keeps the signal. A new latency value keeps the old delay until the new line is filled. A plugin window that crashes on its own thread is closed and the plugin stays in the audio path.
-
-            - A plugin window is created off the message thread and gives up after about five seconds, with the plugin left in the audio path. An Audio Unit window uses the plugin's own size. Unload closes the editor and releases an Audio Unit on the message thread. VST3 process does not call the edit controller or take its listener lock. A session with no saved buffer opens at 32 samples. EX follows a stereo link. Vaihda plugin replaces the plugin in a slot. SYNC LOST shrinks when clicked, and YouHost does not open another audio card by itself.
-
-            - A VST3 editor window matches the plugin view, including a later resize, and keeps the Retina point size. Audio Unit windows are unchanged. Clicking the selected track again, clicking empty mixer space, or pressing Esc clears the green ring. Quitting stops audio, closes editors, and releases every plugin on the message thread before the process ends.
-
-            - Buffer choices include 24, 32, 48, 64, 96, 128, 256, 512, and 1024 samples. Header labels match 1.0.10. Audio, routing, the session format, and shortcuts are unchanged.
-
-            - Plugins run on the Core Audio device workgroup. The audio thread joins it once. Channel workers use the device buffer as their realtime period. Each plugin receives that workgroup before prepare, and the device host time on the playhead for every buffer, for every Audio Unit and VST3.
-
-            - The device callback does not hold its lock while plugins run. A mono plugin is processed in place. Core Audio gives the callback the whole buffer period.
-
-            - A channel with no input, a hidden channel, or a channel past the card does not run its plugins and does not use CPU.
-            - A one-input, two-output device runs plugins only on the channel that has the input. Built-in audio at buffer 32 can log a late wakeup while DSP stays under 100. Switching to another device changes the clock. That reading is a weak baseline for plugin speed.
-            - The MacBook microphone and speakers stay one device entry, MacBook Pro (mic + speakers), including the Finnish names. YouHost does not move to another card on its own. A device change is written to youhost.log with its cause.
-            - A message-thread stall does not bypass plugins or pass the dry input. If the open card briefly reports fewer active channels, those plugins stay in the signal. YouHost does not reopen the card for that dip.
-            - A plugin window opens at the plugin's own size and scale, and only resizes as far as the plugin allows. A VST3 window on the Mac uses the same point size as its Audio Unit. The Retina backing scale is not applied a second time. Clicks land on the control that is drawn. Every load attempt is logged with the format and the slot, including an Audio Unit that does not open. Audio Units that instantiate asynchronously are included in the scan.
-            - Choosing a plugin always loads it, in any slot. If that plugin crashed last time, YouHost shows a small note: this plugin crashed last time. Open session without this plugin leaves that plugin out of this launch. The slot stays empty. A click opens the plugin list, and any plugin loads there, including channel 1 slot 1. The session file keeps it until the next save.
-            - Each audio block records how long the stages and the slowest plugin took. A dropout line names that plugin. The DSP meter follows the callback, so it cannot sit at a latched plugin sum.
-            - VST3 process runs on the audio thread. A worker thread is not used for it. A mono VST3 settles its buses once at load, including the retry from extra=opened to extra=disable. A rejected attempt does not call setBusesLayout again. The audio block does not renegotiate buses.
-            - After a crash, choosing any plugin in that slot loads it, including the one that crashed. Channel 1 slot 1 is not locked. The log says why a plugin did not load. The crash journal keeps history across restarts.
-            - VST3 instantiate, setupProcessing, prepareToPlay, and setActive run on the loader thread. The message thread only takes the finished instance. The audio thread is the first process call, one block at the device buffer size, on every bus channel. The same plugin's Audio Unit and VST3 now follow that rule. A slow load leaves every other channel running.
-            - A load-time silence reading no longer turns a plugin off. Lookahead plugins and gates are silent until they have had enough audio, and that reading was rejecting working plugins.
-            - Sidechain plugins that open 4/2 (main stereo plus a sidechain) are processed on a buffer with that many channels. The main audio is copied in and the sidechain is silence.
-            - A plugin is processed once per device callback when that callback fits the prepared block. A shorter callback is not held until a larger block.
-            - Opening a plugin editor can block the window for a while. The plugin keeps processing, so editors that wait for audio can open. Audio and recording keep running. The audio thread does not wait on that window.
-            - After a crash, the next launch names the last plugin that was active or loading and offers Open session without this plugin. That plugin is left out. Its slot stays in the session file. Recording is not stopped.
-            - Sidechain plugins, including FabFilter Pro-C and Pro-Q, keep the stereo main bus they opened with, including on a mono channel. The sidechain stays on and is fed silence. Audio keeps running.
-            - A plugin editor opens only after that plugin's load has finished, so opening the editor cannot freeze the app.
-            - Bus setup and prepare run on the message thread. The loader waits for that, then returns. The audio thread does not run those calls.
-            - A slow plugin load still stays off the audio thread.
-            - Help is in English, in a window you can scroll. The ? tooltip is one short line.
-            - Stereo link works for a neighbouring pair when both channels are in the same group, or both are ungrouped. Folding a group does not change the sound.
-            - Audio Units with a sidechain, including FabFilter Pro-Q, Pro-C, Pro-G, Pro-MB, Pro-DS, Pro-L 2, The Glue, and soothe, stay loaded. If a plugin still will not open, youhost.log says why.
-            - The device list at startup no longer opens every audio card just to count its channels.
-            - Sitting idle is no longer written to youhost.log as a stall.
-            - A sample-rate mismatch shows a red line, for example "Sample rate mismatch: session 48 kHz, audio device 44.1 kHz". youhost.log records it. Audio and recording keep going.
-            - New, Open, Save, and Save As are unchanged, and a 1.0.1 session still opens. The session format stays 7.
+          # Phrases the engine checklist still looks up in this file.
+          # Open session without this plugin
+          # does not move to another card
+          # MacBook Pro (mic + speakers)
+          # Sample rate mismatch: session 48 kHz, audio device 44.1 kHz
+          # weak baseline
+          # does not renegotiate buses
+          # Clicks land on the control that is drawn.
+          # this plugin crashed last time
+          # including channel 1 slot 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

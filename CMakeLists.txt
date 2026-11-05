@@ -5,7 +5,7 @@ if(POLICY CMP0135)
 endif()
 
 project(YouHost
-    VERSION 1.0.17
+    VERSION 1.0.18
     DESCRIPTION "Live plugin host and multitrack recorder"
     LANGUAGES C CXX)
 
@@ -38,6 +38,8 @@ target_sources(YouHost PRIVATE
     src/engine/AudioEngine.cpp
     src/engine/PluginCatalogue.cpp
     src/engine/PluginFault.cpp
+    src/engine/PluginBridge.cpp
+    src/engine/QuitGuard.cpp
     src/engine/PluginRack.cpp
     src/engine/Recorder.cpp
     src/engine/SessionDisk.cpp
@@ -75,7 +77,7 @@ target_link_libraries(YouHost PRIVATE
     juce::juce_recommended_warning_flags)
 
 if(APPLE)
-    target_sources(YouHost PRIVATE src/engine/LivePower.mm)
+    target_sources(YouHost PRIVATE src/engine/LivePower.mm src/engine/QuitGuard.mm)
     target_link_libraries(YouHost PRIVATE
         "-framework AudioUnit"
         "-framework CoreAudioKit"
@@ -180,6 +182,9 @@ if(APPLE)
         src/engine/AudioEngine.cpp
         src/engine/PluginCatalogue.cpp
         src/engine/PluginFault.cpp
+        src/engine/PluginBridge.cpp
+        src/engine/QuitGuard.cpp
+        src/engine/QuitGuard.mm
         src/engine/PluginRack.cpp
         src/engine/Recorder.cpp
         src/engine/SessionDisk.cpp

@@ -6,6 +6,9 @@
 #include "PluginLoadPace.h"
 #include "RepaintCoalesce.h"
 #include "SessionDocument.h"
+#include "PluginNotice.h"
+#include "PluginProtect.h"
+#include "PluginBridge.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -151,6 +154,10 @@ public:
     void openEditor(int channel, int slot);
     void toggleEditor(int channel, int slot);
     bool isEditorOpen(int channel, int slot) const;
+    const PluginNoticeModel& pluginNotice() const noexcept { return notice_; }
+    bool channelProtected(int channel) const;
+    // 1 OK, 2 Cancel, 3 Retry, 4 Bypass plugin, 5 dismiss the restored box.
+    void respondPluginNotice(int action);
 
     ChannelSnapshot snapshot(int channel) const;
     int alignmentSamples() const;
@@ -225,6 +232,7 @@ private:
         bool prepared = false;
         int latencySamples = 0;
         int stereoFold = 0;
+        std::shared_ptr<ProtectBridge> bridge;
     };
 
     struct EditorOpen
@@ -391,6 +399,7 @@ private:
         juce::MemoryBlock state;
         bool bypassed = false;
         int stereoFold = 0;
+        bool protectedMode = false;
     };
     std::vector<RestorePlugin> restoreQueue_;
     std::function<void(int)> slotHandler_;
@@ -460,6 +469,34 @@ private:
     std::atomic<int> bypassAll_ { 0 };
     std::atomic<bool> latencyDirty_ { false };
     std::atomic<bool> stateDirty_ { false };
+    std::int64_t stateDirtyAtMs_ = 0;
+    PluginNoticeModel notice_ {};
+    std::vector<ProtectedRecord> protectedPlugins_;
+    std::vector<std::string> passedProof_;
+    bool protectListLoaded_ = false;
+    struct PendingProtect
+    {
+        bool active = false;
+        int channel = 0;
+        int slot = 0;
+        juce::PluginDescription description;
+        juce::MemoryBlock state;
+        bool bypassed = false;
+        bool markDirty = false;
+        bool open = false;
+        int stereoFold = 0;
+        std::uint64_t generation = 0;
+        std::string identifier;
+        std::string version;
+        std::uint64_t ticket = 0;
+    };
+    PendingProtect pendingProtect_;
+    void loadProtectList();
+    void saveProtectList();
+    void adoptProtected(PendingProtect pending);
+    void beginProof(PendingProtect pending);
+    void finishProof(PendingProtect pending, ProofResult result);
+    bool routeProtectedOrProof(const PendingProtect& pending);
     RepaintCoalescer uiRepaint_;
     std::uint64_t triggerLogNs_ = 0;
     int triggerLoggedNotes_ = 0;

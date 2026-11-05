@@ -348,10 +348,61 @@ AudioEngine::AudioEngine(AppSettings& settings)
     sessionDisk_ = std::make_unique<SessionDisk>();
 }
 
+struct AudioEngine::DeviceWorkQueue : juce::Thread
+{
+    explicit DeviceWorkQueue(AudioEngine& owner)
+        : juce::Thread("youhost-device"),
+          owner_(owner)
+    {
+    }
+
+    void post(std::function<void()> job)
+    {
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            jobs_.push_back(std::move(job));
+        }
+        notify();
+    }
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            std::function<void()> job;
+            {
+                const std::lock_guard<std::mutex> lock(mutex_);
+                if (! jobs_.empty())
+                {
+                    job = std::move(jobs_.front());
+                    jobs_.erase(jobs_.begin());
+                }
+            }
+            if (! job)
+            {
+                wait(50);
+                continue;
+            }
+            job();
+        }
+    }
+
+    AudioEngine& owner_;
+    std::mutex mutex_;
+    std::vector<std::function<void()>> jobs_;
+};
+
 AudioEngine::~AudioEngine()
 {
     if (alive_ != nullptr)
         alive_->store(false);
+    if (deviceWork_ != nullptr)
+    {
+        deviceWork_->signalThreadShouldExit();
+        deviceWork_->notify();
+        deviceWork_->stopThread(4000);
+        deviceWork_.reset();
+    }
     sessionDisk_.reset();
     if (stallThread_ != nullptr)
     {
@@ -363,7 +414,42 @@ AudioEngine::~AudioEngine()
     rack_.reset();
 }
 
+void AudioEngine::postDeviceWork(std::function<void()> job)
+{
+    if (deviceWork_ == nullptr)
+    {
+        deviceWork_ = std::make_unique<DeviceWorkQueue>(*this);
+        deviceWork_->startThread();
+    }
+    deviceWork_->post(std::move(job));
+}
+
 void AudioEngine::start(bool allowInput)
+{
+    noteMessageBeat();
+    auto alive = alive_;
+    postDeviceWork([this, alive, allowInput]
+    {
+        if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> lock(deviceLock_);
+        startDeviceBody(allowInput);
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([this, alive]
+            {
+                if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+                    return;
+                std::unique_lock<std::mutex> guard(deviceLock_, std::try_to_lock);
+                if (! guard.owns_lock())
+                    return;
+                pollDeviceStats();
+                if (! awaitingSavedDevice_)
+                    saveSetupIfAllowed();
+            });
+    });
+}
+
+void AudioEngine::startDeviceBody(bool allowInput)
 {
     if (started_)
     {
@@ -405,9 +491,6 @@ void AudioEngine::start(bool allowInput)
     started_ = true;
     if (allowInput)
         reconcileStartupDevice();
-    pollDeviceStats();
-    if (! awaitingSavedDevice_)
-        saveSetupIfAllowed();
 }
 
 void AudioEngine::pollDeviceStats()
@@ -417,6 +500,9 @@ void AudioEngine::pollDeviceStats()
             return;
 
     noteMessageBeat();
+    std::unique_lock<std::mutex> deviceGuard(deviceLock_, std::try_to_lock);
+    if (! deviceGuard.owns_lock())
+        return;
 
     if (deviceError_.exchange(false, std::memory_order_relaxed))
         openError_ = "The audio device reported an error.";
@@ -972,7 +1058,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     // A late wake-up is a gap. The clock read is a vDSO call, not a lock or an allocation.
     const int64_t previousNs = lastCallbackNs_.exchange(startedNs, std::memory_order_relaxed);
     callbackSerial_.fetch_add(1, std::memory_order_relaxed);
-    const bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed);
+    const bool resizing = dropoutGapSuppressedByResize(config.bufferSamples, numSamples);
+    bool skipGap = skipNextGap_.exchange(false, std::memory_order_relaxed) || resizing;
+    if (resizing)
+        lastCallbackNs_.store(0, std::memory_order_relaxed);
     int lateNs = 0;
     if (! skipGap && previousNs > 0 && config.expectedPeriodNs > 0 && startedNs > previousNs)
     {
@@ -1277,7 +1366,8 @@ void AudioEngine::publishConfig(juce::AudioIODevice& device, int inputCap, int o
     AudioThreadConfig next;
     next.routing = makeRouting(inputs, outputs);
     next.meterTiming = meterTimingFor(device.getCurrentSampleRate());
-    next.expectedPeriodNs = expectedPeriodNs(device.getCurrentSampleRate(), device.getCurrentBufferSizeSamples());
+    next.bufferSamples = device.getCurrentBufferSizeSamples();
+    next.expectedPeriodNs = expectedPeriodNs(device.getCurrentSampleRate(), next.bufferSamples);
 
     const int current = configIndex_.load(std::memory_order_relaxed);
     const int slot = 1 - current;
@@ -1310,6 +1400,7 @@ void AudioEngine::prepareStandaloneCallback(double sampleRate, int bufferSamples
     AudioThreadConfig next;
     next.routing = makeRouting(open, open);
     next.meterTiming = meterTimingFor(rate);
+    next.bufferSamples = block;
     next.expectedPeriodNs = expectedPeriodNs(rate, block);
 
     const int current = configIndex_.load(std::memory_order_relaxed);
@@ -2578,6 +2669,22 @@ void AudioEngine::togglePluginEditor(int channel, int slot)
         rack_->toggleEditor(channel, slot);
 }
 
+const PluginNoticeModel& AudioEngine::pluginNotice() const
+{
+    return rack_->pluginNotice();
+}
+
+void AudioEngine::respondPluginNotice(int action)
+{
+    if (rack_ != nullptr)
+        rack_->respondPluginNotice(action);
+}
+
+bool AudioEngine::channelProtected(int channel) const
+{
+    return rack_ != nullptr && rack_->channelProtected(channel);
+}
+
 bool AudioEngine::isPluginEditorOpen(int channel, int slot) const
 {
     return rack_ != nullptr && rack_->isEditorOpen(channel, slot);
@@ -3159,20 +3266,40 @@ void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
     startupDeviceNote_.clear();
     setupLocked_ = false;
     inventoryForce_ = true;
-    openingChosenDevice_ = true;
-    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
-    openingChosenDevice_ = false;
-    auto* live = deviceManager_.getCurrentAudioDevice();
-    const bool opened = live != nullptr && live->isOpen();
-    if (! opened)
+    auto alive = alive_;
+    postDeviceWork([this, alive, setup, name]
     {
-        if (error.isNotEmpty())
-            openError_ = error;
-        parkOfflineAfterFailedOpen(name);
-        return;
-    }
-    setupLocked_ = true;
-    deviceInventoryMs_ = 0;
+        if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> lock(deviceLock_);
+        openingChosenDevice_ = true;
+        const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+        openingChosenDevice_ = false;
+        auto* live = deviceManager_.getCurrentAudioDevice();
+        const bool opened = live != nullptr && live->isOpen();
+        if (! opened)
+        {
+            if (error.isNotEmpty())
+                openError_ = error;
+            if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+                messages->callAsync([this, alive, name]
+                {
+                    if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+                        return;
+                    parkOfflineAfterFailedOpen(name);
+                });
+            return;
+        }
+        setupLocked_ = true;
+        deviceInventoryMs_ = 0;
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([this, alive]
+            {
+                if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+                    return;
+                pollDeviceStats();
+            });
+    });
 }
 
 void AudioEngine::noteUserChoseDevice(const juce::String& name)

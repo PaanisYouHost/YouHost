@@ -4,6 +4,8 @@
 #include "AppSettings.h"
 #include "HostLog.h"
 #include "ScanJobs.h"
+#include "ScanVerdict.h"
+#include "QuitGuard.h"
 
 #include <algorithm>
 #include <memory>
@@ -27,9 +29,7 @@ namespace
 {
 
 constexpr int kWorkers = 4;
-constexpr int kNormalTimeoutMs = 20000;
-constexpr int kShellTimeoutMs = 45000;
-constexpr int kReuseLimit = 8;
+constexpr int kReuseLimit = kScanWorkersPerPlugin;
 
 #if JUCE_MAC
 void preloadOneShell(const juce::File& bundle, AppSettings& settings)
@@ -124,6 +124,8 @@ struct Outcome
     bool ok = false;
     bool cancelled = false;
     bool killed = false;
+    bool blacklist = false;
+    ScanKind kind = ScanKind::failed;
     juce::String reason;
     juce::OwnedArray<juce::PluginDescription> found;
 };
@@ -269,6 +271,8 @@ void ScanWorker::startFromCommandLine(const juce::String& commandLine)
     directory_.getChildFile("pid").replaceWithText(juce::String(static_cast<int>(::getpid())));
 #endif
 
+    noteQuitMarkDirectory(directory_.getFullPathName().toRawUTF8());
+    directory_.getChildFile("quit-request").deleteFile();
     directory_.getChildFile("ready").replaceWithText("1");
     startThread();
 }
@@ -341,6 +345,7 @@ void ScanWorker::run()
         temporary.moveFileTo(directory_.getChildFile("result.xml"));
     }
 
+    allowProcessExit();
     if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating())
         messageManager->stopDispatchLoop();
 }
@@ -370,40 +375,51 @@ PluginCatalogue::PluginCatalogue(AppSettings& settings)
 
     pedalFile_ = settings_.supportDirectory().getChildFile("plugin-scan-pedal.txt");
     pedalFile_.getParentDirectory().createDirectory();
-
-    if (auto saved = settings_.loadKnownPlugins())
-        list_.recreateFromXml(*saved);
-
-    loadStoredFailures();
-    for (const auto& failure : failures_)
-        if (! list_.getBlacklistedFiles().contains(failure.identifier))
-            list_.addToBlacklist(failure.identifier);
-
-    if (pedalFile_.existsAsFile())
+    // The known-plugin XML is large. Parsing it here used to freeze the
+    // message thread for the whole startup. The window opens while this runs.
+    cacheThread_ = std::thread([this]
     {
-        for (const auto& line : juce::StringArray::fromLines(pedalFile_.loadFileAsString()))
+        const auto began = juce::Time::getMillisecondCounter();
+        const std::lock_guard<std::mutex> lock(listMutex_);
+        if (auto saved = settings_.loadKnownPlugins())
+            list_.recreateFromXml(*saved);
+
+        loadStoredFailures();
+        for (const auto& failure : failures_)
+            if (failure.blacklist && ! list_.getBlacklistedFiles().contains(failure.identifier))
+                list_.addToBlacklist(failure.identifier);
+
+        if (pedalFile_.existsAsFile())
         {
-            const auto identifier = line.trim();
-            if (identifier.isNotEmpty())
-                rememberFailure(identifier, "Scanner crashed on this plugin last time");
+            for (const auto& line : juce::StringArray::fromLines(pedalFile_.loadFileAsString()))
+            {
+                const auto identifier = line.trim();
+                if (identifier.isNotEmpty())
+                    rememberFailure(identifier, "Scanner stopped on this plugin last time. It will be tried again.", false);
+            }
+            pedalFile_.deleteFile();
+            requestSave();
         }
-        pedalFile_.deleteFile();
-        requestSave();
-    }
 
-    knownCount_.store(list_.getNumTypes(), std::memory_order_relaxed);
-    failedCount_.store(static_cast<int>(failures_.size()), std::memory_order_relaxed);
-    if (knownCount_.load(std::memory_order_relaxed) > 0 || failedCount_.load(std::memory_order_relaxed) > 0)
-    {
-        juce::String text = juce::String(knownCount_.load(std::memory_order_relaxed)) + " plugins remembered";
-        if (failedCount_.load(std::memory_order_relaxed) > 0)
-            text << ", " << failedCount_.load(std::memory_order_relaxed) << " failed";
-        setStatus(text, false);
-    }
+        knownCount_.store(list_.getNumTypes(), std::memory_order_relaxed);
+        failedCount_.store(static_cast<int>(failures_.size()), std::memory_order_relaxed);
+        if (knownCount_.load(std::memory_order_relaxed) > 0 || failedCount_.load(std::memory_order_relaxed) > 0)
+        {
+            juce::String text = juce::String(knownCount_.load(std::memory_order_relaxed)) + " plugins remembered";
+            if (failedCount_.load(std::memory_order_relaxed) > 0)
+                text << ", " << failedCount_.load(std::memory_order_relaxed) << " failed";
+            setStatus(text, false);
+        }
+        const auto elapsed = juce::Time::getMillisecondCounter() - began;
+        appendHostLog(settings_, "plugin list loaded off the message thread in " + juce::String(static_cast<int>(elapsed)) + " ms");
+        cacheReady_.store(true, std::memory_order_release);
+    });
 }
 
 PluginCatalogue::~PluginCatalogue()
 {
+    if (cacheThread_.joinable())
+        cacheThread_.join();
     cancel_.store(true, std::memory_order_relaxed);
     if (scanThread_ != nullptr)
     {
@@ -416,6 +432,8 @@ PluginCatalogue::~PluginCatalogue()
 
 void PluginCatalogue::startIfEmpty()
 {
+    if (! cacheReady_.load(std::memory_order_acquire))
+        return;
     if (list_.getNumTypes() == 0 && failures_.empty() && ! scanning_.load(std::memory_order_relaxed))
         scanNew();
 }
@@ -597,6 +615,9 @@ void PluginCatalogue::setDeviceOpen(bool open) noexcept
 
 juce::Array<juce::PluginDescription> PluginCatalogue::types() const
 {
+    if (! cacheReady_.load(std::memory_order_acquire))
+        return {};
+    const std::lock_guard<std::mutex> lock(listMutex_);
     return list_.getTypes();
 }
 
@@ -802,24 +823,28 @@ bool PluginCatalogue::identifierNeedsScan(const juce::String& formatName, const 
     return true;
 }
 
-void PluginCatalogue::rememberFailure(const juce::String& identifier, const juce::String& reason)
+void PluginCatalogue::rememberFailure(const juce::String& identifier, const juce::String& reason, bool blacklist)
 {
     if (identifier.isEmpty())
         return;
+    const bool block = blacklist && storedFailureBlacklists(reason.toStdString());
 
     for (auto& failure : failures_)
     {
         if (failure.identifier == identifier)
         {
             failure.reason = reason;
-            if (! list_.getBlacklistedFiles().contains(identifier))
+            failure.blacklist = block;
+            if (block && ! list_.getBlacklistedFiles().contains(identifier))
                 list_.addToBlacklist(identifier);
+            if (! block)
+                list_.removeFromBlacklist(identifier);
             return;
         }
     }
 
-    failures_.push_back({ identifier, reason });
-    if (! list_.getBlacklistedFiles().contains(identifier))
+    failures_.push_back({ identifier, reason, block });
+    if (block && ! list_.getBlacklistedFiles().contains(identifier))
         list_.addToBlacklist(identifier);
 }
 
@@ -838,7 +863,10 @@ void PluginCatalogue::loadStoredFailures()
         auto reason = child->getStringAttribute("reason");
         if (reason.isEmpty())
             reason = "Failed";
-        failures_.push_back({ identifier, reason });
+        const bool block = child->hasAttribute("blacklist")
+                               ? child->getBoolAttribute("blacklist", true)
+                               : storedFailureBlacklists(reason.toStdString());
+        failures_.push_back({ identifier, reason, block });
     }
 }
 
@@ -855,6 +883,7 @@ void PluginCatalogue::saveStoredFailures()
         auto* child = root.createNewChildElement("Failed");
         child->setAttribute("id", failure.identifier);
         child->setAttribute("reason", failure.reason);
+        child->setAttribute("blacklist", failure.blacklist ? 1 : 0);
     }
     settings_.saveScanFailures(&root);
 }
@@ -877,6 +906,11 @@ void PluginCatalogue::requestSave()
 
 void PluginCatalogue::runScan()
 {
+    while (! cacheReady_.load(std::memory_order_acquire) && ! cancel_.load(std::memory_order_relaxed))
+        juce::Thread::sleep(20);
+    if (cancel_.load(std::memory_order_relaxed))
+        return;
+
     std::vector<Job> jobs;
     std::vector<ForcedJob> forced;
     {
@@ -1105,7 +1139,7 @@ void PluginCatalogue::runScan()
             return outcome;
         }
 
-        const int timeoutMs = job.shell ? kShellTimeoutMs : kNormalTimeoutMs;
+        const int timeoutMs = scanTimeoutMs(job.shell, 0);
         const auto deadline = juce::Time::getMillisecondCounter() + static_cast<juce::uint32>(timeoutMs);
         const auto resultFile = slot.directory.getChildFile("result.xml");
         while (juce::Time::getMillisecondCounter() < deadline)
@@ -1140,15 +1174,29 @@ void PluginCatalogue::runScan()
             resultFile.deleteFile();
             if (! outcome.ok && outcome.reason.isEmpty())
                 outcome.reason = "The plugin failed to scan";
+            outcome.kind = outcome.ok ? ScanKind::ok : ScanKind::failed;
+            if (! outcome.ok)
+            {
+                const auto plan = planScanAttempt(outcome.kind, 0);
+                outcome.blacklist = plan.blacklist;
+            }
             ++slot.served;
             if (job.shell)
                 killSlot(slot);
             return outcome;
         }
 
+        const bool alive = slotRunning(slot);
+        const bool quitRequested = slot.directory.getChildFile("quit-request").existsAsFile();
         outcome.killed = true;
-        outcome.reason = slotRunning(slot) ? "Timed out. A plugin window may have been waiting, so the scanner was closed."
-                                           : "Plugin crashed the scanner";
+        ScanObservation seen;
+        seen.workerStarted = true;
+        seen.workerAlive = alive;
+        seen.quitRequested = quitRequested;
+        outcome.kind = classifyScan(seen);
+        const auto plan = planScanAttempt(outcome.kind, 0);
+        outcome.reason = plan.reason;
+        outcome.blacklist = plan.blacklist;
         killSlot(slot);
         return outcome;
     };
@@ -1162,7 +1210,7 @@ void PluginCatalogue::runScan()
         if (! outcome.ok)
         {
             const auto reason = outcome.reason.isNotEmpty() ? outcome.reason : juce::String("Failed");
-            rememberFailure(job.identifier, reason);
+            rememberFailure(job.identifier, reason, outcome.blacklist);
             const auto line = formatScanFailureLine(job.format.toRawUTF8(), job.identifier.toRawUTF8(), reason.toRawUTF8());
             appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
         }
@@ -1217,7 +1265,22 @@ void PluginCatalogue::runScan()
                     rewritePedal();
                 }
 
-                auto outcome = runOne(*slot, job);
+                Outcome outcome;
+                for (int attempt = 0; attempt < 2; ++attempt)
+                {
+                    if (attempt > 0)
+                    {
+                        killSlot(*slot);
+                        appendHostLog(settings_, "scan retry " + job.identifier);
+                    }
+                    outcome = runOne(*slot, job);
+                    const auto plan = planScanAttempt(outcome.kind, attempt);
+                    outcome.blacklist = plan.blacklist;
+                    if (! plan.accept && plan.reason != nullptr && plan.reason[0] != '\0')
+                        outcome.reason = plan.reason;
+                    if (plan.accept || ! plan.retry || outcome.cancelled)
+                        break;
+                }
 
                 {
                     const std::lock_guard<std::mutex> lock(pedalMutex);

@@ -694,6 +694,15 @@ void MeterGrid::paint(juce::Graphics& graphics)
         graphics.setColour(theme::text);
         graphics.setFont(juce::Font(juce::FontOptions(juce::jlimit(12.0f, 16.0f, width * 0.42f)).withStyle("Bold")));
         graphics.drawText(juce::String(cell.channel + 1), parts.number, juce::Justification::centred, false);
+        if (cell.shield)
+        {
+            auto badge = parts.number.reduced(1.0f).removeFromRight(14.0f);
+            juce::Path shield;
+            shield.addTriangle(badge.getCentreX(), badge.getY(), badge.getRight(), badge.getCentreY(), badge.getCentreX(), badge.getBottom());
+            shield.addTriangle(badge.getCentreX(), badge.getY(), badge.getX(), badge.getCentreY(), badge.getCentreX(), badge.getBottom());
+            graphics.setColour(juce::Colour(0xff1a4f86));
+            graphics.fillPath(shield);
+        }
 
         if (cell.selected)
         {

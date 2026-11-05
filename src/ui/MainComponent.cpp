@@ -1415,6 +1415,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         refresh();
     };
     addChildComponent(syncOverlay_);
+    pluginNotice_.onAction = [this](int action) { engine_.respondPluginNotice(action); };
+    addChildComponent(pluginNotice_);
     addChildComponent(syncDialog_);
 
     prevButton_.setTooltip("Previous take (Left).");
@@ -3030,6 +3032,7 @@ void MainComponent::publishMeters(bool repaintLevels)
             cell.color = engine_.channelColor(item.channel);
             cell.selected = engine_.isChannelSelected(item.channel);
             cell.title = engine_.channelName(item.channel);
+            cell.shield = engine_.channelProtected(item.channel);
             cell.reading.rms = engine_.rmsFor(item.channel);
             cell.reading.peak = engine_.peakFor(item.channel);
             cell.reading.clipped = engine_.clipFor(item.channel);
@@ -3195,6 +3198,17 @@ void MainComponent::refresh()
     }
     if (syncOverlay_.place() == SyncLostChrome::corner && ! syncDialog_.isVisible())
         syncOverlay_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
+    engine_.pluginCatalogue().startIfEmpty();
+    const auto& pluginState = engine_.pluginNotice();
+    if (pluginNotice_.sync(pluginState))
+    {
+        const bool show = pluginState.kind != PluginNoticeKind::none;
+        pluginNotice_.setVisible(show);
+        if (show)
+            placePluginNotice();
+    }
+    if (pluginNoticeBlinks(pluginState.kind))
+        pluginNotice_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
     if (syncDialog_.isVisible())
     {
         if (syncOverlay_.place() == SyncLostChrome::hidden)
@@ -3506,9 +3520,20 @@ void MainComponent::resized()
     }
     if (syncOverlay_.isVisible())
         placeSyncOverlay();
+    if (pluginNotice_.isVisible())
+        placePluginNotice();
     if (syncDialog_.isVisible())
         placeSyncDialog();
     repaint();
+}
+
+void MainComponent::placePluginNotice()
+{
+    const auto kind = pluginNotice_.kind();
+    const bool details = pluginNotice_.detailsOpen() || pluginNotice_.model().detailsOpen;
+    const auto box = pluginNoticeBox(getWidth(), getHeight(), kind, details);
+    pluginNotice_.setBounds(box.x, box.y, box.w, box.h);
+    pluginNotice_.toFront(false);
 }
 
 void MainComponent::placeSyncOverlay()

@@ -10,6 +10,7 @@
 #include "ui/PluginPage.h"
 #include "ui/ScannerWindow.h"
 #include "ui/SyncLostOverlay.h"
+#include "ui/PluginNoticeOverlay.h"
 #include "ui/TimelineView.h"
 #include "engine/Shortcuts.h"
 
@@ -150,6 +151,8 @@ private:
     juce::TextButton markersButton_ { "6 MARKERS" };
     juce::TextButton markerButton_ { "MARKER" };
     SyncLostOverlay syncOverlay_;
+    PluginNoticeOverlay pluginNotice_;
+    void placePluginNotice();
     SyncRestoredDialog syncDialog_;
     juce::TextButton retryButton_ { "Retry" };
     juce::TextButton groupButton_ { "Group" };

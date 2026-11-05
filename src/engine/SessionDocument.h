@@ -20,6 +20,7 @@ struct SessionSlot
 {
     bool occupied = false;
     bool bypassed = false;
+    bool protectedMode = false;
     int stereoFold = 0;
     juce::PluginDescription description;
     juce::MemoryBlock state;

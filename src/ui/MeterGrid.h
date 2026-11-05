@@ -50,6 +50,7 @@ struct BridgeCell
     int membersInput = 0;
     int memberCount = 0;
     juce::String pdc;
+    bool shield = false;
 };
 
 struct MeterHit

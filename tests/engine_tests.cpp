@@ -61,6 +61,12 @@
 #include "engine/TimelineZoom.h"
 #include "engine/RecordStart.h"
 #include "engine/CheckedMutex.h"
+#include "engine/ScanVerdict.h"
+#include "engine/QuitPolicy.h"
+#include "engine/SafetyFade.h"
+#include "engine/StateSnapshot.h"
+#include "engine/PluginProtect.h"
+#include "engine/PluginNotice.h"
 
 #include <algorithm>
 #include <array>
@@ -5322,11 +5328,11 @@ void testReleaseChecklist()
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.17"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.18"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.17"
+             && std::string(youhost::versionNumber()) == "1.0.18"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.17") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.18") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5335,12 +5341,12 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.17") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.17-macOS.zip") != std::string::npos
-             && checklistDoc.find("prerelease, not Latest") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.18") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.18-macOS.zip") != std::string::npos
+             && checklistDoc.find("not marked as the newest release") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-04") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-05") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Needs real-hardware testing") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
@@ -7150,8 +7156,189 @@ void testStability106()
 
 } // namespace
 
+void testStability1018()
+{
+    using namespace youhost;
+    youhost::ScanObservation timeout;
+    timeout.workerStarted = true;
+    timeout.workerAlive = true;
+    CHECK(classifyScan(timeout) == ScanKind::timeout);
+    const auto timeoutPlan = planScanAttempt(ScanKind::timeout, 1);
+    CHECK(! timeoutPlan.blacklist);
+    CHECK(! timeoutPlan.retry);
+    CHECK(std::string(timeoutPlan.reason).find("Not a crash") != std::string::npos);
+
+    youhost::ScanObservation crashed;
+    crashed.workerStarted = true;
+    CHECK(classifyScan(crashed) == ScanKind::crash);
+    CHECK(planScanAttempt(ScanKind::crash, 0).retry);
+    CHECK(! planScanAttempt(ScanKind::crash, 0).blacklist);
+    CHECK(planScanAttempt(ScanKind::crash, 1).blacklist);
+    CHECK(std::string(planScanAttempt(ScanKind::crash, 1).reason).find("crashed the scanner") != std::string::npos);
+
+    youhost::ScanObservation quit;
+    quit.workerStarted = true;
+    quit.quitRequested = true;
+    CHECK(classifyScan(quit) == ScanKind::pluginExit);
+    CHECK(! planScanAttempt(ScanKind::pluginExit, 1).retry);
+    CHECK(std::string(planScanAttempt(ScanKind::pluginExit, 1).reason).find("Not marked as a crash") != std::string::npos);
+    CHECK(! storedFailureBlacklists("Scan timed out. Not a crash. It can be scanned again."));
+    CHECK(storedFailureBlacklists("Plugin crashed the scanner"));
+    CHECK(kScanWorkersPerPlugin == 1);
+    CHECK(scanTimeoutMs(false, 0) > 20000);
+
+    CHECK(refuseUnsolicitedQuit(false, false, false));
+    CHECK(! refuseUnsolicitedQuit(true, false, false));
+    CHECK(! refuseUnsolicitedQuit(false, true, false));
+    CHECK(! refuseUnsolicitedQuit(false, false, true));
+
+    std::vector<ProtectedRecord> list;
+    CHECK(proofRequired(list, "ua", "1", false));
+    CHECK(! proofRequired(list, "ua", "1", true));
+    ProtectedRecord recorded { "ua", "1", "crash" };
+    upsertProtected(list, recorded);
+    CHECK(! proofRequired(list, "ua", "1", false));
+    CHECK(proofRequired(list, "ua", "2", false));
+    CHECK(hostingAfterProof(ProofResult::passed) == HostingMode::inProcess);
+    CHECK(hostingAfterProof(ProofResult::timedOut) == HostingMode::inProcess);
+    CHECK(hostingAfterProof(ProofResult::crashed) == HostingMode::protectedMode);
+    CHECK(hostingAfterProof(ProofResult::quit) == HostingMode::protectedMode);
+    CHECK(protectedChannelLatency(0) == 0);
+    CHECK(protectedChannelLatency(1) == 32);
+    CHECK(protectedChannelLatency(3) == 32);
+    const auto saved = writeProtectedList(list);
+    const auto loaded = readProtectedList(saved);
+    CHECK(loaded.size() == 1 && loaded[0].version == "1" && loaded[0].reason == "crash");
+
+    ProtectRing ring;
+    std::uint32_t generation = ring.generation.load();
+    float in[32];
+    float out[32];
+    for (int index = 0; index < 32; ++index)
+        in[index] = 0.5f;
+    auto dead = protectExchange(ring, in, nullptr, out, nullptr, 32, 32, generation, false);
+    CHECK(dead.passedDry == false);
+    CHECK(dead.silenced == 32);
+    for (int index = 0; index < 32; ++index)
+        CHECK(out[index] == 0.0f);
+
+    ring.alive.store(1);
+    protectConsume(ring, 64, [](const float* inL, const float*, float* outL, float*, int count)
+    {
+        for (int index = 0; index < count; ++index)
+            outL[index] = inL[index] * 0.5f;
+    });
+    float in2[32];
+    for (int index = 0; index < 32; ++index)
+        in2[index] = 0.25f;
+    auto live = protectExchange(ring, in2, nullptr, out, nullptr, 32, 32, generation, true);
+    CHECK(live.passedDry == false);
+    CHECK(live.processed == 32);
+    for (int index = 0; index < 32; ++index)
+        CHECK(out[index] == 0.25f);
+
+    SafetyState safety;
+    float dry[8];
+    float rendered[8];
+    for (int index = 0; index < 8; ++index)
+    {
+        dry[index] = 1.0f;
+        rendered[index] = 0.2f;
+    }
+    ring.alive.store(0);
+    std::uint32_t seen = ring.generation.load();
+    auto muted = renderProtectedBlock(ring, safety, dry, nullptr, rendered, nullptr, 8, seen, false, false);
+    CHECK(! muted.passedDry);
+    for (int index = 0; index < 8; ++index)
+        CHECK(rendered[index] == 0.0f);
+    auto bypass = stepChannelSafety(safety, false, false, true, 64);
+    CHECK(bypass.source == SafetySource::dry);
+    CHECK(! bypass.passedUnprocessed);
+
+    StateSnapshotClock clock;
+    noteStateEdit(clock, 1000);
+    CHECK(! stateSnapshotDue(clock, 1000, false));
+    CHECK(! stateSnapshotDue(clock, 3999, false));
+    CHECK(stateSnapshotDue(clock, 4000, false));
+    CHECK(! stateSnapshotDue(clock, 5000, true));
+    noteStateCaptured(clock);
+    CHECK(! stateSnapshotDue(clock, 9000, false));
+
+    CHECK(dropoutGapSuppressedByResize(32, 64));
+    CHECK(! dropoutGapSuppressedByResize(64, 64));
+    CHECK(dropoutGapCount(0, 1000000, 666667, false) == 0);
+
+    SessionDocumentModel model;
+    model.version = kSessionFormatVersion;
+    model.savedWith = "YouHost 1.0.17";
+    SessionChannelRecord channel;
+    channel.index = 0;
+    SessionSlotRecord slot;
+    slot.occupied = true;
+    slot.index = 0;
+    slot.pluginName = "Pro-C 3";
+    slot.protect = true;
+    channel.slots.push_back(slot);
+    model.channels.push_back(channel);
+    const auto written = writeSessionModel(model);
+    SessionDocumentModel round;
+    CHECK(readSessionModel(written, round));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].slots.size() == 1);
+    CHECK(round.channels[0].slots[0].protect);
+    CHECK(round.channels[0].slots[0].pluginName == "Pro-C 3");
+    SessionNode older = written;
+    for (auto& child : older.children)
+        if (child.name == "Channel")
+            for (auto& slotNode : child.children)
+                if (slotNode.name == "Slot")
+                    slotNode.attributes.erase(std::remove_if(slotNode.attributes.begin(), slotNode.attributes.end(),
+                                                             [](const auto& attribute) { return attribute.first == "protect"; }),
+                                              slotNode.attributes.end());
+    SessionDocumentModel legacy;
+    CHECK(readSessionModel(older, legacy));
+    CHECK(! legacy.channels[0].slots[0].protect);
+    SessionNode newer = written;
+    for (auto& child : newer.children)
+        if (child.name == "Channel")
+            for (auto& slotNode : child.children)
+                if (slotNode.name == "Slot")
+                    slotNode.attributes.push_back({ "futureField", "kept" });
+    SessionNode merged = written;
+    mergeSessionNodes(newer, merged);
+    bool keptFuture = false;
+    for (const auto& child : merged.children)
+        if (child.name == "Channel")
+            for (const auto& slotNode : child.children)
+                if (slotNode.name == "Slot" && sessionAttribute(slotNode, "futureField") != nullptr)
+                    keptFuture = true;
+    CHECK(keptFuture);
+    CHECK(knownSessionAttribute("Slot", "protect"));
+    CHECK(! knownSessionAttribute("Slot", "futureField"));
+
+    CHECK(std::string(pluginNoticeTitle(PluginNoticeKind::crashed)) == "PLUGIN CRASHED");
+    CHECK(std::string(pluginRestoredLine()) == "Settings restored. Audio fading back in.");
+    CHECK(std::string(pluginNotRestoredLine()).find("still muted") != std::string::npos);
+    CHECK(pluginProtectedLine("Pro-C 3").find("32 samples") != std::string::npos);
+    CHECK(pluginCrashedLine(2, "Vocal", "Pro-Q 4").find("Restarting plugin") != std::string::npos);
+    const auto details = pluginRestoredDetails(2, "Vocal", "Pro-Q 4", 1.5);
+    CHECK(details.find("PLUGIN RESTORED – DETAILS") != std::string::npos);
+    CHECK(details.find("protect your ears") != std::string::npos);
+    CHECK(details.find("Muted for: 1.5 s") != std::string::npos);
+    CHECK(details.find("kept running") != std::string::npos);
+    CHECK(noticeWhenAudioReturns(false) == PluginNoticeKind::corner);
+    CHECK(pluginNoticeBlinks(PluginNoticeKind::crashed));
+    CHECK(! pluginNoticeBlinks(PluginNoticeKind::notRestored));
+    const auto center = pluginNoticeCenterBox(1920, 1080, PluginNoticeKind::protectedAsk);
+    CHECK(center.w >= 420 && center.h >= 220);
+    const auto corner = pluginNoticeCornerBox(1920, 1080);
+    CHECK(corner.w >= 200 && corner.y > 900);
+    std::cout << "stability 1.0.18 scan, protect, mute, snapshot, session\n";
+}
+
 int main()
 {
+    testStability1018();
     testTimelineScroll();
     testSessionCompatibility();
     testNullTestIsTransparent();

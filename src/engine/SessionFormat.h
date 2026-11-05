@@ -146,7 +146,7 @@ inline bool knownSessionAttribute(std::string_view element, std::string_view att
         return true;
     if (listed("Channel", { "index", "exclude", "record", "listen", "outputDb", "color", "colorOwn", "group", "name", "link" }))
         return true;
-    if (listed("Slot", { "index", "bypass", "fold" }))
+    if (listed("Slot", { "index", "bypass", "fold", "protect" }))
         return true;
     if (listed("Group", { "index", "name", "color", "collapsed" }))
         return true;
@@ -257,6 +257,7 @@ struct SessionSlotRecord
     std::string pluginName;
     std::string state;
     bool occupied = false;
+    bool protect = false;
 };
 
 struct SessionChannelRecord
@@ -413,6 +414,7 @@ inline bool readSessionModel(const SessionNode& root, SessionDocumentModel& mode
             stored.occupied = true;
             stored.index = slotIndex;
             stored.bypassed = sessionAttributeBool(slot, "bypass", false);
+            stored.protect = sessionAttributeBool(slot, "protect", false);
             if (const auto* fold = sessionAttribute(slot, "fold"))
                 stored.fold = *fold;
             if (const auto* pluginName = sessionAttribute(*plugin, "name"))
@@ -565,6 +567,8 @@ inline SessionNode writeSessionModel(const SessionDocumentModel& model)
             slotNode.name = "Slot";
             sessionSetAttribute(slotNode, "index", std::to_string(slot.index));
             sessionSetAttribute(slotNode, "bypass", slot.bypassed ? "1" : "0");
+            if (slot.protect)
+                sessionSetAttribute(slotNode, "protect", "1");
             if (! slot.fold.empty() && slot.fold != "L")
                 sessionSetAttribute(slotNode, "fold", slot.fold);
             SessionNode plugin;

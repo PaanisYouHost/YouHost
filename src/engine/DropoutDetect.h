@@ -28,6 +28,13 @@ inline int64_t dropoutGapToleranceNs(int64_t periodNs)
     return half > kDropoutMinGapToleranceNs ? half : kDropoutMinGapToleranceNs;
 }
 
+// A callback whose length is not the configured buffer is a card or buffer
+// change still settling. Those gaps are the driver restart, not a dropout.
+inline bool dropoutGapSuppressedByResize(int configuredSamples, int callbackSamples) noexcept
+{
+    return configuredSamples > 0 && callbackSamples > 0 && configuredSamples != callbackSamples;
+}
+
 // 1 when this callback started late enough to count as a dropout.
 // The first callback, and the first one after a device restart, pass skipGap.
 // Built-in audio at 32 samples has a short period. A late wakeup counts here
