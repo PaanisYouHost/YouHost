@@ -5347,7 +5347,11 @@ void testReleaseChecklist()
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-05") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Needs real-hardware testing") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Fixes") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") != std::string::npos
+             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("Fixes") != std::string::npos
+             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("Korjaukset") != std::string::npos
+             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("not yet tested") == std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
