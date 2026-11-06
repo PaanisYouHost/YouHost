@@ -4029,7 +4029,7 @@ bool AudioEngine::beginSessionCopy(const juce::File& folder)
         sessionMessage_ = "A copy is already being saved.";
         return false;
     }
-    sessionMessage_ = "Saving a copy…";
+    sessionMessage_ = juce::String(juce::CharPointer_UTF8("Saving a copy\xe2\x80\xa6"));
     return true;
 }
 

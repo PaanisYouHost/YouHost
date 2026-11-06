@@ -1,4 +1,4 @@
-// Paint the SYNC LOST window and fail if Ä, ä, or ö have no glyph.
+// Paint the SYNC LOST window and fail if the English subtitle does not draw.
 // Writes a PNG of the same overlay the app draws.
 
 #include "ui/SyncLostOverlay.h"
@@ -17,38 +17,21 @@ int fail(const std::string& message)
     return 1;
 }
 
-bool glyphFor(const juce::GlyphArrangement& arrangement, juce::juce_wchar character)
-{
-    for (int index = 0; index < arrangement.getNumGlyphs(); ++index)
-    {
-        const auto& glyph = arrangement.getGlyph(index);
-        if (glyph.getCharacter() != character)
-            continue;
-        if (glyph.getGlyphIndex() == 0 || glyph.getRight() - glyph.getLeft() < 0.5f)
-            return false;
-        return true;
-    }
-    return false;
-}
-
 } // namespace
 
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juce;
-    const auto text = youhost::syncLostUtf8(youhost::kSyncLostFinnish);
-    const auto expected = juce::String(juce::CharPointer_UTF8("\xc3\x84\xc3\xa4nikortti kadonnut"));
-    if (text != expected)
-        return fail("Finnish line was not read as UTF-8");
+    const auto text = youhost::syncLostUtf8(youhost::kSyncLostSubtitle);
+    if (text != "Audio card lost")
+        return fail("subtitle was not the English line");
 
     const auto font = youhost::syncLostFont(64.0f);
     std::cout << "sync lost typeface " << font.getTypefaceName() << "\n";
     juce::GlyphArrangement arrangement;
     arrangement.addLineOfText(font, text, 0.0f, font.getAscent());
-    juce::GlyphArrangement extras;
-    extras.addLineOfText(font, youhost::syncLostUtf8("\xc3\xb6"), 0.0f, font.getAscent());
-    if (! glyphFor(arrangement, 0x00C4) || ! glyphFor(arrangement, 0x00E4) || ! glyphFor(extras, 0x00F6))
-        return fail("Ä, ä, or ö has no glyph in " + font.getTypefaceName().toStdString());
+    if (arrangement.getNumGlyphs() < 10)
+        return fail("subtitle produced no glyphs in " + font.getTypefaceName().toStdString());
 
     youhost::SyncLostState state;
     state.deviceLost(22, 10, 4);
@@ -72,9 +55,9 @@ int main(int argc, char** argv)
         }
     }
     if (ink < 200)
-        return fail("Finnish line did not paint");
+        return fail("English subtitle did not paint");
 
-    const auto path = argc > 1 ? std::string(argv[1]) : std::string("/tmp/sync-lost-finnish.png");
+    const auto path = argc > 1 ? std::string(argv[1]) : std::string("/tmp/sync-lost-english.png");
     juce::File file(path);
     file.getParentDirectory().createDirectory();
     juce::FileOutputStream stream(file);

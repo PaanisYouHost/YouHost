@@ -8,8 +8,7 @@ namespace youhost
 {
 
 inline constexpr const char* kSyncLostTitle = "SYNC LOST";
-inline constexpr const char* kSyncLostFinnish = "Äänikortti kadonnut";
-inline constexpr const char* kSyncRestoredFinnish = "Ääni palautettu";
+inline constexpr const char* kSyncLostSubtitle = "Audio card lost";
 
 // Settings may remember a card. Startup does not open it. The user picks one,
 // or a session file names one.
@@ -301,7 +300,7 @@ inline SyncOverlayText syncOverlayText(const SyncLostState& state)
         text.visible = true;
         text.lost = true;
         text.primary = kSyncLostTitle;
-        text.secondary = kSyncLostFinnish;
+        text.secondary = kSyncLostSubtitle;
         return text;
     }
     if (state.showRestored())

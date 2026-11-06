@@ -4794,7 +4794,7 @@ void testReleaseChecklist()
     const bool alarmOn = sync.showAlarm() && sync.keepReattaching() && sync.isMissing()
                          && lostText.visible && lostText.lost
                          && lostText.primary == youhost::kSyncLostTitle
-                         && lostText.secondary == youhost::kSyncLostFinnish
+                         && lostText.secondary == youhost::kSyncLostSubtitle
                          && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::center;
     sync.acknowledge();
     const bool closedWhileLost = ! sync.showAlarm() && ! sync.isMissing() && sync.suppressLoss()
@@ -4941,12 +4941,11 @@ void testReleaseChecklist()
              && ! youhost::syncOverlayText(sync).visible
              && youhost::syncLostBlink(0)
              && ! youhost::syncLostBlink(400)
-             && std::string(youhost::kSyncLostFinnish) == "Äänikortti kadonnut"
-             && static_cast<unsigned char>(youhost::kSyncLostFinnish[0]) == 0xC3
-             && static_cast<unsigned char>(youhost::kSyncLostFinnish[1]) == 0x84
-             && syncHeader.find("Äänikortti kadonnut") != std::string::npos
+             && std::string(youhost::kSyncLostSubtitle) == "Audio card lost"
+             && syncHeader.find("Audio card lost") != std::string::npos
+             && syncHeader.find("Äänikortti") == std::string::npos
              && overlayUi.find("CharPointer_UTF8") != std::string::npos
-             && overlayUi.find("syncLostUtf8(kSyncLostFinnish)") != std::string::npos
+             && overlayUi.find("syncLostUtf8(kSyncLostSubtitle)") != std::string::npos
              && overlayUi.find("DejaVu Sans") != std::string::npos
              && overlayUi.find("setOpaque(true)") != std::string::npos
              && overlayUi.find("place_ != SyncLostChrome::corner") != std::string::npos
@@ -5327,6 +5326,7 @@ void testReleaseChecklist()
              && checklistDoc.find("Before a gig") != std::string::npos);
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
+    const auto notes1018 = readWorkspaceFile("YouHost-1.0.18-muutokset.txt");
     item("Version label",
          std::string(youhost::versionLabel()) == "YouHost 1.0.18"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
@@ -5348,11 +5348,16 @@ void testReleaseChecklist()
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-05") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Fixes") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") != std::string::npos
-             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("Fixes") != std::string::npos
-             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("Korjaukset") != std::string::npos
-             && readWorkspaceFile("YouHost-1.0.18-muutokset.txt").find("not yet tested") == std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") == std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") == std::string::npos
+             && notes1018.size() >= 3
+             && static_cast<unsigned char>(notes1018[0]) == 0xEF
+             && static_cast<unsigned char>(notes1018[1]) == 0xBB
+             && static_cast<unsigned char>(notes1018[2]) == 0xBF
+             && notes1018.find("Fixes") != std::string::npos
+             && notes1018.find("Korjaukset") == std::string::npos
+             && notes1018.find("not yet tested") == std::string::npos
+             && notes1018.find("build for testing") == std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     int coldCalls = 0;

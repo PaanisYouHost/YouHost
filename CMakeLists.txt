@@ -100,7 +100,7 @@ target_compile_options(YouHostTests PRIVATE -UNDEBUG)
 enable_testing()
 add_test(NAME YouHostTests COMMAND YouHostTests)
 
-# Paints SYNC LOST and fails if the Finnish line has no Ä/ä/ö glyph.
+# Paints SYNC LOST and fails if the English subtitle does not draw.
 add_executable(YouHostSyncLostGlyphs tests/sync_lost_glyphs.cpp)
 target_include_directories(YouHostSyncLostGlyphs PRIVATE src)
 target_compile_features(YouHostSyncLostGlyphs PRIVATE cxx_std_20)

@@ -218,35 +218,20 @@ jobs:
           prerelease: false
           make_latest: false
           body: |
+            YouHost 1.0.18
             2026-11-05
 
-            YouHost 1.0.18
-
             Fixes
-            - A quit the user did not request is logged and refused. The close button, the Quit menu, and Command-Q still quit.
-            - Plugin editors open on the message thread. An Audio Unit view that arrives on another thread is attached on the message thread.
-            - The scanner separates timeouts from crashes, scans one plugin per process, and retries once before a blacklist. A timeout is not blacklisted.
-            - The plugin list and the audio-card open run off the message thread.
-            - A callback whose length does not match the configured buffer is not counted as a dropout.
-            - Plugin protected mode added. Only a plugin that crashes or quits runs in a helper, with 32 samples of extra latency on that channel.
-            - A protected-plugin crash mutes that channel, does not pass unprocessed audio, restarts the plugin, and fades the audio back in. OK only closes the notice.
-            - Plugin state is snapshotted off the audio thread a few seconds after parameter changes.
-            - Notices added: PLUGIN CRASHED, PLUGIN RESTORED, PLUGIN NOT RESTORED, and PLUGIN PROTECTED.
-            - Session files stay format 7. Open session without this plugin still leaves a crashed plugin out of this launch.
-
-            Korjaukset
-            - Lopetus, jota käyttäjä ei pyytänyt, kirjataan ja estetään.
-            - Plugin-ikkunat avataan viestisäikeellä.
-            - Skanneri erottaa aikakatkaisun kaatumisesta ja yrittää kerran uudelleen ennen estolistaa.
-            - Pluginlista ja äänikortin avaus tehdään pois pääsäikeeltä.
-            - Väärä puskuripituus ei ole dropout.
-            - Pluginin suojaustila lisätty. Vain kaatuminen tai lopetus vie apuprosessiin, lisäviive 32 näytettä sillä kanavalla.
-            - Suojatun pluginin kaatuminen mykistää kanavan, ei päästä käsittelemätöntä ääntä läpi, käynnistää pluginin uudelleen ja feidaa äänen takaisin.
-            - Pluginin tila otetaan talteen pois audiosäikeeltä.
-            - Ilmoitukset lisätty: PLUGIN CRASHED, PLUGIN RESTORED, PLUGIN NOT RESTORED ja PLUGIN PROTECTED.
-            - Sessiot pysyvät muodossa 7.
-
-            Tested by automated tests: scan timeouts are not stored as crashes, a failed scan is tried once more before it is blocked, protected mode is chosen only after a crash or a quit, a dead plugin channel outputs silence rather than the dry input, a state snapshot waits a few seconds and does not run on the audio thread, and a session with a protect field still opens.
+            - Unsolicited quit is logged and refused
+            - Plugin editors open on the message thread
+            - Scanner separates timeouts from crashes and retries once
+            - Plugin list and card open run off the message thread
+            - Buffer-size changes are not counted as dropouts
+            - Protected mode for plugins that crash or quit, 32 samples on that channel
+            - A protected crash mutes the channel, restarts the plugin, and fades audio back
+            - Plugin state is snapshotted off the audio thread
+            - Notices for crash, restored, not restored, and protected
+            - Session format stays 7, with an optional protect field
 
           # Phrases the engine checklist still looks up in this file.
           # Open session without this plugin
