@@ -16,6 +16,7 @@
 #include "engine/AudioSetupMenus.h"
 #include "engine/SessionChannels.h"
 #include "engine/SessionNames.h"
+#include "engine/QuitPolicy.h"
 #include "engine/Shortcuts.h"
 #include "engine/StatusLine.h"
 #include "engine/VersionLabel.h"
@@ -1415,6 +1416,8 @@ MainComponent::MainComponent(AudioEngine& engine, AppSettings& settings)
         refresh();
     };
     addChildComponent(syncOverlay_);
+    pluginNotice_.onAction = [this](int action) { engine_.respondPluginNotice(action); };
+    addChildComponent(pluginNotice_);
     addChildComponent(syncDialog_);
 
     prevButton_.setTooltip("Previous take (Left).");
@@ -1930,6 +1933,17 @@ void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
 
 void MainComponent::requestApplicationQuit(std::function<void()> quit)
 {
+    // The start screen has no session. Command-Q leaves immediately.
+    // A session with unsaved changes still asks. Recording still blocks.
+    if (! commandQuitPromptsForUnsaved(engine_.hasSession(), engine_.isSessionDirty()))
+    {
+        if (! engine_.hasSession())
+        {
+            if (quit)
+                quit();
+            return;
+        }
+    }
     runAfterUnsavedCheck(std::move(quit));
 }
 
@@ -2965,6 +2979,8 @@ void MainComponent::timerCallback()
         engine_.sampleLiveCpu();
         if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))
             engine_.pollDeviceStats();
+        // A locked card still has to notice when SoundGrid's channel list grows.
+        engine_.recheckOpenChannels();
         engine_.maintainSession();
     }
     syncCopyProgress();
@@ -3030,6 +3046,7 @@ void MainComponent::publishMeters(bool repaintLevels)
             cell.color = engine_.channelColor(item.channel);
             cell.selected = engine_.isChannelSelected(item.channel);
             cell.title = engine_.channelName(item.channel);
+            cell.shield = engine_.channelProtected(item.channel);
             cell.reading.rms = engine_.rmsFor(item.channel);
             cell.reading.peak = engine_.peakFor(item.channel);
             cell.reading.clipped = engine_.clipFor(item.channel);
@@ -3195,6 +3212,17 @@ void MainComponent::refresh()
     }
     if (syncOverlay_.place() == SyncLostChrome::corner && ! syncDialog_.isVisible())
         syncOverlay_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
+    engine_.pluginCatalogue().startIfEmpty();
+    const auto& pluginState = engine_.pluginNotice();
+    if (pluginNotice_.sync(pluginState))
+    {
+        const bool show = pluginState.kind != PluginNoticeKind::none;
+        pluginNotice_.setVisible(show);
+        if (show)
+            placePluginNotice();
+    }
+    if (pluginNoticeBlinks(pluginState.kind))
+        pluginNotice_.setBlinkPhase(syncLostBlink(juce::Time::getMillisecondCounter()));
     if (syncDialog_.isVisible())
     {
         if (syncOverlay_.place() == SyncLostChrome::hidden)
@@ -3506,9 +3534,20 @@ void MainComponent::resized()
     }
     if (syncOverlay_.isVisible())
         placeSyncOverlay();
+    if (pluginNotice_.isVisible())
+        placePluginNotice();
     if (syncDialog_.isVisible())
         placeSyncDialog();
     repaint();
+}
+
+void MainComponent::placePluginNotice()
+{
+    const auto kind = pluginNotice_.kind();
+    const bool details = pluginNotice_.detailsOpen() || pluginNotice_.model().detailsOpen;
+    const auto box = pluginNoticeBox(getWidth(), getHeight(), kind, details);
+    pluginNotice_.setBounds(box.x, box.y, box.w, box.h);
+    pluginNotice_.toFront(false);
 }
 
 void MainComponent::placeSyncOverlay()

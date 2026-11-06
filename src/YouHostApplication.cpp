@@ -1,6 +1,9 @@
 #include "YouHostApplication.h"
 #include "engine/PluginFault.h"
 #include "engine/CrashJournal.h"
+#include "engine/HostLog.h"
+#include "engine/QuitGuard.h"
+#include "engine/PluginBridge.h"
 #include "engine/VersionLabel.h"
 #include "engine/PluginCatalogue.h"
 #include "ui/MainComponent.h"
@@ -37,6 +40,7 @@ public:
 
     void closeButtonPressed() override
     {
+        armUserQuit();
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
     }
 
@@ -66,13 +70,20 @@ bool YouHostApplication::moreThanOneInstanceAllowed()
     // guard runs before initialise, so the child has to be allowed through.
     const auto arguments = juce::JUCEApplicationBase::getCommandLineParameterArray();
     for (const auto& argument : arguments)
-        if (argument.contains("YouHostScan:"))
+        if (argument.contains("YouHostScan:") || argument.contains("YouHostProtect:"))
             return true;
     return false;
 }
 
 void YouHostApplication::initialise(const juce::String& commandLine)
 {
+    if (isProtectWorkerCommandLine(commandLine))
+    {
+        runProtectWorker(commandLine);
+        workerMode_ = true;
+        return;
+    }
+
     if (isScanWorkerCommandLine(commandLine))
     {
         worker_ = std::make_unique<ScanWorker>();
@@ -85,6 +96,8 @@ void YouHostApplication::initialise(const juce::String& commandLine)
     lookAndFeel_ = std::make_unique<YouHostLookAndFeel>();
     juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel_.get());
     settings_ = std::make_unique<AppSettings>();
+    noteQuitLogPath(hostLogFile(*settings_).getFullPathName().toRawUTF8());
+    installCommandQuitMonitor();
     engine_ = std::make_unique<AudioEngine>(*settings_);
 
     juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
@@ -152,6 +165,13 @@ void YouHostApplication::anotherInstanceStarted(const juce::String&)
 
 void YouHostApplication::systemRequestedQuit()
 {
+    if (shouldRefuseQuitRequest())
+    {
+        if (settings_ != nullptr)
+            appendHostLog(*settings_, "quit refused: not requested by the user");
+        return;
+    }
+
     if (mainWindow_ != nullptr)
     {
         if (auto* main = dynamic_cast<MainComponent*>(mainWindow_->getContentComponent()))

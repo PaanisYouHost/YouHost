@@ -1,0 +1,14 @@
+﻿YouHost 1.0.19
+2026-11-06
+
+Korjaukset
+- SoundGrid: kaikki kanavat aukeavat (ei enää 1 kanava)
+- Command-Q sulkee ohjelman myös aloitusruudussa
+- Äänikortin avaus ei jumita ruutua
+- SYNC LOST -teksti on englanniksi: Audio card lost
+
+Fixes
+- SoundGrid opens every channel (no longer one channel)
+- Command-Q quits from the start screen too
+- Opening the audio card does not freeze the screen
+- The SYNC LOST subtitle is Audio card lost

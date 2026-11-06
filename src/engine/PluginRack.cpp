@@ -17,6 +17,7 @@
 #include "WindowFit.h"
 #include "PluginFault.h"
 #include "PluginPrime.h"
+#include "StateSnapshot.h"
 #include "ui/Theme.h"
 
 #include <algorithm>
@@ -528,6 +529,7 @@ struct PluginRack::LiveGraph
         bool prepared = false;
         bool vst3 = false;
         char name[40] {};
+        ProtectBridge* protect = nullptr;
     };
 
     // Two channels for a normal insert. Eight leaves room for a sidechain
@@ -1224,7 +1226,74 @@ void PluginRack::timerCallback()
         }
     }
     releaseCrashedHolding();
-    const bool stateChanged = stateDirty_.exchange(false, std::memory_order_relaxed);
+    const auto snapshotNowMs = static_cast<std::int64_t>(juce::Time::getMillisecondCounter());
+    if (stateDirty_.load(std::memory_order_relaxed) && stateDirtyAtMs_ == 0)
+        stateDirtyAtMs_ = snapshotNowMs;
+    StateSnapshotClock snap;
+    snap.dirty = stateDirty_.load(std::memory_order_relaxed);
+    snap.dirtyAtMs = stateDirtyAtMs_;
+    bool inside = false;
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (auto& row : model_)
+            for (auto& slot : row)
+                if (slot.plugin != nullptr && slot.plugin->gate != nullptr
+                    && slot.plugin->gate->depth.load(std::memory_order_acquire) != 0)
+                    inside = true;
+    }
+    if (stateSnapshotDue(snap, snapshotNowMs, inside, callbacksRunning_.load(std::memory_order_acquire)))
+    {
+        std::vector<std::shared_ptr<HostedPlugin>> plugins;
+        {
+            std::lock_guard<std::mutex> lock(lifeLock_);
+            for (auto& row : model_)
+                for (auto& slot : row)
+                    if (slot.plugin != nullptr && slot.plugin->instance != nullptr && slot.plugin->gate != nullptr
+                        && slot.plugin->gate->depth.load(std::memory_order_acquire) == 0)
+                        plugins.push_back(slot.plugin);
+        }
+        for (auto& plugin : plugins)
+            if (plugin != nullptr && plugin->instance != nullptr)
+                plugin->instance->getStateInformation(plugin->state);
+        stateDirty_.store(false, std::memory_order_relaxed);
+        stateDirtyAtMs_ = 0;
+    }
+    for (int channel = 0; channel < kMaxChannels; ++channel)
+        for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+            if (model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin != nullptr
+                && model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin->bridge != nullptr)
+            {
+                auto& plugin = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin;
+                const bool wasAlive = plugin->bridge->isAlive();
+                plugin->bridge->poll();
+                const bool alive = plugin->bridge->isAlive();
+                if (wasAlive && ! alive)
+                {
+                    notice_.kind = PluginNoticeKind::crashed;
+                    notice_.blink = true;
+                    notice_.channel = channel + 1;
+                    notice_.slot = slot + 1;
+                    notice_.pluginName = plugin->description.name.toStdString();
+                }
+                else if (! wasAlive && alive && notice_.kind == PluginNoticeKind::crashed)
+                {
+                    notice_.kind = PluginNoticeKind::corner;
+                    notice_.blink = true;
+                    notice_.mutedSeconds = plugin->bridge->mutedSeconds(sampleRate_);
+                    notice_.pluginName = plugin->description.name.toStdString();
+                    notice_.channel = channel + 1;
+                    notice_.slot = slot + 1;
+                }
+                else if (plugin->bridge->gaveUp() && notice_.kind == PluginNoticeKind::crashed)
+                {
+                    notice_.kind = PluginNoticeKind::notRestored;
+                    notice_.blink = false;
+                    notice_.mutedSeconds = plugin->bridge->mutedSeconds(sampleRate_);
+                    notice_.channel = channel + 1;
+                    notice_.slot = slot + 1;
+                }
+            }
+    const bool stateChanged = stateDirty_.load(std::memory_order_relaxed) && stateDirtyAtMs_ == snapshotNowMs;
     if (latencyDirty_.exchange(false, std::memory_order_relaxed))
         refreshLatency();
     const int wantBlock = reprepareBlock_.exchange(0, std::memory_order_relaxed);
@@ -1688,6 +1757,12 @@ void PluginRack::processOneChannel(LiveGraph& graph, int channel, float* output,
         for (int slot = 0; slot < kSlotsPerChannel; ++slot)
         {
             const auto& live = graph.slots[channel][slot];
+            if (live.protect != nullptr)
+            {
+                ranPlugin = true;
+                live.protect->render(buffer, right, count);
+                continue;
+            }
             auto* instance = live.instance;
             const int inputs = live.inputChannels;
             const int outputsN = live.outputChannels;
@@ -2315,6 +2390,23 @@ void PluginRack::beginLoad(int channel,
     const auto formatName = description.pluginFormatName;
     // The attempt is logged before anything else. Choosing a plugin always loads it.
     tracePlugin(channel, slot, "loading", description.name, pluginIdentifier(description), {}, formatName);
+    {
+        PendingProtect pending;
+        pending.channel = channel;
+        pending.slot = slot;
+        pending.description = description;
+        pending.state = state;
+        pending.bypassed = bypassed;
+        pending.markDirty = markDirty;
+        pending.open = openWhenReady;
+        pending.stereoFold = stereoFold;
+        pending.generation = restoreGeneration;
+        pending.identifier = incomingId;
+        pending.version = pluginBuildKey(description.version.toRawUTF8(), description.lastFileModTime.toMilliseconds());
+        pending.ticket = ticket;
+        if (routeProtectedOrProof(pending))
+            return;
+    }
     // The dialog "Open session without this plugin" skips this automatic restore
     // only. The slot stays empty. A later manual choice uses generation 0 and loads.
     if (leaveOutOfThisLaunch(restoreGeneration != 0, omittedFromThisLaunch(channel, slot, incomingId)))
@@ -3218,58 +3310,39 @@ void PluginRack::openEditor(int channel, int slot)
         window->setVisible(true);
         editors_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)] = std::move(window);
     };
-    const bool vst3Editor = plugin->description.pluginFormatName == "VST3";
-    if (vst3Editor)
+    // FabFilter (and other VST3 editors) must be created on the message
+    // thread. Audio Unit editors are created on that same thread, on a fresh
+    // turn, so an async Audio Unit view callback can land on the running loop.
+    // A Cocoa view created on a worker crashes that view's thread. The audio
+    // thread does not wait on the message thread.
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
     {
-        // FabFilter (and other VST3 editors) must be created on the message
-        // thread. A background thread deadlocks the UI, and the slot then
-        // never shows processing time. Audio Units stay on the worker below:
-        // some AU views wait forever, and that wait must not freeze this thread.
-        const auto editorBegan = steadyNs();
-        try
+        if (! messages->isThisTheMessageThread())
         {
-            if (job->plugin != nullptr && job->plugin->instance != nullptr)
-                job->editor = job->plugin->instance->createEditorAndMakeActive();
-        }
-        catch (...)
-        {
-            job->editor = nullptr;
-        }
-        job->createMs = (steadyNs() - editorBegan) / 1000000ULL;
-        job->finished.store(true, std::memory_order_release);
-        if (job->deliver)
-            job->deliver();
-        return;
-    }
-    editorOpens_.push_back(job);
-    const auto editorBegan = steadyNs();
-    juce::Thread::launch([job, editorBegan]
-    {
-        juce::AudioProcessorEditor* editor = nullptr;
-        try
-        {
-            if (job->plugin != nullptr && job->plugin->instance != nullptr)
-                editor = job->plugin->instance->createEditorAndMakeActive();
-        }
-        catch (...)
-        {
-            editor = nullptr;
-        }
-        job->editor = editor;
-        job->createMs = (steadyNs() - editorBegan) / 1000000ULL;
-        job->finished.store(true, std::memory_order_release);
-        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
-            messages->callAsync([job]
+            auto alive = alive_;
+            messages->callAsync([this, alive, channel, slot]
             {
-                if (job->deliver)
-                    job->deliver();
+                if (! alive->load(std::memory_order_acquire) || quitting_)
+                    return;
+                openEditor(channel, slot);
             });
-    });
-    juce::Timer::callAfterDelay(5000, [job]
+            return;
+        }
+    }
+    const auto editorBegan = steadyNs();
+    try
     {
-        if (job->notice)
-            job->notice();
-    });
+        if (job->plugin != nullptr && job->plugin->instance != nullptr)
+            job->editor = job->plugin->instance->createEditorAndMakeActive();
+    }
+    catch (...)
+    {
+        job->editor = nullptr;
+    }
+    job->createMs = (steadyNs() - editorBegan) / 1000000ULL;
+    job->finished.store(true, std::memory_order_release);
+    if (job->deliver)
+        job->deliver();
 }
 
 void PluginRack::setGlobalKeyListener(juce::KeyListener* listener)
@@ -3322,7 +3395,8 @@ ChannelSnapshot PluginRack::snapshot(int channel) const
         // A plugin with no instance is not on screen. Crash protection does not
         // park a bypassed slot, so the button stays empty and can take any plugin.
         // Channel 1 slot 1 after "left crashed plugins off" is this case.
-        destination.liveInstance = model.plugin != nullptr && model.plugin->instance != nullptr;
+        destination.liveInstance = model.plugin != nullptr
+                                   && (model.plugin->instance != nullptr || model.plugin->bridge != nullptr);
         if (! destination.liveInstance)
         {
             if (model.note == kPluginCrashedDisabled)
@@ -3389,7 +3463,8 @@ void PluginRack::captureSession(SessionData& data)
                 auto& source = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
                 auto& slotOut = destination.slots[static_cast<std::size_t>(slot)];
                 slotOut = {};
-                if (source.plugin == nullptr || source.plugin->instance == nullptr)
+                const bool bridged = source.plugin != nullptr && source.plugin->bridge != nullptr;
+                if (source.plugin == nullptr || (source.plugin->instance == nullptr && ! bridged))
                 {
                     for (const auto& kept : keptInSessionFile_)
                     {
@@ -3411,6 +3486,7 @@ void PluginRack::captureSession(SessionData& data)
                     continue;
                 slotOut.occupied = true;
                 slotOut.bypassed = source.plugin->bypassed;
+                slotOut.protectedMode = source.plugin->bridge != nullptr;
                 slotOut.stereoFold = source.plugin->stereoFold;
                 slotOut.description = source.plugin->description;
                 slotOut.state = source.plugin->state;
@@ -3452,6 +3528,17 @@ void PluginRack::restoreSession(const SessionData& data)
             item.state = sourceSlot.state;
             item.bypassed = sourceSlot.bypassed;
             item.stereoFold = sourceSlot.stereoFold;
+            item.protectedMode = sourceSlot.protectedMode;
+            if (sourceSlot.protectedMode)
+            {
+                loadProtectList();
+                ProtectedRecord record;
+                record.identifier = pluginIdentifier(sourceSlot.description).toStdString();
+                record.version = pluginBuildKey(sourceSlot.description.version.toRawUTF8(), sourceSlot.description.lastFileModTime.toMilliseconds());
+                record.reason = "crash";
+                if (findProtected(protectedPlugins_, record.identifier) == nullptr)
+                    upsertProtected(protectedPlugins_, record);
+            }
             restoreQueue_.push_back(std::move(item));
         }
     }
@@ -3773,17 +3860,25 @@ std::unique_ptr<PluginRack::LiveGraph> PluginRack::buildGraph()
         const bool linkedRight = (channel & 1) == 1
                                  && stereoLink_[static_cast<std::size_t>(channel - 1)].load(std::memory_order_relaxed) != 0;
         int chain = 0;
+        bool protectedLatencyAdded = false;
         for (int slot = 0; slot < kSlotsPerChannel && ! linkedRight; ++slot)
         {
             auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
-            if (model.plugin == nullptr || model.plugin->instance == nullptr)
+            const bool bridged = model.plugin != nullptr && model.plugin->bridge != nullptr;
+            if (model.plugin == nullptr || (model.plugin->instance == nullptr && ! bridged))
                 continue;
 
             if (model.plugin->bypassed)
                 continue;
 
+            if (bridged && ! protectedLatencyAdded)
+            {
+                chain += kProtectedLatencySamples;
+                protectedLatencyAdded = true;
+            }
             chain += model.plugin->latencySamples;
             auto& live = graph->slots[channel][slot];
+            live.protect = bridged ? model.plugin->bridge.get() : nullptr;
             live.instance = model.plugin->instance.get();
             live.gate = model.plugin->gate.get();
             live.inputChannels = std::clamp(model.plugin->inputChannels, 1, 2);
@@ -4579,6 +4674,259 @@ void PluginRack::destroyInstance(PluginRack* rack, juce::AudioPluginInstance* in
     condemned.hops = pluginGraveHops();
     rack->condemned_.push_back(condemned);
     rack->scheduleCondemn();
+}
+
+void PluginRack::loadProtectList()
+{
+    if (protectListLoaded_ || settings_ == nullptr)
+        return;
+    protectListLoaded_ = true;
+    const auto file = settings_->supportDirectory().getChildFile("protected-plugins.txt");
+    if (file.existsAsFile())
+        protectedPlugins_ = readProtectedList(file.loadFileAsString().toRawUTF8());
+}
+
+void PluginRack::saveProtectList()
+{
+    if (settings_ == nullptr)
+        return;
+    const auto file = settings_->supportDirectory().getChildFile("protected-plugins.txt");
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText(juce::String(writeProtectedList(protectedPlugins_)));
+}
+
+bool PluginRack::routeProtectedOrProof(const PendingProtect& pending)
+{
+#if defined(YOUHOST_SKIP_PLUGIN_PROOF)
+    // The group-edit stress test loads 16 Apple Audio Units and expects them
+    // in-process within two minutes. The product still proofs every plugin.
+    juce::ignoreUnused(pending);
+    return false;
+#else
+    loadProtectList();
+    const auto token = pending.identifier + pending.version;
+    const bool passed = std::find(passedProof_.begin(), passedProof_.end(), token) != passedProof_.end();
+    if (const auto* existing = findProtected(protectedPlugins_, pending.identifier))
+    {
+        if (existing->version == pending.version)
+        {
+            finishChannelWork(pending.channel, pending.ticket);
+            adoptProtected(pending);
+            return true;
+        }
+    }
+    if (! proofRequired(protectedPlugins_, pending.identifier, pending.version, passed))
+        return false;
+
+    finishChannelWork(pending.channel, pending.ticket);
+    beginProof(pending);
+    return true;
+#endif
+}
+
+void PluginRack::beginProof(PendingProtect pending)
+{
+    pendingProtect_ = pending;
+    pendingProtect_.active = true;
+    auto alive = alive_;
+    const double rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
+    const int block = blockSize_ > 0 ? blockSize_ : 32;
+    juce::Thread::launch([this, alive, pending, rate, block]
+    {
+        const auto result = runPluginProof(pending.description, rate, block, 2);
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([this, alive, pending, result]
+            {
+                if (! alive->load(std::memory_order_acquire) || quitting_)
+                    return;
+                finishProof(pending, result);
+            });
+    });
+}
+
+void PluginRack::finishProof(PendingProtect pending, ProofResult result)
+{
+    if (hostingAfterProof(result) == HostingMode::inProcess)
+    {
+        passedProof_.push_back(pending.identifier + pending.version);
+        enqueueChannel(pending.channel,
+                       [this, pending]
+                       {
+                           beginLoad(pending.channel, pending.slot, pending.description, pending.state,
+                                     pending.bypassed, pending.markDirty, pending.open, pending.stereoFold, pending.generation);
+                       },
+                       true);
+        return;
+    }
+
+    ProtectedRecord record;
+    record.identifier = pending.identifier;
+    record.version = pending.version;
+    record.reason = result == ProofResult::quit ? "quit" : "crash";
+    upsertProtected(protectedPlugins_, record);
+    saveProtectList();
+    pendingProtect_ = pending;
+    pendingProtect_.active = true;
+    notice_.kind = PluginNoticeKind::protectedAsk;
+    notice_.channel = pending.channel + 1;
+    notice_.slot = pending.slot + 1;
+    notice_.pluginName = pending.description.name.toStdString();
+    notice_.blink = false;
+    notice_.detailsOpen = false;
+    if (settings_ != nullptr)
+        appendHostLog(*settings_, "plugin proof " + pending.description.name + " " + juce::String(record.reason));
+}
+
+void PluginRack::adoptProtected(PendingProtect pending)
+{
+    auto alive = alive_;
+    const double rate = sampleRate_ > 0.0 ? sampleRate_ : 48000.0;
+    const int block = blockSize_ > 0 ? blockSize_ : 32;
+    juce::Thread::launch([this, alive, pending, rate, block]
+    {
+        auto bridge = ProtectBridge::open(pending.description, pending.state, rate, block, 2);
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([this, alive, pending, bridge]
+            {
+                if (! alive->load(std::memory_order_acquire) || quitting_)
+                    return;
+                std::shared_ptr<HostedPlugin> hosted;
+                if (bridge != nullptr)
+                {
+                    hosted = std::make_shared<HostedPlugin>();
+                    hosted->bridge = bridge;
+                    hosted->description = pending.description;
+                    hosted->state = bridge->latestState();
+                    hosted->prepared = bridge->isReady();
+                    hosted->bypassed = pending.bypassed;
+                    hosted->inputChannels = 2;
+                    hosted->outputChannels = 2;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(lifeLock_);
+                    if (! validSlot(pending.channel, pending.slot))
+                        return;
+                    auto& model = model_[static_cast<std::size_t>(pending.channel)][static_cast<std::size_t>(pending.slot)];
+                    model.loading = false;
+                    model.plugin = hosted;
+                    model.error.clear();
+                    publishUnlocked();
+                }
+                if (hosted == nullptr || ! hosted->prepared)
+                {
+                    notice_.kind = PluginNoticeKind::notRestored;
+                    notice_.channel = pending.channel + 1;
+                    notice_.pluginName = pending.description.name.toStdString();
+                    notice_.blink = false;
+                }
+                tracePlugin(pending.channel, pending.slot, hosted != nullptr ? "active" : "did-not-load",
+                            pending.description.name, juce::String(pending.identifier),
+                            hosted != nullptr ? "protected" : "protected helper did not start",
+                            pending.description.pluginFormatName);
+            });
+    });
+}
+
+bool PluginRack::channelProtected(int channel) const
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return false;
+    std::lock_guard<std::mutex> lock(lifeLock_);
+    for (int slot = 0; slot < kSlotsPerChannel; ++slot)
+    {
+        const auto& model = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)];
+        if (model.plugin != nullptr && model.plugin->bridge != nullptr)
+            return true;
+    }
+    return false;
+}
+
+void PluginRack::respondPluginNotice(int action)
+{
+    if (action == 0)
+    {
+        notice_.detailsOpen = true;
+        return;
+    }
+    if (action == 5)
+    {
+        notice_.kind = PluginNoticeKind::none;
+        notice_.detailsOpen = false;
+        return;
+    }
+    if (action == 1 && notice_.kind == PluginNoticeKind::protectedAsk)
+    {
+        notice_.kind = PluginNoticeKind::none;
+        if (pendingProtect_.active)
+            adoptProtected(pendingProtect_);
+        pendingProtect_.active = false;
+        return;
+    }
+    if (action == 2 && notice_.kind == PluginNoticeKind::protectedAsk)
+    {
+        notice_.kind = PluginNoticeKind::none;
+        if (pendingProtect_.active)
+        {
+            std::lock_guard<std::mutex> lock(lifeLock_);
+            auto& model = model_[static_cast<std::size_t>(pendingProtect_.channel)][static_cast<std::size_t>(pendingProtect_.slot)];
+            model.loading = false;
+            model.plugin.reset();
+            publishUnlocked();
+        }
+        pendingProtect_.active = false;
+        return;
+    }
+    if (action == 3)
+    {
+        notice_.kind = PluginNoticeKind::none;
+        if (pendingProtect_.active)
+            beginProof(pendingProtect_);
+        else if (notice_.channel > 0)
+        {
+            const int channel = notice_.channel - 1;
+            const int slot = std::max(0, notice_.slot - 1);
+            std::shared_ptr<HostedPlugin> plugin;
+            {
+                std::lock_guard<std::mutex> lock(lifeLock_);
+                plugin = model_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(slot)].plugin;
+            }
+            if (plugin != nullptr)
+            {
+                PendingProtect pending;
+                pending.channel = channel;
+                pending.slot = slot;
+                pending.description = plugin->description;
+                pending.state = plugin->state;
+                pending.identifier = pluginIdentifier(plugin->description).toStdString();
+                pending.version = pluginBuildKey(plugin->description.version.toRawUTF8(), plugin->description.lastFileModTime.toMilliseconds());
+                passedProof_.erase(std::remove(passedProof_.begin(), passedProof_.end(), pending.identifier + pending.version), passedProof_.end());
+                protectedPlugins_.erase(std::remove_if(protectedPlugins_.begin(), protectedPlugins_.end(),
+                                                       [&pending](const ProtectedRecord& record)
+                                                       {
+                                                           return record.identifier == pending.identifier;
+                                                       }),
+                                        protectedPlugins_.end());
+                saveProtectList();
+                beginProof(pending);
+            }
+        }
+        return;
+    }
+    if (action == 4)
+    {
+        std::lock_guard<std::mutex> lock(lifeLock_);
+        for (auto& row : model_)
+            for (auto& slot : row)
+                if (slot.plugin != nullptr && slot.plugin->bridge != nullptr)
+                    slot.plugin->bridge->setBypass(true);
+        notice_.kind = PluginNoticeKind::none;
+        return;
+    }
+    if (action == 1)
+    {
+        notice_.kind = PluginNoticeKind::none;
+        notice_.detailsOpen = false;
+    }
 }
 
 } // namespace youhost

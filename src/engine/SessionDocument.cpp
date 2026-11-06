@@ -181,6 +181,8 @@ bool writeSessionFile(const juce::File& file, const SessionData& data)
             auto* slotElement = element->createNewChildElement("Slot");
             slotElement->setAttribute("index", slot);
             slotElement->setAttribute("bypass", sourceSlot.bypassed);
+            if (sourceSlot.protectedMode)
+                slotElement->setAttribute("protect", true);
             if (sourceSlot.stereoFold != 0)
                 slotElement->setAttribute("fold", stereoFoldToken(stereoFoldFromInt(sourceSlot.stereoFold)));
             if (addPlugin(*slotElement, sourceSlot) == nullptr)
@@ -334,6 +336,7 @@ bool readSessionFile(const juce::File& file, SessionData& data)
 
             destinationSlot.occupied = true;
             destinationSlot.bypassed = slot->getBoolAttribute("bypass", false);
+            destinationSlot.protectedMode = slot->getBoolAttribute("protect", false);
             destinationSlot.stereoFold = static_cast<int>(stereoFoldFromToken(slot->getStringAttribute("fold", "L").toRawUTF8()));
             if (auto* state = slot->getChildByName("State"))
                 destinationSlot.state.fromBase64Encoding(state->getStringAttribute("data"));

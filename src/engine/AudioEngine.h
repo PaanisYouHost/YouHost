@@ -18,12 +18,16 @@
 #include "SessionChannels.h"
 #include "SessionDocument.h"
 #include "TimelineLanes.h"
+
+#include <functional>
+#include <mutex>
 #include "EditHistory.h"
 #include "EditSnapshot.h"
 #include "Markers.h"
 #include "ClockSync.h"
 #include "CpuMeter.h"
 #include "DeviceLoss.h"
+#include "DeviceWatch.h"
 #include "SyncLost.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -61,11 +65,14 @@ public:
     // Opens the saved device, or a default with every channel up to kMaxChannels.
     // When allowInput is false the saved setup is left untouched and inputs stay closed.
     void start(bool allowInput);
+    void postDeviceWork(std::function<void()> job);
+    void startDeviceBody(bool allowInput);
 
     bool microphoneGranted() const noexcept { return microphoneGranted_; }
     bool isRunning() const noexcept { return started_; }
 
     void pollDeviceStats();
+    void recheckOpenChannels();
     void sampleLiveCpu();
     unsigned deviceMenuRevision() const noexcept { return deviceMenuRevision_; }
     bool deviceSetupLocked() const noexcept { return setupLocked_; }
@@ -163,6 +170,9 @@ public:
     void openPluginEditor(int channel, int slot);
     void togglePluginEditor(int channel, int slot);
     bool isPluginEditorOpen(int channel, int slot) const;
+    const PluginNoticeModel& pluginNotice() const;
+    void respondPluginNotice(int action);
+    bool channelProtected(int channel) const;
 
     void setRecordArmed(int channel, bool armed);
     bool isRecordArmed(int channel) const;
@@ -373,6 +383,10 @@ private:
     void clearDisplayedCpu() noexcept;
     void noteHardwareDeviceList();
     void tryReopenWanted();
+    bool reopenChosenCardNow();
+    void queueDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort);
+    void runDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort);
+    void logOpenChannels();
     void rejectForeignDevice();
     bool deviceIsChosenCard(const juce::AudioIODevice& device);
     void installDeviceListListener();
@@ -508,6 +522,7 @@ private:
     SyncLostState syncLost_ {};
     std::atomic<bool> hostWasRunning_ { false };
     bool openingChosenDevice_ = false;
+    std::atomic<int> deviceOpenInFlight_ { 0 };
     std::int64_t lastDropoutLogNs_ = 0;
     int dropoutCoalesceCount_ = 0;
     int dropoutCoalesceBuffer_ = 0;
@@ -541,6 +556,8 @@ private:
     juce::String lastFullOpenName_;
     int lastFullOpenInputs_ = -1;
     int lastFullOpenOutputs_ = -1;
+    bool channelAttemptValid_ = false;
+    ChannelOpenView channelAttempt_ {};
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;
@@ -564,6 +581,9 @@ private:
     CrashJournal journal_;
     std::vector<std::string> diedActivating_;
     std::unique_ptr<juce::Thread> stallThread_;
+    struct DeviceWorkQueue;
+    std::unique_ptr<DeviceWorkQueue> deviceWork_;
+    std::mutex deviceLock_;
     std::unique_ptr<SessionDisk> sessionDisk_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     juce::uint32 lastBackupMs_ = 0;

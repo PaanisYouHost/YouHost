@@ -61,6 +61,12 @@
 #include "engine/TimelineZoom.h"
 #include "engine/RecordStart.h"
 #include "engine/CheckedMutex.h"
+#include "engine/ScanVerdict.h"
+#include "engine/QuitPolicy.h"
+#include "engine/SafetyFade.h"
+#include "engine/StateSnapshot.h"
+#include "engine/PluginProtect.h"
+#include "engine/PluginNotice.h"
 
 #include <algorithm>
 #include <array>
@@ -1902,6 +1908,79 @@ void testDeviceOpensAllChannels()
     CHECK(speakerOut[0]);
     CHECK(speakerOut[1]);
     CHECK(! speakerOut[2]);
+
+    // SoundGrid can publish one channel, then the other 47, on one Mac only.
+    youhost::ChannelOpenView early;
+    early.reportedInputs = 1;
+    early.reportedOutputs = 1;
+    early.activeInputs = 1;
+    early.activeOutputs = 1;
+    const auto waiting = youhost::planChannelOpen(early, nullptr);
+    CHECK(! waiting.reopen);
+
+    youhost::ChannelOpenView listed = early;
+    listed.reportedInputs = 48;
+    listed.reportedOutputs = 48;
+    listed.inputPrefixComplete = false;
+    listed.outputPrefixComplete = false;
+    const auto grew = youhost::planChannelOpen(listed, nullptr);
+    CHECK(grew.reopen);
+    CHECK(grew.inputsToEnable == 48);
+    CHECK(grew.outputsToEnable == 48);
+    const auto once = youhost::planChannelOpen(listed, &listed);
+    CHECK(! once.reopen);
+
+    // A saved mask with only channel 1 on is replaced by every channel offered.
+    youhost::ChannelOpenView stale;
+    stale.reportedInputs = 48;
+    stale.reportedOutputs = 48;
+    stale.activeInputs = 1;
+    stale.activeOutputs = 1;
+    stale.inputPrefixComplete = false;
+    stale.outputPrefixComplete = false;
+    const auto replaced = youhost::planChannelOpen(stale, nullptr);
+    CHECK(replaced.reopen);
+    CHECK(replaced.inputsToEnable == 48);
+    CHECK(replaced.outputsToEnable == 48);
+
+    youhost::ChannelOpenView denied = stale;
+    denied.inputsAllowed = false;
+    denied.activeOutputs = 48;
+    denied.outputPrefixComplete = true;
+    const auto micDenied = youhost::planChannelOpen(denied, nullptr);
+    CHECK(! micDenied.reopen);
+    CHECK(micDenied.inputsToEnable == 0);
+    CHECK(micDenied.outputsToEnable == 48);
+
+    CHECK(youhost::channelReportGrew(1, 1, 48, 48));
+    CHECK(! youhost::channelReportGrew(-1, -1, 48, 48));
+    CHECK(! youhost::channelReportGrew(48, 48, 48, 48));
+    CHECK(youhost::channelReportGrew(48, 1, 48, 48));
+
+    const auto deviceOpenSrc = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    CHECK(deviceOpenSrc.find("requestEveryChannel") != std::string::npos);
+    CHECK(deviceOpenSrc.find("useDefaultInputChannels = true") == std::string::npos);
+    CHECK(deviceOpenSrc.find("void AudioEngine::recheckOpenChannels()") != std::string::npos);
+    CHECK(deviceOpenSrc.find("logOpenChannels") != std::string::npos);
+    CHECK(deviceOpenSrc.find("deviceOpenInFlight_") != std::string::npos);
+    const auto reopenSrc = deviceOpenSrc.substr(deviceOpenSrc.find("void AudioEngine::tryReopenWanted()"));
+    const auto reopenEnd = reopenSrc.find("bool AudioEngine::deviceNameListed");
+    const auto reopenBody = reopenSrc.substr(0, reopenEnd);
+    CHECK(reopenBody.find("postDeviceWork") != std::string::npos);
+    CHECK(reopenBody.find("setAudioDeviceSetup") == std::string::npos);
+    CHECK(reopenBody.find("reopenChosenCardAllowed") != std::string::npos);
+
+    CHECK(! youhost::reopenChosenCardAllowed(true, false, false));
+    CHECK(! youhost::reopenChosenCardAllowed(false, true, false));
+    CHECK(! youhost::reopenChosenCardAllowed(false, false, true));
+    CHECK(youhost::reopenChosenCardAllowed(false, false, false));
+    CHECK(youhost::channelRetryAfterOpen(48, 48, 1, 1, true, false));
+    CHECK(! youhost::channelRetryAfterOpen(48, 48, 48, 48, true, false));
+    CHECK(! youhost::channelRetryAfterOpen(48, 48, 1, 1, true, true));
+    CHECK(! youhost::channelRetryAfterOpen(1, 1, 1, 1, true, false));
+    CHECK(youhost::deviceChannelCountLine("Waves SoundGrid", 32, 32, 32, 32)
+          == "device Waves SoundGrid inputs reported 32 active 32 outputs reported 32 active 32");
+    CHECK(youhost::kChannelOpenRetryWaitMs > 0);
 }
 
 void testMergePeaks()
@@ -4277,6 +4356,14 @@ void testReleaseChecklist()
     item("Cmd+Q asks before quitting",
          appSrc.find("requestApplicationQuit") != std::string::npos
              && appSrc.find("systemRequestedQuit") != std::string::npos
+             && appSrc.find("installCommandQuitMonitor") != std::string::npos
+             && readWorkspaceFile("src/engine/QuitGuard.mm").find("installCommandQuitMonitor") != std::string::npos
+             && readWorkspaceFile("src/ui/MainComponent.cpp").find("commandQuitPromptsForUnsaved") != std::string::npos
+             && youhost::commandQuitAlwaysReachesApp()
+             && ! youhost::commandQuitPromptsForUnsaved(false, true)
+             && ! youhost::commandQuitPromptsForUnsaved(false, false)
+             && youhost::commandQuitPromptsForUnsaved(true, true)
+             && ! youhost::commandQuitPromptsForUnsaved(true, false)
              && quitAsks);
 
     const auto recBounds = mainUi.find("recButton_.setBounds");
@@ -4788,7 +4875,7 @@ void testReleaseChecklist()
     const bool alarmOn = sync.showAlarm() && sync.keepReattaching() && sync.isMissing()
                          && lostText.visible && lostText.lost
                          && lostText.primary == youhost::kSyncLostTitle
-                         && lostText.secondary == youhost::kSyncLostFinnish
+                         && lostText.secondary == youhost::kSyncLostSubtitle
                          && youhost::syncLostChrome(sync) == youhost::SyncLostChrome::center;
     sync.acknowledge();
     const bool closedWhileLost = ! sync.showAlarm() && ! sync.isMissing() && sync.suppressLoss()
@@ -4935,12 +5022,11 @@ void testReleaseChecklist()
              && ! youhost::syncOverlayText(sync).visible
              && youhost::syncLostBlink(0)
              && ! youhost::syncLostBlink(400)
-             && std::string(youhost::kSyncLostFinnish) == "Äänikortti kadonnut"
-             && static_cast<unsigned char>(youhost::kSyncLostFinnish[0]) == 0xC3
-             && static_cast<unsigned char>(youhost::kSyncLostFinnish[1]) == 0x84
-             && syncHeader.find("Äänikortti kadonnut") != std::string::npos
+             && std::string(youhost::kSyncLostSubtitle) == "Audio card lost"
+             && syncHeader.find("Audio card lost") != std::string::npos
+             && syncHeader.find("Äänikortti") == std::string::npos
              && overlayUi.find("CharPointer_UTF8") != std::string::npos
-             && overlayUi.find("syncLostUtf8(kSyncLostFinnish)") != std::string::npos
+             && overlayUi.find("syncLostUtf8(kSyncLostSubtitle)") != std::string::npos
              && overlayUi.find("DejaVu Sans") != std::string::npos
              && overlayUi.find("setOpaque(true)") != std::string::npos
              && overlayUi.find("place_ != SyncLostChrome::corner") != std::string::npos
@@ -5321,12 +5407,13 @@ void testReleaseChecklist()
              && checklistDoc.find("Before a gig") != std::string::npos);
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
+    const auto notes1020 = readWorkspaceFile("YouHost-1.0.20-korjaukset.txt");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.17"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.20"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.17"
+             && std::string(youhost::versionNumber()) == "1.0.20"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.17") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.20") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5335,14 +5422,25 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.17") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.17-macOS.zip") != std::string::npos
-             && checklistDoc.find("prerelease, not Latest") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: true") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.20") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.20-macOS.zip") != std::string::npos
+             && checklistDoc.find("not marked as the newest release") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-04") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Needs real-hardware testing") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-06") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("äänisäiettä") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") == std::string::npos
+             && notes1020.size() >= 3
+             && static_cast<unsigned char>(notes1020[0]) == 0xEF
+             && static_cast<unsigned char>(notes1020[1]) == 0xBB
+             && static_cast<unsigned char>(notes1020[2]) == 0xBF
+             && notes1020.find("Korjaukset") != std::string::npos
+             && notes1020.find("äänisäiettä") != std::string::npos
+             && notes1020.find("not yet tested") == std::string::npos
+             && notes1020.find("build for testing") == std::string::npos
+             && notes1020.find("Latest") == std::string::npos
+             && notes1020.find("Beta") == std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     int coldCalls = 0;
@@ -7150,8 +7248,190 @@ void testStability106()
 
 } // namespace
 
+void testStability1018()
+{
+    using namespace youhost;
+    youhost::ScanObservation timeout;
+    timeout.workerStarted = true;
+    timeout.workerAlive = true;
+    CHECK(classifyScan(timeout) == ScanKind::timeout);
+    const auto timeoutPlan = planScanAttempt(ScanKind::timeout, 1);
+    CHECK(! timeoutPlan.blacklist);
+    CHECK(! timeoutPlan.retry);
+    CHECK(std::string(timeoutPlan.reason).find("Not a crash") != std::string::npos);
+
+    youhost::ScanObservation crashed;
+    crashed.workerStarted = true;
+    CHECK(classifyScan(crashed) == ScanKind::crash);
+    CHECK(planScanAttempt(ScanKind::crash, 0).retry);
+    CHECK(! planScanAttempt(ScanKind::crash, 0).blacklist);
+    CHECK(planScanAttempt(ScanKind::crash, 1).blacklist);
+    CHECK(std::string(planScanAttempt(ScanKind::crash, 1).reason).find("crashed the scanner") != std::string::npos);
+
+    youhost::ScanObservation quit;
+    quit.workerStarted = true;
+    quit.quitRequested = true;
+    CHECK(classifyScan(quit) == ScanKind::pluginExit);
+    CHECK(! planScanAttempt(ScanKind::pluginExit, 1).retry);
+    CHECK(std::string(planScanAttempt(ScanKind::pluginExit, 1).reason).find("Not marked as a crash") != std::string::npos);
+    CHECK(! storedFailureBlacklists("Scan timed out. Not a crash. It can be scanned again."));
+    CHECK(storedFailureBlacklists("Plugin crashed the scanner"));
+    CHECK(kScanWorkersPerPlugin == 1);
+    CHECK(scanTimeoutMs(false, 0) > 20000);
+
+    CHECK(refuseUnsolicitedQuit(false, false, false));
+    CHECK(! refuseUnsolicitedQuit(true, false, false));
+    CHECK(! refuseUnsolicitedQuit(false, true, false));
+    CHECK(! refuseUnsolicitedQuit(false, false, true));
+
+    std::vector<ProtectedRecord> list;
+    CHECK(proofRequired(list, "ua", "1", false));
+    CHECK(! proofRequired(list, "ua", "1", true));
+    ProtectedRecord recorded { "ua", "1", "crash" };
+    upsertProtected(list, recorded);
+    CHECK(! proofRequired(list, "ua", "1", false));
+    CHECK(proofRequired(list, "ua", "2", false));
+    CHECK(hostingAfterProof(ProofResult::passed) == HostingMode::inProcess);
+    CHECK(hostingAfterProof(ProofResult::timedOut) == HostingMode::inProcess);
+    CHECK(hostingAfterProof(ProofResult::crashed) == HostingMode::protectedMode);
+    CHECK(hostingAfterProof(ProofResult::quit) == HostingMode::protectedMode);
+    CHECK(protectedChannelLatency(0) == 0);
+    CHECK(protectedChannelLatency(1) == 32);
+    CHECK(protectedChannelLatency(3) == 32);
+    const auto saved = writeProtectedList(list);
+    const auto loaded = readProtectedList(saved);
+    CHECK(loaded.size() == 1 && loaded[0].version == "1" && loaded[0].reason == "crash");
+
+    ProtectRing ring;
+    std::uint32_t generation = ring.generation.load();
+    float in[32];
+    float out[32];
+    for (int index = 0; index < 32; ++index)
+        in[index] = 0.5f;
+    auto dead = protectExchange(ring, in, nullptr, out, nullptr, 32, 32, generation, false);
+    CHECK(dead.passedDry == false);
+    CHECK(dead.silenced == 32);
+    for (int index = 0; index < 32; ++index)
+        CHECK(out[index] == 0.0f);
+
+    ring.alive.store(1);
+    protectConsume(ring, 64, [](const float* inL, const float*, float* outL, float*, int count)
+    {
+        for (int index = 0; index < count; ++index)
+            outL[index] = inL[index] * 0.5f;
+    });
+    float in2[32];
+    for (int index = 0; index < 32; ++index)
+        in2[index] = 0.25f;
+    auto live = protectExchange(ring, in2, nullptr, out, nullptr, 32, 32, generation, true);
+    CHECK(live.passedDry == false);
+    CHECK(live.processed == 32);
+    for (int index = 0; index < 32; ++index)
+        CHECK(out[index] == 0.25f);
+
+    SafetyState safety;
+    float dry[8];
+    float rendered[8];
+    for (int index = 0; index < 8; ++index)
+    {
+        dry[index] = 1.0f;
+        rendered[index] = 0.2f;
+    }
+    ring.alive.store(0);
+    std::uint32_t seen = ring.generation.load();
+    auto muted = renderProtectedBlock(ring, safety, dry, nullptr, rendered, nullptr, 8, seen, false, false);
+    CHECK(! muted.passedDry);
+    for (int index = 0; index < 8; ++index)
+        CHECK(rendered[index] == 0.0f);
+    auto bypass = stepChannelSafety(safety, false, false, true, 64);
+    CHECK(bypass.source == SafetySource::dry);
+    CHECK(! bypass.passedUnprocessed);
+
+    StateSnapshotClock clock;
+    noteStateEdit(clock, 1000);
+    CHECK(! stateSnapshotDue(clock, 1000, false, false));
+    CHECK(! stateSnapshotDue(clock, 3999, false, false));
+    CHECK(stateSnapshotDue(clock, 4000, false, false));
+    CHECK(! stateSnapshotDue(clock, 4000, false, true));
+    CHECK(! stateSnapshotDue(clock, 5000, true, false));
+    noteStateCaptured(clock);
+    CHECK(! stateSnapshotDue(clock, 9000, false, false));
+
+    CHECK(dropoutGapSuppressedByResize(32, 64));
+    CHECK(! dropoutGapSuppressedByResize(64, 64));
+    CHECK(dropoutGapCount(0, 1000000, 666667, false) == 0);
+
+    SessionDocumentModel model;
+    model.version = kSessionFormatVersion;
+    model.savedWith = "YouHost 1.0.17";
+    SessionChannelRecord channel;
+    channel.index = 0;
+    SessionSlotRecord slot;
+    slot.occupied = true;
+    slot.index = 0;
+    slot.pluginName = "Pro-C 3";
+    slot.protect = true;
+    channel.slots.push_back(slot);
+    model.channels.push_back(channel);
+    const auto written = writeSessionModel(model);
+    SessionDocumentModel round;
+    CHECK(readSessionModel(written, round));
+    CHECK(round.channels.size() == 1);
+    CHECK(round.channels[0].slots.size() == 1);
+    CHECK(round.channels[0].slots[0].protect);
+    CHECK(round.channels[0].slots[0].pluginName == "Pro-C 3");
+    SessionNode older = written;
+    for (auto& child : older.children)
+        if (child.name == "Channel")
+            for (auto& slotNode : child.children)
+                if (slotNode.name == "Slot")
+                    slotNode.attributes.erase(std::remove_if(slotNode.attributes.begin(), slotNode.attributes.end(),
+                                                             [](const auto& attribute) { return attribute.first == "protect"; }),
+                                              slotNode.attributes.end());
+    SessionDocumentModel legacy;
+    CHECK(readSessionModel(older, legacy));
+    CHECK(! legacy.channels[0].slots[0].protect);
+    SessionNode newer = written;
+    for (auto& child : newer.children)
+        if (child.name == "Channel")
+            for (auto& slotNode : child.children)
+                if (slotNode.name == "Slot")
+                    slotNode.attributes.push_back({ "futureField", "kept" });
+    SessionNode merged = written;
+    mergeSessionNodes(newer, merged);
+    bool keptFuture = false;
+    for (const auto& child : merged.children)
+        if (child.name == "Channel")
+            for (const auto& slotNode : child.children)
+                if (slotNode.name == "Slot" && sessionAttribute(slotNode, "futureField") != nullptr)
+                    keptFuture = true;
+    CHECK(keptFuture);
+    CHECK(knownSessionAttribute("Slot", "protect"));
+    CHECK(! knownSessionAttribute("Slot", "futureField"));
+
+    CHECK(std::string(pluginNoticeTitle(PluginNoticeKind::crashed)) == "PLUGIN CRASHED");
+    CHECK(std::string(pluginRestoredLine()) == "Settings restored. Audio fading back in.");
+    CHECK(std::string(pluginNotRestoredLine()).find("still muted") != std::string::npos);
+    CHECK(pluginProtectedLine("Pro-C 3").find("32 samples") != std::string::npos);
+    CHECK(pluginCrashedLine(2, "Vocal", "Pro-Q 4").find("Restarting plugin") != std::string::npos);
+    const auto details = pluginRestoredDetails(2, "Vocal", "Pro-Q 4", 1.5);
+    CHECK(details.find("PLUGIN RESTORED – DETAILS") != std::string::npos);
+    CHECK(details.find("protect your ears") != std::string::npos);
+    CHECK(details.find("Muted for: 1.5 s") != std::string::npos);
+    CHECK(details.find("kept running") != std::string::npos);
+    CHECK(noticeWhenAudioReturns(false) == PluginNoticeKind::corner);
+    CHECK(pluginNoticeBlinks(PluginNoticeKind::crashed));
+    CHECK(! pluginNoticeBlinks(PluginNoticeKind::notRestored));
+    const auto center = pluginNoticeCenterBox(1920, 1080, PluginNoticeKind::protectedAsk);
+    CHECK(center.w >= 420 && center.h >= 220);
+    const auto corner = pluginNoticeCornerBox(1920, 1080);
+    CHECK(corner.w >= 200 && corner.y > 900);
+    std::cout << "stability 1.0.20 scan, protect, mute, snapshot, session\n";
+}
+
 int main()
 {
+    testStability1018();
     testTimelineScroll();
     testSessionCompatibility();
     testNullTestIsTransparent();

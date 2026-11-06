@@ -110,7 +110,7 @@ public:
             graphics.drawFittedText(syncLostUtf8(kSyncLostTitle), area.removeFromTop(area.getHeight() * 2 / 3), juce::Justification::centred, 2);
             graphics.setColour(juce::Colour(0xffffc9c9));
             graphics.setFont(syncLostFont(28.0f));
-            graphics.drawFittedText(syncLostUtf8(kSyncLostFinnish), area, juce::Justification::centred, 2);
+            graphics.drawFittedText(syncLostUtf8(kSyncLostSubtitle), area, juce::Justification::centred, 2);
             return;
         }
 

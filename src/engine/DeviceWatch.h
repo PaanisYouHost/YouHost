@@ -154,6 +154,112 @@ inline int channelCapForDevice(bool sameOpenCard, int reportedNames, int running
     return cap;
 }
 
+// What the device reported, and how many of those channels are actually enabled.
+// inputsAllowed is false when the microphone permission is denied.
+struct ChannelOpenView
+{
+    int reportedInputs = 0;
+    int reportedOutputs = 0;
+    int activeInputs = 0;
+    int activeOutputs = 0;
+    bool inputPrefixComplete = true;
+    bool outputPrefixComplete = true;
+    bool inputsAllowed = true;
+};
+
+struct ChannelOpenPlan
+{
+    bool reopen = false;
+    int inputsToEnable = 0;
+    int outputsToEnable = 0;
+};
+
+inline bool sameChannelObservation(const ChannelOpenView& left, const ChannelOpenView& right) noexcept
+{
+    return left.reportedInputs == right.reportedInputs
+           && left.reportedOutputs == right.reportedOutputs
+           && left.activeInputs == right.activeInputs
+           && left.activeOutputs == right.activeOutputs
+           && left.inputPrefixComplete == right.inputPrefixComplete
+           && left.outputPrefixComplete == right.outputPrefixComplete
+           && left.inputsAllowed == right.inputsAllowed;
+}
+
+// Enable every channel the device offers, up to 128. A saved mask, or the
+// single channel SoundGrid publishes before the driver finishes, is stale
+// when the device now reports more. The same observation is not asked twice,
+// so a driver that stays at one channel is not reopened on every poll.
+inline ChannelOpenPlan planChannelOpen(const ChannelOpenView& now, const ChannelOpenView* alreadyTried) noexcept
+{
+    ChannelOpenPlan plan;
+    plan.inputsToEnable = now.inputsAllowed ? channelsToOpen(now.reportedInputs) : 0;
+    plan.outputsToEnable = channelsToOpen(now.reportedOutputs);
+    const bool inputsShort = now.inputsAllowed && now.reportedInputs > 0
+                             && (now.activeInputs < plan.inputsToEnable || ! now.inputPrefixComplete);
+    const bool outputsShort = now.reportedOutputs > 0
+                              && (now.activeOutputs < plan.outputsToEnable || ! now.outputPrefixComplete);
+    if (! inputsShort && ! outputsShort)
+        return plan;
+    if (alreadyTried != nullptr && sameChannelObservation(now, *alreadyTried))
+        return plan;
+    plan.reopen = true;
+    return plan;
+}
+
+// The active mask can stay at one bit while the name list grows from 1 to 48.
+inline bool channelReportGrew(int previousInputs, int previousOutputs, int reportedInputs, int reportedOutputs) noexcept
+{
+    if (previousInputs < 0 || previousOutputs < 0)
+        return false;
+    return reportedInputs > previousInputs || reportedOutputs > previousOutputs;
+}
+
+// A device-list change fired by opening the card the user just chose must not
+// start another open. SoundGrid's HAL returns a 1-channel stream when a second
+// open overlaps the first IOProc teardown.
+inline bool reopenChosenCardAllowed(bool openInFlight, bool userChoiceGrace, bool chosenCardOpen) noexcept
+{
+    return ! openInFlight && ! userChoiceGrace && ! chosenCardOpen;
+}
+
+// After an open, one wait-and-reopen if fewer channels are active than the
+// device reported. A second look at the same short count does not open again.
+inline bool channelRetryAfterOpen(int reportedInputs,
+                                  int reportedOutputs,
+                                  int activeInputs,
+                                  int activeOutputs,
+                                  bool inputsAllowed,
+                                  bool alreadyRetried) noexcept
+{
+    if (alreadyRetried)
+        return false;
+    const bool inputsShort = inputsAllowed && reportedInputs > 0 && activeInputs < channelsToOpen(reportedInputs);
+    const bool outputsShort = reportedOutputs > 0 && activeOutputs < channelsToOpen(reportedOutputs);
+    return inputsShort || outputsShort;
+}
+
+inline constexpr int kChannelOpenRetryWaitMs = 300;
+
+// youhost.log line written on every open, including a reopen.
+inline std::string deviceChannelCountLine(std::string_view name,
+                                          int reportedInputs,
+                                          int activeInputs,
+                                          int reportedOutputs,
+                                          int activeOutputs)
+{
+    std::string line = "device ";
+    line.append(name.begin(), name.end());
+    line += " inputs reported ";
+    line += std::to_string(reportedInputs);
+    line += " active ";
+    line += std::to_string(activeInputs);
+    line += " outputs reported ";
+    line += std::to_string(reportedOutputs);
+    line += " active ";
+    line += std::to_string(activeOutputs);
+    return line;
+}
+
 // Clears bits at and above cap. The array is the 128-channel rack mask.
 inline void applyChannelCap(bool* open, int cap) noexcept
 {
