@@ -214,24 +214,18 @@ jobs:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: |
             ${{ env.YOUHOST_ZIP }}
-            YouHost-1.0.19-korjaukset.txt
+            YouHost-1.0.20-korjaukset.txt
           prerelease: false
           make_latest: false
           body: |
-            YouHost 1.0.19
+            YouHost 1.0.20
             2026-11-06
 
             Korjaukset
-            - SoundGrid: kaikki kanavat aukeavat (ei enää 1 kanava)
-            - Command-Q sulkee ohjelman myös aloitusruudussa
-            - Äänikortin avaus ei jumita ruutua
-            - SYNC LOST -teksti on englanniksi: Audio card lost
+            - Pluginin tilan luku ei enää pysäytä äänisäiettä
 
             Fixes
-            - SoundGrid opens every channel (no longer one channel)
-            - Command-Q quits from the start screen too
-            - Opening the audio card does not freeze the screen
-            - The SYNC LOST subtitle is Audio card lost
+            - Reading plugin state no longer stalls the audio thread
 
           # Phrases the engine checklist still looks up in this file.
           # Open session without this plugin

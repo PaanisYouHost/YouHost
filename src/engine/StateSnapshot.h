@@ -24,13 +24,18 @@ inline void noteStateEdit(StateSnapshotClock& clock, std::int64_t nowMs) noexcep
     clock.captured = false;
 }
 
-// audioThreadInside: a processBlock is in the plugin. Capturing then would
-// take a lock the audio thread may also want, so this tick does nothing.
+// audioThreadInside: a processBlock is in the plugin right now.
+// liveCallbacks: the card is running. getStateInformation on an Audio Unit
+// takes the same lock as render. The check above only sees the current
+// block, and the next 666 us callback then sleeps inside that plugin.
+// The time shows up as off-CPU on the slowest plugin. Capture only while
+// the callback is stopped.
 inline bool stateSnapshotDue(const StateSnapshotClock& clock,
                              std::int64_t nowMs,
-                             bool audioThreadInside) noexcept
+                             bool audioThreadInside,
+                             bool liveCallbacks) noexcept
 {
-    if (! clock.dirty || clock.captured || audioThreadInside)
+    if (liveCallbacks || ! clock.dirty || clock.captured || audioThreadInside)
         return false;
     if (clock.dirtyAtMs <= 0 || nowMs < clock.dirtyAtMs)
         return false;

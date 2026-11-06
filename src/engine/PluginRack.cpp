@@ -1241,7 +1241,7 @@ void PluginRack::timerCallback()
                     && slot.plugin->gate->depth.load(std::memory_order_acquire) != 0)
                     inside = true;
     }
-    if (stateSnapshotDue(snap, snapshotNowMs, inside))
+    if (stateSnapshotDue(snap, snapshotNowMs, inside, callbacksRunning_.load(std::memory_order_acquire)))
     {
         std::vector<std::shared_ptr<HostedPlugin>> plugins;
         {
