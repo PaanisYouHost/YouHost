@@ -383,6 +383,10 @@ private:
     void clearDisplayedCpu() noexcept;
     void noteHardwareDeviceList();
     void tryReopenWanted();
+    bool reopenChosenCardNow();
+    void queueDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort);
+    void runDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort);
+    void logOpenChannels();
     void rejectForeignDevice();
     bool deviceIsChosenCard(const juce::AudioIODevice& device);
     void installDeviceListListener();
@@ -518,6 +522,7 @@ private:
     SyncLostState syncLost_ {};
     std::atomic<bool> hostWasRunning_ { false };
     bool openingChosenDevice_ = false;
+    std::atomic<int> deviceOpenInFlight_ { 0 };
     std::int64_t lastDropoutLogNs_ = 0;
     int dropoutCoalesceCount_ = 0;
     int dropoutCoalesceBuffer_ = 0;

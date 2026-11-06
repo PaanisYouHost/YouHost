@@ -214,24 +214,24 @@ jobs:
           name: ${{ env.YOUHOST_RELEASE_NAME }}
           files: |
             ${{ env.YOUHOST_ZIP }}
-            YouHost-1.0.18-muutokset.txt
+            YouHost-1.0.19-korjaukset.txt
           prerelease: false
           make_latest: false
           body: |
-            YouHost 1.0.18
-            2026-11-05
+            YouHost 1.0.19
+            2026-11-06
+
+            Korjaukset
+            - SoundGrid: kaikki kanavat aukeavat (ei enää 1 kanava)
+            - Command-Q sulkee ohjelman myös aloitusruudussa
+            - Äänikortin avaus ei jumita ruutua
+            - SYNC LOST -teksti on englanniksi: Audio card lost
 
             Fixes
-            - Unsolicited quit is logged and refused
-            - Plugin editors open on the message thread
-            - Scanner separates timeouts from crashes and retries once
-            - Plugin list and card open run off the message thread
-            - Buffer-size changes are not counted as dropouts
-            - Protected mode for plugins that crash or quit, 32 samples on that channel
-            - A protected crash mutes the channel, restarts the plugin, and fades audio back
-            - Plugin state is snapshotted off the audio thread
-            - Notices for crash, restored, not restored, and protected
-            - Session format stays 7, with an optional protect field
+            - SoundGrid opens every channel (no longer one channel)
+            - Command-Q quits from the start screen too
+            - Opening the audio card does not freeze the screen
+            - The SYNC LOST subtitle is Audio card lost
 
           # Phrases the engine checklist still looks up in this file.
           # Open session without this plugin

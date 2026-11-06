@@ -1961,6 +1961,26 @@ void testDeviceOpensAllChannels()
     CHECK(deviceOpenSrc.find("requestEveryChannel") != std::string::npos);
     CHECK(deviceOpenSrc.find("useDefaultInputChannels = true") == std::string::npos);
     CHECK(deviceOpenSrc.find("void AudioEngine::recheckOpenChannels()") != std::string::npos);
+    CHECK(deviceOpenSrc.find("logOpenChannels") != std::string::npos);
+    CHECK(deviceOpenSrc.find("deviceOpenInFlight_") != std::string::npos);
+    const auto reopenSrc = deviceOpenSrc.substr(deviceOpenSrc.find("void AudioEngine::tryReopenWanted()"));
+    const auto reopenEnd = reopenSrc.find("bool AudioEngine::deviceNameListed");
+    const auto reopenBody = reopenSrc.substr(0, reopenEnd);
+    CHECK(reopenBody.find("postDeviceWork") != std::string::npos);
+    CHECK(reopenBody.find("setAudioDeviceSetup") == std::string::npos);
+    CHECK(reopenBody.find("reopenChosenCardAllowed") != std::string::npos);
+
+    CHECK(! youhost::reopenChosenCardAllowed(true, false, false));
+    CHECK(! youhost::reopenChosenCardAllowed(false, true, false));
+    CHECK(! youhost::reopenChosenCardAllowed(false, false, true));
+    CHECK(youhost::reopenChosenCardAllowed(false, false, false));
+    CHECK(youhost::channelRetryAfterOpen(48, 48, 1, 1, true, false));
+    CHECK(! youhost::channelRetryAfterOpen(48, 48, 48, 48, true, false));
+    CHECK(! youhost::channelRetryAfterOpen(48, 48, 1, 1, true, true));
+    CHECK(! youhost::channelRetryAfterOpen(1, 1, 1, 1, true, false));
+    CHECK(youhost::deviceChannelCountLine("Waves SoundGrid", 32, 32, 32, 32)
+          == "device Waves SoundGrid inputs reported 32 active 32 outputs reported 32 active 32");
+    CHECK(youhost::kChannelOpenRetryWaitMs > 0);
 }
 
 void testMergePeaks()
@@ -5387,13 +5407,13 @@ void testReleaseChecklist()
              && checklistDoc.find("Before a gig") != std::string::npos);
     const auto versionCpp = readWorkspaceFile("src/YouHostApplication.cpp");
     const auto aboutVersion = sliceBetween(versionCpp, "getApplicationVersion()", "moreThanOneInstanceAllowed");
-    const auto notes1018 = readWorkspaceFile("YouHost-1.0.18-muutokset.txt");
+    const auto notes1019 = readWorkspaceFile("YouHost-1.0.19-korjaukset.txt");
     item("Version label",
-         std::string(youhost::versionLabel()) == "YouHost 1.0.18"
+         std::string(youhost::versionLabel()) == "YouHost 1.0.19"
              && std::string(youhost::versionLabel()).find("Beta") == std::string::npos
-             && std::string(youhost::versionNumber()) == "1.0.18"
+             && std::string(youhost::versionNumber()) == "1.0.19"
              && youhost::kSessionFormatVersion == 7
-             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.18") != std::string::npos
+             && readWorkspaceFile("CMakeLists.txt").find("VERSION 1.0.19") != std::string::npos
              && readWorkspaceFile("CMakeLists.txt").find("YouHost ${PROJECT_VERSION}") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-${VERSION}-macOS.zip") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("YouHost-Beta-") == std::string::npos
@@ -5402,23 +5422,27 @@ void testReleaseChecklist()
              && aboutVersion.find("YOUHOST_VERSION") != std::string::npos
              && engineSrc.find("savedWith") != std::string::npos
              && checklistDoc.find("Version label") != std::string::npos
-             && checklistDoc.find("YouHost 1.0.18") != std::string::npos
-             && checklistDoc.find("YouHost-1.0.18-macOS.zip") != std::string::npos
+             && checklistDoc.find("YouHost 1.0.19") != std::string::npos
+             && checklistDoc.find("YouHost-1.0.19-macOS.zip") != std::string::npos
              && checklistDoc.find("not marked as the newest release") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("prerelease: false") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("make_latest: false") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-05") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Fixes") != std::string::npos
-             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") == std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("2026-11-06") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("Korjaukset") != std::string::npos
+             && readWorkspaceFile(".github/workflows/build-macos.yml").find("SoundGrid: kaikki kanavat aukeavat") != std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Tested by automated tests") == std::string::npos
-             && notes1018.size() >= 3
-             && static_cast<unsigned char>(notes1018[0]) == 0xEF
-             && static_cast<unsigned char>(notes1018[1]) == 0xBB
-             && static_cast<unsigned char>(notes1018[2]) == 0xBF
-             && notes1018.find("Fixes") != std::string::npos
-             && notes1018.find("Korjaukset") == std::string::npos
-             && notes1018.find("not yet tested") == std::string::npos
-             && notes1018.find("build for testing") == std::string::npos
+             && notes1019.size() >= 3
+             && static_cast<unsigned char>(notes1019[0]) == 0xEF
+             && static_cast<unsigned char>(notes1019[1]) == 0xBB
+             && static_cast<unsigned char>(notes1019[2]) == 0xBF
+             && notes1019.find("Korjaukset") != std::string::npos
+             && notes1019.find("SoundGrid: kaikki kanavat aukeavat") != std::string::npos
+             && notes1019.find("Command-Q sulkee ohjelman myös aloitusruudussa") != std::string::npos
+             && notes1019.find("Audio card lost") != std::string::npos
+             && notes1019.find("not yet tested") == std::string::npos
+             && notes1019.find("build for testing") == std::string::npos
+             && notes1019.find("Latest") == std::string::npos
+             && notes1019.find("Beta") == std::string::npos
              && readWorkspaceFile(".github/workflows/build-macos.yml").find("Open session without this plugin") != std::string::npos
              && checklistDoc.find("session format stays 7") != std::string::npos);
     int coldCalls = 0;
@@ -7403,7 +7427,7 @@ void testStability1018()
     CHECK(center.w >= 420 && center.h >= 220);
     const auto corner = pluginNoticeCornerBox(1920, 1080);
     CHECK(corner.w >= 200 && corner.y > 900);
-    std::cout << "stability 1.0.18 scan, protect, mute, snapshot, session\n";
+    std::cout << "stability 1.0.19 scan, protect, mute, snapshot, session\n";
 }
 
 int main()

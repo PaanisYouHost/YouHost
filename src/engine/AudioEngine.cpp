@@ -439,6 +439,78 @@ void AudioEngine::postDeviceWork(std::function<void()> job)
     deviceWork_->post(std::move(job));
 }
 
+void AudioEngine::logOpenChannels()
+{
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    if (live == nullptr || ! live->isOpen())
+        return;
+    const auto line = deviceChannelCountLine(live->getName().toStdString(),
+                                              live->getInputChannelNames().size(),
+                                              live->getActiveInputChannels().countNumberOfSetBits(),
+                                              live->getOutputChannelNames().size(),
+                                              live->getActiveOutputChannels().countNumberOfSetBits());
+    appendHostLog(settings_, juce::String::fromUTF8(line.c_str()));
+}
+
+void AudioEngine::runDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort)
+{
+    openingChosenDevice_ = true;
+    requestEveryChannel(setup, microphoneGranted_);
+    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+    logOpenChannels();
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    const bool opened = live != nullptr && live->isOpen();
+    if (opened && retryIfShort)
+    {
+        const int reportedIn = live->getInputChannelNames().size();
+        const int reportedOut = live->getOutputChannelNames().size();
+        const int activeIn = live->getActiveInputChannels().countNumberOfSetBits();
+        const int activeOut = live->getActiveOutputChannels().countNumberOfSetBits();
+        if (channelRetryAfterOpen(reportedIn, reportedOut, activeIn, activeOut, microphoneGranted_, false))
+        {
+            juce::Thread::sleep(kChannelOpenRetryWaitMs);
+            requestEveryChannel(setup, microphoneGranted_);
+            const auto retryError = deviceManager_.setAudioDeviceSetup(setup, true);
+            logOpenChannels();
+            if (retryError.isNotEmpty())
+                openError_ = retryError;
+        }
+    }
+    openingChosenDevice_ = false;
+    if (error.isNotEmpty() && ! opened)
+        openError_ = error;
+}
+
+void AudioEngine::queueDeviceOpen(juce::AudioDeviceManager::AudioDeviceSetup setup, bool retryIfShort)
+{
+    deviceOpenInFlight_.fetch_add(1, std::memory_order_acq_rel);
+    auto alive = alive_;
+    postDeviceWork([this, alive, setup, retryIfShort]
+    {
+        struct Flight
+        {
+            std::atomic<int>& count;
+            ~Flight() { count.fetch_sub(1, std::memory_order_acq_rel); }
+        } flight { deviceOpenInFlight_ };
+        if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> lock(deviceLock_);
+        runDeviceOpen(setup, retryIfShort);
+    });
+}
+
+bool AudioEngine::reopenChosenCardNow()
+{
+    const bool inFlight = deviceOpenInFlight_.load(std::memory_order_acquire) > 0;
+    bool chosenOpen = false;
+    if (! inFlight)
+    {
+        if (auto* live = deviceManager_.getCurrentAudioDevice())
+            chosenOpen = live->isOpen() && deviceIsChosenCard(*live);
+    }
+    return reopenChosenCardAllowed(inFlight, clockMemory_.grace, chosenOpen);
+}
+
 void AudioEngine::start(bool allowInput)
 {
     noteMessageBeat();
@@ -1781,32 +1853,25 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
     if (! plan.reopen)
         return;
 
+    if (deviceOpenInFlight_.load(std::memory_order_acquire) > 0 || clockMemory_.grace)
+        return;
+
     channelAttempt_ = now;
     channelAttemptValid_ = true;
-    juce::String line;
-    line << "device " << device.getName()
-         << " inputs reported " << now.reportedInputs
-         << " active " << now.activeInputs
-         << " outputs reported " << now.reportedOutputs
-         << " active " << now.activeOutputs;
-    appendHostLog(settings_, line);
-
+    appendHostLog(settings_, "opening every channel on " + device.getName());
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager_.getAudioDeviceSetup(setup);
-    setup.useDefaultInputChannels = false;
-    setup.useDefaultOutputChannels = false;
-    setup.inputChannels.clear();
-    setup.outputChannels.clear();
     if (plan.inputsToEnable > 0)
         setup.inputChannels.setRange(0, plan.inputsToEnable, true);
+    else
+        setup.inputChannels.clear();
     if (plan.outputsToEnable > 0)
         setup.outputChannels.setRange(0, plan.outputsToEnable, true);
-    appendHostLog(settings_, "opening every channel on " + device.getName());
-    forcingChannels_ = true;
-    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
-    forcingChannels_ = false;
-    if (error.isNotEmpty())
-        openError_ = error;
+    else
+        setup.outputChannels.clear();
+    setup.useDefaultInputChannels = false;
+    setup.useDefaultOutputChannels = false;
+    queueDeviceOpen(setup, false);
 }
 
 void AudioEngine::recheckOpenChannels()
@@ -2103,10 +2168,16 @@ void AudioEngine::noteHardwareDeviceList()
     if (wantedName_.isEmpty())
         return;
 
-    auto* live = deviceManager_.getCurrentAudioDevice();
-    if (live != nullptr && live->isOpen() && deviceIsChosenCard(*live))
+    // Opening the card the user just chose notifies the device list. That must
+    // not start tryReopenWanted while the first IOProc is still being torn down.
+    if (! reopenChosenCardNow())
     {
-        recheckOpenChannels();
+        if (deviceOpenInFlight_.load(std::memory_order_acquire) == 0 && ! clockMemory_.grace)
+        {
+            if (auto* live = deviceManager_.getCurrentAudioDevice())
+                if (live->isOpen() && deviceIsChosenCard(*live))
+                    recheckOpenChannels();
+        }
         return;
     }
 
@@ -2181,6 +2252,10 @@ void AudioEngine::tryReopenWanted()
         return;
     if (! deviceChangeCauseAllowed("reopening the chosen card"))
         return;
+    if (! reopenChosenCardAllowed(deviceOpenInFlight_.load(std::memory_order_acquire) > 0,
+                                  clockMemory_.grace,
+                                  false))
+        return;
 
     const auto outputName = chosenOutputName_.isNotEmpty() ? chosenOutputName_ : wantedName_;
     const auto inputName = chosenInputName_.isNotEmpty() ? chosenInputName_ : wantedName_;
@@ -2197,10 +2272,31 @@ void AudioEngine::tryReopenWanted()
     setup.inputDeviceName = inputName;
     requestEveryChannel(setup, microphoneGranted_);
     appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine({}, wantedName_.toStdString(), "reopening the chosen card").c_str()));
-    const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
-    reopenInProgress_ = false;
-    if (error.isNotEmpty())
-        openError_ = error;
+    auto alive = alive_;
+    deviceOpenInFlight_.fetch_add(1, std::memory_order_acq_rel);
+    postDeviceWork([this, alive, setup]
+    {
+        struct Flight
+        {
+            AudioEngine& engine;
+            ~Flight()
+            {
+                engine.reopenInProgress_ = false;
+                engine.deviceOpenInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        } flight { *this };
+        if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> lock(deviceLock_);
+        runDeviceOpen(setup, true);
+        if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+            messages->callAsync([this, alive]
+            {
+                if (alive != nullptr && ! alive->load(std::memory_order_acquire))
+                    return;
+                pollDeviceStats();
+            });
+    });
 }
 
 bool AudioEngine::deviceNameListed(const juce::String& name)
@@ -3314,20 +3410,22 @@ void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
     setupLocked_ = false;
     inventoryForce_ = true;
     auto alive = alive_;
+    deviceOpenInFlight_.fetch_add(1, std::memory_order_acq_rel);
     postDeviceWork([this, alive, setup, name]
     {
+        struct Flight
+        {
+            std::atomic<int>& count;
+            ~Flight() { count.fetch_sub(1, std::memory_order_acq_rel); }
+        } flight { deviceOpenInFlight_ };
         if (alive != nullptr && ! alive->load(std::memory_order_acquire))
             return;
         std::lock_guard<std::mutex> lock(deviceLock_);
-        openingChosenDevice_ = true;
-        const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
-        openingChosenDevice_ = false;
+        runDeviceOpen(setup, true);
         auto* live = deviceManager_.getCurrentAudioDevice();
         const bool opened = live != nullptr && live->isOpen();
         if (! opened)
         {
-            if (error.isNotEmpty())
-                openError_ = error;
             if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
                 messages->callAsync([this, alive, name]
                 {
