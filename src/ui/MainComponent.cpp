@@ -16,6 +16,7 @@
 #include "engine/AudioSetupMenus.h"
 #include "engine/SessionChannels.h"
 #include "engine/SessionNames.h"
+#include "engine/QuitPolicy.h"
 #include "engine/Shortcuts.h"
 #include "engine/StatusLine.h"
 #include "engine/VersionLabel.h"
@@ -1932,6 +1933,17 @@ void MainComponent::runAfterUnsavedCheck(std::function<void()> action)
 
 void MainComponent::requestApplicationQuit(std::function<void()> quit)
 {
+    // The start screen has no session. Command-Q leaves immediately.
+    // A session with unsaved changes still asks. Recording still blocks.
+    if (! commandQuitPromptsForUnsaved(engine_.hasSession(), engine_.isSessionDirty()))
+    {
+        if (! engine_.hasSession())
+        {
+            if (quit)
+                quit();
+            return;
+        }
+    }
     runAfterUnsavedCheck(std::move(quit));
 }
 
@@ -2967,6 +2979,8 @@ void MainComponent::timerCallback()
         engine_.sampleLiveCpu();
         if (! (engine_.deviceSetupLocked() && engine_.deviceIsOpen() && ! engine_.deviceLost()))
             engine_.pollDeviceStats();
+        // A locked card still has to notice when SoundGrid's channel list grows.
+        engine_.recheckOpenChannels();
         engine_.maintainSession();
     }
     syncCopyProgress();

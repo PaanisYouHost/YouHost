@@ -6,6 +6,7 @@ namespace youhost
 void noteQuitLogPath(const char* path) noexcept;
 void noteQuitMarkDirectory(const char* path) noexcept;
 void armUserQuit() noexcept;
+void installCommandQuitMonitor() noexcept;
 void allowProcessExit() noexcept;
 bool consumeUserQuit() noexcept;
 bool macCurrentEventIsUserQuit() noexcept;

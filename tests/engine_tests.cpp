@@ -1908,6 +1908,59 @@ void testDeviceOpensAllChannels()
     CHECK(speakerOut[0]);
     CHECK(speakerOut[1]);
     CHECK(! speakerOut[2]);
+
+    // SoundGrid can publish one channel, then the other 47, on one Mac only.
+    youhost::ChannelOpenView early;
+    early.reportedInputs = 1;
+    early.reportedOutputs = 1;
+    early.activeInputs = 1;
+    early.activeOutputs = 1;
+    const auto waiting = youhost::planChannelOpen(early, nullptr);
+    CHECK(! waiting.reopen);
+
+    youhost::ChannelOpenView listed = early;
+    listed.reportedInputs = 48;
+    listed.reportedOutputs = 48;
+    listed.inputPrefixComplete = false;
+    listed.outputPrefixComplete = false;
+    const auto grew = youhost::planChannelOpen(listed, nullptr);
+    CHECK(grew.reopen);
+    CHECK(grew.inputsToEnable == 48);
+    CHECK(grew.outputsToEnable == 48);
+    const auto once = youhost::planChannelOpen(listed, &listed);
+    CHECK(! once.reopen);
+
+    // A saved mask with only channel 1 on is replaced by every channel offered.
+    youhost::ChannelOpenView stale;
+    stale.reportedInputs = 48;
+    stale.reportedOutputs = 48;
+    stale.activeInputs = 1;
+    stale.activeOutputs = 1;
+    stale.inputPrefixComplete = false;
+    stale.outputPrefixComplete = false;
+    const auto replaced = youhost::planChannelOpen(stale, nullptr);
+    CHECK(replaced.reopen);
+    CHECK(replaced.inputsToEnable == 48);
+    CHECK(replaced.outputsToEnable == 48);
+
+    youhost::ChannelOpenView denied = stale;
+    denied.inputsAllowed = false;
+    denied.activeOutputs = 48;
+    denied.outputPrefixComplete = true;
+    const auto micDenied = youhost::planChannelOpen(denied, nullptr);
+    CHECK(! micDenied.reopen);
+    CHECK(micDenied.inputsToEnable == 0);
+    CHECK(micDenied.outputsToEnable == 48);
+
+    CHECK(youhost::channelReportGrew(1, 1, 48, 48));
+    CHECK(! youhost::channelReportGrew(-1, -1, 48, 48));
+    CHECK(! youhost::channelReportGrew(48, 48, 48, 48));
+    CHECK(youhost::channelReportGrew(48, 1, 48, 48));
+
+    const auto deviceOpenSrc = readWorkspaceFile("src/engine/AudioEngine.cpp");
+    CHECK(deviceOpenSrc.find("requestEveryChannel") != std::string::npos);
+    CHECK(deviceOpenSrc.find("useDefaultInputChannels = true") == std::string::npos);
+    CHECK(deviceOpenSrc.find("void AudioEngine::recheckOpenChannels()") != std::string::npos);
 }
 
 void testMergePeaks()
@@ -4283,6 +4336,14 @@ void testReleaseChecklist()
     item("Cmd+Q asks before quitting",
          appSrc.find("requestApplicationQuit") != std::string::npos
              && appSrc.find("systemRequestedQuit") != std::string::npos
+             && appSrc.find("installCommandQuitMonitor") != std::string::npos
+             && readWorkspaceFile("src/engine/QuitGuard.mm").find("installCommandQuitMonitor") != std::string::npos
+             && readWorkspaceFile("src/ui/MainComponent.cpp").find("commandQuitPromptsForUnsaved") != std::string::npos
+             && youhost::commandQuitAlwaysReachesApp()
+             && ! youhost::commandQuitPromptsForUnsaved(false, true)
+             && ! youhost::commandQuitPromptsForUnsaved(false, false)
+             && youhost::commandQuitPromptsForUnsaved(true, true)
+             && ! youhost::commandQuitPromptsForUnsaved(true, false)
              && quitAsks);
 
     const auto recBounds = mainUi.find("recButton_.setBounds");

@@ -141,6 +141,10 @@ bool macCurrentEventIsUserQuit() noexcept
 {
     return false;
 }
+
+void installCommandQuitMonitor() noexcept
+{
+}
 #endif
 
 bool shouldRefuseQuitRequest() noexcept

@@ -97,6 +97,7 @@ void YouHostApplication::initialise(const juce::String& commandLine)
     juce::LookAndFeel::setDefaultLookAndFeel(lookAndFeel_.get());
     settings_ = std::make_unique<AppSettings>();
     noteQuitLogPath(hostLogFile(*settings_).getFullPathName().toRawUTF8());
+    installCommandQuitMonitor();
     engine_ = std::make_unique<AudioEngine>(*settings_);
 
     juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,

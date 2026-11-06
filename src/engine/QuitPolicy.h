@@ -17,4 +17,16 @@ inline bool refuseUnsolicitedQuit(bool userArmed, bool userEvent, bool processEx
     return ! quitIsUserInitiated(userArmed, userEvent);
 }
 
+// Command-Q quits from every screen, including the start screen before a session exists.
+inline bool commandQuitAlwaysReachesApp() noexcept
+{
+    return true;
+}
+
+// The Save / Save As prompt is only for a session that has unsaved changes.
+inline bool commandQuitPromptsForUnsaved(bool hasSession, bool dirty) noexcept
+{
+    return hasSession && dirty;
+}
+
 } // namespace youhost

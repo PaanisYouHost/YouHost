@@ -67,14 +67,29 @@ int clampTimingNs(int64_t ns) noexcept
     return static_cast<int>(ns);
 }
 
-// A saved mask is ignored. Missing channel attributes make the device open its default set,
-// which initialise asked for as every channel up to kMaxChannels.
+// A saved mask is ignored. A one-channel mask left by an earlier card, or by
+// SoundGrid before it had finished listing its channels, must not be restored.
 void ignoreSavedChannelMask(juce::XmlElement* saved)
 {
     if (saved == nullptr)
         return;
     saved->removeAttribute("audioDeviceInChans");
     saved->removeAttribute("audioDeviceOutChans");
+}
+
+// useDefaultInputChannels reuses JUCE's remembered count. That count becomes 1
+// after a one-channel open and then every later card, including a 48-channel
+// SoundGrid, opens only channel 1. Ask for the whole rack and let CoreAudio
+// clamp to the channels the device actually has.
+void requestEveryChannel(juce::AudioDeviceManager::AudioDeviceSetup& setup, bool inputs)
+{
+    setup.useDefaultInputChannels = false;
+    setup.useDefaultOutputChannels = false;
+    setup.inputChannels.clear();
+    setup.outputChannels.clear();
+    if (inputs)
+        setup.inputChannels.setRange(0, kMaxChannels, true);
+    setup.outputChannels.setRange(0, kMaxChannels, true);
 }
 
 std::atomic<int> stallDumpFd { -1 };
@@ -702,6 +717,7 @@ void AudioEngine::applyPreferredTiming()
         return;
     setup.sampleRate = preferredRate_;
     setup.bufferSize = preferredBuffer_;
+    requestEveryChannel(setup, microphoneGranted_);
     applyingTiming_ = true;
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     applyingTiming_ = false;
@@ -1718,52 +1734,62 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
     const auto outputNames = device.getOutputChannelNames();
     const auto inputMask = device.getActiveInputChannels();
     const auto outputMask = device.getActiveOutputChannels();
-    const int inputsToOpen = microphoneGranted_ ? channelsToOpen(inputNames.size()) : 0;
-    const int outputsToOpen = channelsToOpen(outputNames.size());
+    ChannelOpenView now;
+    now.reportedInputs = inputNames.size();
+    now.reportedOutputs = outputNames.size();
+    now.activeInputs = inputMask.countNumberOfSetBits();
+    now.activeOutputs = outputMask.countNumberOfSetBits();
+    now.inputsAllowed = microphoneGranted_;
+    const int inputsToOpen = now.inputsAllowed ? channelsToOpen(now.reportedInputs) : 0;
+    const int outputsToOpen = channelsToOpen(now.reportedOutputs);
     bool inputsOpen[kMaxChannels] {};
     bool outputsOpen[kMaxChannels] {};
     for (int index = 0; index < inputsToOpen; ++index)
         inputsOpen[index] = inputMask[index];
     for (int index = 0; index < outputsToOpen; ++index)
         outputsOpen[index] = outputMask[index];
+    now.inputPrefixComplete = ! now.inputsAllowed || deviceMaskIsComplete(inputsOpen, inputsToOpen);
+    now.outputPrefixComplete = deviceMaskIsComplete(outputsOpen, outputsToOpen);
 
-    const bool complete = deviceMaskIsComplete(inputsOpen, inputsToOpen)
-                          && deviceMaskIsComplete(outputsOpen, outputsToOpen);
-    if (lastFullOpenName_ == device.getName()
-        && lastFullOpenInputs_ == inputNames.size()
-        && lastFullOpenOutputs_ == outputNames.size())
-        return;
+    if (device.getName() != lastFullOpenName_)
+        channelAttemptValid_ = false;
 
     // A smaller name list on the card that is already open used to call
     // setAudioDeviceSetup. That stops the callback and then prepare() skips
     // every plugin, so the dry mic goes out. Leave the open stream alone.
     if (lastFullOpenName_ == device.getName()
         && lastFullOpenInputs_ >= 0
-        && (inputNames.size() < lastFullOpenInputs_ || outputNames.size() < lastFullOpenOutputs_))
+        && (now.reportedInputs < lastFullOpenInputs_ || now.reportedOutputs < lastFullOpenOutputs_))
     {
         appendHostLog(settings_, "device " + device.getName()
                                      + " reported inputs " + juce::String(lastFullOpenInputs_)
-                                     + "->" + juce::String(inputNames.size())
+                                     + "->" + juce::String(now.reportedInputs)
                                      + " outputs " + juce::String(lastFullOpenOutputs_)
-                                     + "->" + juce::String(outputNames.size())
+                                     + "->" + juce::String(now.reportedOutputs)
                                      + ", not reopening");
-        lastFullOpenInputs_ = inputNames.size();
-        lastFullOpenOutputs_ = outputNames.size();
+        lastFullOpenInputs_ = now.reportedInputs;
+        lastFullOpenOutputs_ = now.reportedOutputs;
+        channelAttemptValid_ = false;
         return;
     }
 
+    const ChannelOpenView* tried = channelAttemptValid_ ? &channelAttempt_ : nullptr;
+    const auto plan = planChannelOpen(now, tried);
     lastFullOpenName_ = device.getName();
-    lastFullOpenInputs_ = inputNames.size();
-    lastFullOpenOutputs_ = outputNames.size();
+    lastFullOpenInputs_ = now.reportedInputs;
+    lastFullOpenOutputs_ = now.reportedOutputs;
+    if (! plan.reopen)
+        return;
+
+    channelAttempt_ = now;
+    channelAttemptValid_ = true;
     juce::String line;
     line << "device " << device.getName()
-         << " inputs reported " << inputNames.size()
-         << " active " << inputMask.countNumberOfSetBits()
-         << " outputs reported " << outputNames.size()
-         << " active " << outputMask.countNumberOfSetBits();
+         << " inputs reported " << now.reportedInputs
+         << " active " << now.activeInputs
+         << " outputs reported " << now.reportedOutputs
+         << " active " << now.activeOutputs;
     appendHostLog(settings_, line);
-    if (complete)
-        return;
 
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager_.getAudioDeviceSetup(setup);
@@ -1771,16 +1797,34 @@ void AudioEngine::noteChannelMasks(juce::AudioIODevice& device)
     setup.useDefaultOutputChannels = false;
     setup.inputChannels.clear();
     setup.outputChannels.clear();
-    if (inputsToOpen > 0)
-        setup.inputChannels.setRange(0, inputsToOpen, true);
-    if (outputsToOpen > 0)
-        setup.outputChannels.setRange(0, outputsToOpen, true);
+    if (plan.inputsToEnable > 0)
+        setup.inputChannels.setRange(0, plan.inputsToEnable, true);
+    if (plan.outputsToEnable > 0)
+        setup.outputChannels.setRange(0, plan.outputsToEnable, true);
     appendHostLog(settings_, "opening every channel on " + device.getName());
     forcingChannels_ = true;
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     forcingChannels_ = false;
     if (error.isNotEmpty())
         openError_ = error;
+}
+
+void AudioEngine::recheckOpenChannels()
+{
+    if (auto* messages = juce::MessageManager::getInstanceWithoutCreating())
+        if (! messages->isThisTheMessageThread())
+            return;
+    if (! started_ || offlineTemplate_)
+        return;
+
+    std::unique_lock<std::mutex> guard(deviceLock_, std::try_to_lock);
+    if (! guard.owns_lock())
+        return;
+
+    auto* live = deviceManager_.getCurrentAudioDevice();
+    if (live == nullptr || ! live->isOpen())
+        return;
+    noteChannelMasks(*live);
 }
 
 void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
@@ -1794,9 +1838,15 @@ void AudioEngine::applyOpenDevice(juce::AudioIODevice& device, bool remember)
     if (! offlineTemplate_ && device.isOpen())
         hostWasRunning_.store(true, std::memory_order_release);
 
-    // A short saved mask is reopened once here. Later polls skip this unless the open mask changes.
+    // A short saved mask, or a name list that grew after the driver finished
+    // enumerating, is reopened here. The active bitmask can stay at one bit
+    // while the name list goes from 1 to 48, so the mask compare is not enough.
+    const int reportedInputs = device.getInputChannelNames().size();
+    const int reportedOutputs = device.getOutputChannelNames().size();
     const bool unseen = lastFullOpenInputs_ < 0 || device.getName() != lastFullOpenName_;
+    const bool grew = channelReportGrew(lastFullOpenInputs_, lastFullOpenOutputs_, reportedInputs, reportedOutputs);
     if (unseen
+        || grew
         || device.getActiveInputChannels() != lastInputMask_
         || device.getActiveOutputChannels() != lastOutputMask_)
         noteChannelMasks(device);
@@ -2055,7 +2105,10 @@ void AudioEngine::noteHardwareDeviceList()
 
     auto* live = deviceManager_.getCurrentAudioDevice();
     if (live != nullptr && live->isOpen() && deviceIsChosenCard(*live))
+    {
+        recheckOpenChannels();
         return;
+    }
 
     const bool waiting = deviceLostBanner_ || awaitingSavedDevice_ || lossFinalized_
                          || deviceDown_.load(std::memory_order_acquire) || ! deviceOpen_.load(std::memory_order_relaxed);
@@ -2142,8 +2195,7 @@ void AudioEngine::tryReopenWanted()
     auto setup = wantedSetup_;
     setup.outputDeviceName = outputName;
     setup.inputDeviceName = inputName;
-    setup.useDefaultInputChannels = true;
-    setup.useDefaultOutputChannels = true;
+    requestEveryChannel(setup, microphoneGranted_);
     appendHostLog(settings_, juce::String::fromUTF8(deviceChangeLogLine({}, wantedName_.toStdString(), "reopening the chosen card").c_str()));
     const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
     reopenInProgress_ = false;
@@ -2176,10 +2228,7 @@ bool AudioEngine::deviceNameListed(const juce::String& name)
 
 void AudioEngine::rememberSavedSetup(const juce::XmlElement* saved)
 {
-    wantedSetup_.useDefaultInputChannels = true;
-    wantedSetup_.useDefaultOutputChannels = true;
-    wantedSetup_.inputChannels.clear();
-    wantedSetup_.outputChannels.clear();
+    requestEveryChannel(wantedSetup_, microphoneGranted_);
     if (saved == nullptr)
         return;
 
@@ -3245,8 +3294,7 @@ void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
     }
     setup.inputDeviceName = inputName;
     setup.outputDeviceName = outputName;
-    setup.useDefaultInputChannels = true;
-    setup.useDefaultOutputChannels = true;
+    requestEveryChannel(setup, microphoneGranted_);
     if (preferredRate_ > 0.0)
         setup.sampleRate = preferredRate_;
     if (preferredBuffer_ >= 16)
@@ -3256,8 +3304,7 @@ void AudioEngine::openNamedDevice(const juce::String& name, const char* cause)
     chosenOutputName_ = outputName;
     wantedSetup_.inputDeviceName = inputName;
     wantedSetup_.outputDeviceName = outputName;
-    wantedSetup_.useDefaultInputChannels = true;
-    wantedSetup_.useDefaultOutputChannels = true;
+    requestEveryChannel(wantedSetup_, microphoneGranted_);
     wantedName_ = menuName;
     refusedForeignDevice_ = false;
     if (previous != menuName.toStdString())

@@ -27,6 +27,7 @@
 #include "ClockSync.h"
 #include "CpuMeter.h"
 #include "DeviceLoss.h"
+#include "DeviceWatch.h"
 #include "SyncLost.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -71,6 +72,7 @@ public:
     bool isRunning() const noexcept { return started_; }
 
     void pollDeviceStats();
+    void recheckOpenChannels();
     void sampleLiveCpu();
     unsigned deviceMenuRevision() const noexcept { return deviceMenuRevision_; }
     bool deviceSetupLocked() const noexcept { return setupLocked_; }
@@ -549,6 +551,8 @@ private:
     juce::String lastFullOpenName_;
     int lastFullOpenInputs_ = -1;
     int lastFullOpenOutputs_ = -1;
+    bool channelAttemptValid_ = false;
+    ChannelOpenView channelAttempt_ {};
     bool quitPrepared_ = false;
     bool crashChoicePending_ = false;
     std::uint32_t downSinceMs_ = 0;
